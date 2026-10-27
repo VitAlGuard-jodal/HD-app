@@ -1,0 +1,16 @@
+{
+  "name": "hd-app-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "node --test test/unit test/http",
+    "test:unit": "node --test test/unit"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

@@ -1,0 +1,17 @@
+# 서버
+server/data/*
+!server/data/.gitkeep
+server/*.log
+node_modules/
+# 안드로이드
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
+android/.kotlin/
+# 공통
+.DS_Store
+*.log
