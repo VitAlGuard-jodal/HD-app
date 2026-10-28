@@ -284,6 +284,27 @@ test("로그아웃은 해당 토큰의 기존 SSE를 end로 끝내고 다른 기
   assert.deepEqual(await survivor.next("signal"), { from: "alice", kind: signal.kind, payload: signal.payload });
 });
 
+test("비ASCII 방 코드는 대문자로 변환하면 기존 방과 같아도 404를 반환한다", { timeout: 15_000 }, async (t) => {
+  const { db, api, signup } = await fixture(t);
+  const alice = await signup("alice", "앨리스");
+  createRoom(db, { code: "STRM23", name: "같이 출발", createdBy: findUserByHandle(db, "alice")!.id });
+  assert.equal((await api("GET", "/v1/rooms/STRM23", alice)).status, 200);
+
+  const result = await api("GET", "/v1/rooms/%C5%BFTRM23", alice);
+  assertError(result, 404);
+  assert.deepEqual(result.body, { error: { code: "ROOM_NOT_FOUND", message: "방을 찾을 수 없습니다." } });
+});
+
+test("소문자 ASCII 방 코드는 기존 대문자 방을 200으로 조회한다", { timeout: 15_000 }, async (t) => {
+  const { db, api, signup } = await fixture(t);
+  const alice = await signup("alice", "앨리스");
+  const room = createRoom(db, { code: "STRM23", name: "같이 출발", createdBy: findUserByHandle(db, "alice")!.id })!;
+
+  const result = await api("GET", "/v1/rooms/strm23", alice);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.room.code, room.code);
+});
+
 test("모든 방 경로는 소문자와 혼합 대소문자를 같은 방으로 정규화한다", { timeout: 15_000 }, async (t) => {
   const { db, api, signup, events, hub } = await fixture(t);
   const alice = await signup("alice", "앨리스");

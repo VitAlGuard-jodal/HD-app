@@ -251,7 +251,11 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
 
     const roomMatch = /^\/v1\/rooms\/([^/]+)(?:\/(join|leave|events|signal))?$/.exec(path);
     if (roomMatch) {
-      const code = pathValue(roomMatch[1]).toUpperCase();
+      const rawCode = pathValue(roomMatch[1]);
+      if (!/^[A-Za-z0-9]+$/.test(rawCode)) {
+        throw new HttpError(404, "ROOM_NOT_FOUND", "방을 찾을 수 없습니다.");
+      }
+      const code = rawCode.toUpperCase();
       const action = roomMatch[2];
       const room = findRoomByCode(db, code);
       if (!room) throw new HttpError(404, "ROOM_NOT_FOUND", "방을 찾을 수 없습니다.");
