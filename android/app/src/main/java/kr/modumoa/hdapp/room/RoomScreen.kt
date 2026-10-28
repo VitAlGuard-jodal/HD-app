@@ -34,6 +34,7 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
     val call by services.callState.collectAsStateWithLifecycle()
     val permissions = rememberAudioPermissions()
     val action = rememberActionState()
+    val inCall = call.roomCode == code && (call.isStarting || call.isActive)
     LaunchedEffect(code) {
         if (services.rooms.state.value.code == code) services.rooms.open(code)
     }
@@ -49,20 +50,28 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
                 MicStatus(mic)
                 AudioPermissionControls(permissions)
                 TextButton(onClick = onMic) { Text("마이크 선택") }
-                Button(enabled = permissions.microphone && !action.busy && !room.isLeaving && !call.isStarting && !call.isActive && room.code == code,
+                Button(enabled = !action.busy && !room.isLeaving && !call.isStopping &&
+                    (inCall || (permissions.microphone && !call.isStarting && !call.isActive && room.code == code)),
                     onClick = {
                         action.run {
-                            val handle = services.sessionStore.handle ?: error("다시 로그인해 주세요.")
-                            CallForegroundService.join(context, code, handle)
+                            if (inCall) {
+                                CallForegroundService.stop(context)
+                            } else {
+                                val handle = services.sessionStore.handle ?: error("다시 로그인해 주세요.")
+                                CallForegroundService.join(context, code, handle)
+                            }
                         }
-                    }) { Text(if (call.isStarting) "마이크 시작 중…" else if (call.isActive) "통화 참여 중" else "통화 참여") }
+                    }) {
+                    Text(if (call.roomCode == code && call.isStopping) "통화 종료 중…" else if (inCall) "통화 끊기" else "통화 참여")
+                }
+                if (call.roomCode == code && call.isStarting) Text("마이크 시작 중…")
                 OutlinedButton(enabled = !action.busy && !room.isLeaving, onClick = {
                     action.run {
                         CallForegroundService.stop(context)
                         services.rooms.leave()
                         onLeft()
                     }
-                }) { Text(if (action.busy) "처리 중…" else "나가기") }
+                }) { Text(if (room.isLeaving) "방 나가는 중…" else "방 나가기") }
                 TextButton(enabled = !action.busy && !room.isLeaving && room.code != null, onClick = { services.rooms.open(code, force = true) }) {
                     Text("연결 다시 시도")
                 }

@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
 import { createApp } from "./app.ts";
 import { openDb } from "./db.ts";
 import { RoomEventHub } from "./rooms.ts";
@@ -8,7 +9,7 @@ if (!/^\d+$/.test(portText) || Number(portText) > 65535) {
   throw new Error("PORT는 0~65535 사이의 정수여야 합니다.");
 }
 
-const db = openDb(process.env.HDAPP_DB ?? "data/hdapp.sqlite");
+const db = openDb(process.env.HDAPP_DB ?? fileURLToPath(new URL("../data/hdapp.sqlite", import.meta.url)));
 const hub = new RoomEventHub();
 const server = createServer(createApp({ db, hub }));
 let stopping = false;
@@ -36,10 +37,10 @@ function shutdown(): void {
 
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
-server.on("error", () => {
+server.on("error", (error: Error & { code?: string }) => {
   hub.close();
   closeDb();
-  process.stderr.write("서버를 시작할 수 없습니다. 포트와 실행 환경을 확인해 주세요.\n");
+  process.stderr.write(`서버를 시작할 수 없습니다. code=${error.code ?? "UNKNOWN"} port=${portText}\n`);
   process.exitCode = 1;
 });
 server.listen(Number(portText));

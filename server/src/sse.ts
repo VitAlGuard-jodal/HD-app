@@ -11,7 +11,11 @@ export function formatEvent(name: string, data: unknown): string {
   return `event: ${name}\ndata: ${json}\n\n`;
 }
 
-export function openEventStream(response: ServerResponse, onClose: () => void = () => {}) {
+export function openEventStream(
+  response: ServerResponse,
+  onClose: () => void = () => {},
+  isAuthorized: () => boolean = () => true,
+) {
   response.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache",
@@ -20,7 +24,18 @@ export function openEventStream(response: ServerResponse, onClose: () => void = 
   });
   response.flushHeaders();
   let closed = false;
-  const pingTimer = setInterval(() => write(": ping\n\n"), PING_INTERVAL_MS);
+  const pingTimer = setInterval(() => {
+    try {
+      if (!isAuthorized()) {
+        close();
+        return;
+      }
+      write(": ping\n\n");
+    } catch {
+      // 인증 상태를 확인할 수 없는 연결도 닫아 무효한 구독을 유지하지 않는다.
+      close();
+    }
+  }, PING_INTERVAL_MS);
   pingTimer.unref?.();
 
   function cleanup(): void {

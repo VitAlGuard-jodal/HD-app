@@ -128,7 +128,7 @@ private fun HdNavigation(
         NavHost(navController = nav, startDestination = "rooms", modifier = Modifier.weight(1f)) {
             composable("rooms") { RoomListScreen(services, openRoom) }
             composable("contacts") { ContactsScreen(services, openRoom) }
-            composable("mic") { MicScreen(services.micRouter) }
+            composable("mic") { MicScreen(services) }
             composable("room/{code}") { entry ->
                 val code = entry.arguments?.getString("code") ?: return@composable
                 RoomScreen(code, services, { nav.popBackStack("rooms", false) }, {

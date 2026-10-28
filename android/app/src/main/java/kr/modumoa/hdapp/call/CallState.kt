@@ -5,5 +5,6 @@ data class CallState(
     val selfHandle: String? = null,
     val isStarting: Boolean = false,
     val isActive: Boolean = false,
+    val isStopping: Boolean = false,
     val error: String? = null,
 )

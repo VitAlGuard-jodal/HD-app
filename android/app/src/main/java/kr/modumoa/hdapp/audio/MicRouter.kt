@@ -12,7 +12,6 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -44,18 +43,22 @@ data class MicState(
     val manualId: Int? = null,
     val level: Float = 0f,
     val rms: Int = 0,
+    val dbfs: Double = Double.NEGATIVE_INFINITY,
     val isRecording: Boolean = false,
+    val isPreviewing: Boolean = false,
     val error: String? = null,
 )
 
 class MicRouter(context: Context) {
     private val appContext = context.applicationContext
     private val manager = checkNotNull(appContext.getSystemService(AudioManager::class.java))
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val routeLock = Mutex()
     private val mutableState = MutableStateFlow(MicState(detectMode()))
     val state: StateFlow<MicState> = mutableState.asStateFlow()
-    private var enabled = false
+    // 캡처 소유권과 오디오 객체는 모두 routeLock 안에서만 변경한다.
+    private enum class CaptureMode { NONE, PREVIEW, CALL }
+    private var captureMode = CaptureMode.NONE
     private var audioConfigured = false
     private var focusRequest: AudioFocusRequest? = null
     private var recorder: AudioRecord? = null
@@ -79,20 +82,22 @@ class MicRouter(context: Context) {
     }
 
     fun listInputs(): List<MicDevice> = manager.getDevices(AudioManager.GET_DEVICES_INPUTS).map {
-        MicDevice(it.id, it.type, it.productName.toString().ifBlank { "입력 장치 ${it.id}" })
+        MicDevice(it.id, it.type, MicDeviceNames.format(it.productName.toString(), it.address, it.id))
     }
 
-    // 선택은 UI에서도 가능하지만 녹음 시작·종료는 통화 서비스가 소유한다.
+    // 장치 선택은 통화와 화면에서 실행하는 마이크 시험에 공통으로 적용한다.
     fun choose(manualId: Int?): MicDevice? {
         mutableState.update { it.copy(manualId = manualId, error = null) }
         devicesChanged()
         return state.value.selected
     }
 
-    suspend fun apply(chosen: MicDevice) = withContext(Dispatchers.Main.immediate) {
+    suspend fun apply(chosen: MicDevice) = withContext(Dispatchers.IO) {
         routeLock.withLock {
-            enabled = true
             try {
+                // 시험 입력을 닫은 뒤 통화 모드·포커스를 적용하여 같은 캡처 경로로 전환한다.
+                if (captureMode == CaptureMode.PREVIEW) stopCaptureLocked()
+                captureMode = CaptureMode.CALL
                 applyLocked(chosen)
             } catch (error: Exception) {
                 releaseLocked()
@@ -103,28 +108,52 @@ class MicRouter(context: Context) {
         }
     }
 
-    suspend fun release() = withContext(NonCancellable + Dispatchers.Main.immediate) {
+    suspend fun release() = withContext(NonCancellable + Dispatchers.IO) {
         routeLock.withLock { releaseLocked() }
+    }
+
+    suspend fun startPreview() = withContext(Dispatchers.IO) {
+        routeLock.withLock {
+            if (captureMode == CaptureMode.CALL) return@withLock
+            try {
+                captureMode = CaptureMode.PREVIEW
+                refreshSelection()
+                val chosen = state.value.selected ?: error("사용 가능한 마이크가 없습니다.")
+                applyLocked(chosen)
+            } catch (error: Exception) {
+                releaseLocked()
+                if (error is CancellationException) throw error
+                mutableState.update { it.copy(error = error.message ?: "마이크 시험을 시작하지 못했습니다.") }
+                throw error
+            }
+        }
+    }
+
+    suspend fun stopPreview() = withContext(NonCancellable + Dispatchers.IO) {
+        routeLock.withLock {
+            // 화면 종료가 늦게 처리되더라도 이미 시작한 통화는 중지하지 않는다.
+            if (captureMode == CaptureMode.PREVIEW) releaseLocked()
+        }
     }
 
     private fun refreshSelection() {
         val inputs = listInputs()
         val mode = detectMode()
         val ranked = MicRanker.rank(mode, inputs)
-        val manual = ranked.firstOrNull { it.id == state.value.manualId }
-        val chosen = manual ?: ranked.firstOrNull()
-        mutableState.update { it.copy(mode = mode, devices = inputs, selected = chosen, manualId = manual?.id) }
+        mutableState.update {
+            val manual = ranked.firstOrNull { device -> device.id == it.manualId }
+            it.copy(mode = mode, devices = inputs, selected = manual ?: ranked.firstOrNull(), manualId = manual?.id)
+        }
         Log.i(TAG, "mode=${if (mode == MicMode.CAR) "car" else "phone"}")
         Log.i(TAG, "inputs=[${inputs.joinToString(",") { "${it.type}:${it.name}" }}]")
-        chosen?.let { Log.i(TAG, "chosen=${it.type}:${it.name}") }
+        state.value.selected?.let { Log.i(TAG, "chosen=${it.type}:${it.name}") }
     }
 
     private fun devicesChanged() {
         refreshSelection()
-        if (!enabled) return
         scope.launch {
             routeLock.withLock {
-                if (!enabled) return@withLock
+                if (captureMode == CaptureMode.NONE) return@withLock
                 try {
                     val chosen = state.value.selected ?: error("사용 가능한 마이크가 없습니다.")
                     applyLocked(chosen)
@@ -138,42 +167,41 @@ class MicRouter(context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private suspend fun applyLocked(chosen: MicDevice) {
-        if (recorder != null && recordingDeviceId == chosen.id && state.value.isRecording) return
+    private suspend fun applyLocked(chosen: MicDevice) = withContext(Dispatchers.IO) {
+        if (recorder != null && recordingDeviceId == chosen.id && state.value.isRecording) return@withContext
         check(ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED) { "마이크 권한을 허용해 주세요." }
         val available = manager.getDevices(AudioManager.GET_DEVICES_INPUTS)
         val input = available.firstOrNull { it.id == chosen.id } ?: error("선택한 마이크가 연결되어 있지 않습니다.")
         check(MicRanker.rank(detectMode(), listOf(chosen)).isNotEmpty()) { "통화 입력으로 사용할 수 없는 장치입니다." }
         stopCaptureLocked()
-        audioConfigured = true
-        manager.mode = AudioManager.MODE_IN_COMMUNICATION
-        if (focusRequest == null) {
-            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-                .setAudioAttributes(AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                .setOnAudioFocusChangeListener({ change ->
-                    if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-                        scope.launch {
-                            if (enabled) {
-                                release()
-                                mutableState.update { it.copy(error = "다른 오디오가 우선되어 마이크를 중지했습니다. 다시 참여해 주세요.") }
+        if (captureMode == CaptureMode.CALL) {
+            audioConfigured = true
+            manager.mode = AudioManager.MODE_IN_COMMUNICATION
+            if (focusRequest == null) {
+                lateinit var request: AudioFocusRequest
+                request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                    .setAudioAttributes(AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                    .setOnAudioFocusChangeListener({ change ->
+                        if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+                            scope.launch {
+                                routeLock.withLock {
+                                    // 이전 통화에서 늦게 도착한 포커스 이벤트는 새 캡처에 적용하지 않는다.
+                                    if (captureMode == CaptureMode.CALL && focusRequest === request) {
+                                        releaseLocked()
+                                        mutableState.update { it.copy(error = "다른 오디오가 우선되어 마이크를 중지했습니다. 다시 참여해 주세요.") }
+                                    }
+                                }
                             }
                         }
-                    }
-                }, Handler(Looper.getMainLooper()))
-                .build()
-            focusRequest = request
-            check(manager.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                "통화 오디오 포커스를 얻지 못했습니다. 다시 참여해 주세요."
-            }
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // 입력 ID와 일치하는 통신 장치가 없으면 AudioRecord의 입력 선호를 사용한다.
-            manager.clearCommunicationDevice()
-            manager.availableCommunicationDevices.firstOrNull { it.id == chosen.id }?.let {
-                check(manager.setCommunicationDevice(it)) { "통신 장치 경로를 적용하지 못했습니다." }
+                    }, Handler(Looper.getMainLooper()))
+                    .build()
+                focusRequest = request
+                check(manager.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                    "통화 오디오 포커스를 얻지 못했습니다. 다시 참여해 주세요."
+                }
             }
         }
         val minimum = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -191,7 +219,10 @@ class MicRouter(context: Context) {
         check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "마이크 녹음을 시작하지 못했습니다." }
         recordingDeviceId = chosen.id
         // 전환을 기다리는 사이 변경된 수동 선택은 덮어쓰지 않는다.
-        mutableState.update { it.copy(isRecording = true, error = null, level = 0f, rms = 0) }
+        mutableState.update {
+            it.copy(isRecording = true, isPreviewing = captureMode == CaptureMode.PREVIEW,
+                error = null, level = 0f, rms = 0, dbfs = Double.NEGATIVE_INFINITY)
+        }
         Log.i(TAG, "chosen=${chosen.type}:${chosen.name}")
         meterJob = scope.launch(Dispatchers.IO) {
             val samples = ShortArray(SAMPLES_PER_FRAME)
@@ -205,9 +236,10 @@ class MicRouter(context: Context) {
                         filled += count
                     }
                     if (!currentCoroutineContext().isActive) break
-                    val rms = sqrt(samples.sumOf { it.toDouble() * it.toDouble() } / samples.size)
-                    mutableState.update { it.copy(rms = rms.roundToInt(), level = (rms / 32768.0).toFloat().coerceIn(0f, 1f)) }
-                    Log.d(TAG, "rms=${rms.roundToInt()}")
+                    val rms = sqrt(samples.sumOf { it.toDouble() * it.toDouble() } / samples.size).roundToInt()
+                    val dbfs = rmsToDbfs(rms)
+                    mutableState.update { it.copy(rms = rms, dbfs = dbfs, level = dbfsToLevel(dbfs)) }
+                    Log.d(TAG, "rms=$rms")
                     val remaining = 100L - (System.nanoTime() - started) / 1_000_000
                     if (remaining > 0) delay(remaining)
                 }
@@ -215,16 +247,18 @@ class MicRouter(context: Context) {
                 throw cancelled
             } catch (error: Exception) {
                 if (currentCoroutineContext().isActive) scope.launch {
-                    if (recorder === record) {
-                        release()
-                        mutableState.update { it.copy(error = error.message ?: "마이크 입력이 중단되었습니다.") }
+                    routeLock.withLock {
+                        if (recorder === record) {
+                            releaseLocked()
+                            mutableState.update { it.copy(error = error.message ?: "마이크 입력이 중단되었습니다.") }
+                        }
                     }
                 }
             }
         }
     }
 
-    private suspend fun stopCaptureLocked() = withContext(NonCancellable) {
+    private suspend fun stopCaptureLocked() = withContext(NonCancellable + Dispatchers.IO) {
         val record = recorder
         recorder = null
         meterJob?.cancel()
@@ -232,16 +266,15 @@ class MicRouter(context: Context) {
         if (record != null) runCatching { record.stop() }
         meterJob?.join()
         meterJob = null
-        record?.release()
+        if (record != null) runCatching { record.release() }
         recordingDeviceId = null
-        mutableState.update { it.copy(isRecording = false, rms = 0, level = 0f) }
+        mutableState.update { it.copy(isRecording = false, isPreviewing = false, rms = 0, level = 0f, dbfs = Double.NEGATIVE_INFINITY) }
     }
 
-    private suspend fun releaseLocked() = withContext(NonCancellable) {
-        enabled = false
+    private suspend fun releaseLocked() = withContext(NonCancellable + Dispatchers.IO) {
+        captureMode = CaptureMode.NONE
         stopCaptureLocked()
         if (audioConfigured) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) runCatching { manager.clearCommunicationDevice() }
             runCatching { manager.mode = AudioManager.MODE_NORMAL }
             focusRequest?.let { runCatching { manager.abandonAudioFocusRequest(it) } }
         }

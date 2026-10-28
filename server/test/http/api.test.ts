@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer, request as httpRequest } from "node:http";
+import type { IncomingMessage } from "node:http";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { createApp } from "../../src/app.ts";
 import { issueToken } from "../../src/auth.ts";
 import { openDb } from "../../src/db.ts";
 import { RoomEventHub } from "../../src/rooms.ts";
-import { findUserByHandle } from "../../src/store.ts";
+import { createRoom, findUserByHandle } from "../../src/store.ts";
 
 // 이 파일은 루프백 소켓을 열 수 있는 환경에서만 실행한다.
 async function fixture(t: TestContext) {
@@ -222,6 +223,126 @@ test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가�
   assert.equal((await api("GET", "/v1/me", signupToken)).status, 200);
 });
 
+test("로그아웃은 해당 토큰의 기존 SSE를 end로 끝내고 다른 기기와 방 참여는 유지한다", { timeout: 15_000 }, async (t) => {
+  const { base, api, signup, events, hub } = await fixture(t);
+  const token = await signup("alice", "앨리스");
+  const login = await api("POST", "/v1/auth/login", undefined, { handle: "alice", password: "password123!" });
+  assert.equal(login.status, 200);
+  const otherToken = login.body.token as string;
+  assert.notEqual(token, otherToken);
+  const firstRoom = await api("POST", "/v1/rooms", token, {});
+  const secondRoom = await api("POST", "/v1/rooms", token, {});
+  assert.equal(firstRoom.status, 201);
+  assert.equal(secondRoom.status, 201);
+  const code = firstRoom.body.room.code as string;
+  const otherCode = secondRoom.body.room.code as string;
+  const survivor = await events(code, otherToken);
+  assert.equal((await survivor.next("hello")).self.handle, "alice");
+
+  const responses: IncomingMessage[] = [];
+  for (const roomCode of [code, code, otherCode]) {
+    const response = await new Promise<IncomingMessage>((resolve, reject) => {
+      const request = httpRequest(`${base}/v1/rooms/${roomCode}/events`, {
+        headers: { authorization: `Bearer ${token}` },
+      }, resolve);
+      request.once("error", reject);
+      request.setTimeout(5000, () => request.destroy(new Error("SSE 종료 대기 시간 초과")));
+      t.after(() => request.destroy());
+      request.end();
+    });
+    assert.equal(response.statusCode, 200);
+    assert.match(response.headers["content-type"] ?? "", /^text\/event-stream/);
+    assert.equal(response.readableEnded, false);
+    responses.push(response);
+  }
+  assert.equal(hub.subscriberCount(code), 3);
+  assert.equal(hub.subscriberCount(otherCode), 1);
+  // 클라이언트에서 중단하지 않고 서버가 응답 스트림을 끝내는지 확인한다.
+  const ended = responses.map((response) => {
+    const result = once(response, "end", { signal: AbortSignal.timeout(5000) });
+    response.resume();
+    return result;
+  });
+  const [logout] = await Promise.all([
+    api("POST", "/v1/auth/logout", token),
+    Promise.all(ended),
+  ]);
+  assert.equal(logout.status, 204);
+  for (const response of responses) assert.equal(response.readableEnded, true);
+  assert.equal(hub.subscriberCount(code), 1);
+  assert.equal(hub.subscriberCount(otherCode), 0);
+  assertError(await api("GET", "/v1/me", token), 401);
+  assert.equal((await api("GET", "/v1/me", otherToken)).status, 200);
+  for (const roomCode of [code, otherCode]) {
+    const details = await api("GET", `/v1/rooms/${roomCode}`, otherToken);
+    assert.deepEqual(details.body.members.map((member: { handle: string }) => member.handle), ["alice"]);
+  }
+  const signal = { to: "alice", kind: "custom", payload: "다른 기기 연결 유지" };
+  const sent = await api("POST", `/v1/rooms/${code}/signal`, otherToken, signal);
+  assert.equal(sent.status, 202);
+  assert.deepEqual(sent.body, { delivered: true });
+  assert.deepEqual(await survivor.next("signal"), { from: "alice", kind: signal.kind, payload: signal.payload });
+});
+
+test("모든 방 경로는 소문자와 혼합 대소문자를 같은 방으로 정규화한다", { timeout: 15_000 }, async (t) => {
+  const { db, api, signup, events, hub } = await fixture(t);
+  const alice = await signup("alice", "앨리스");
+  const bob = await signup("bob", "보비");
+  // 숫자만 생성되는 우연에도 검증이 빠지지 않도록 영문이 든 코드를 고정한다.
+  const room = createRoom(db, { code: "ABC234", name: "같이 출발", createdBy: findUserByHandle(db, "alice")!.id })!;
+  const details = await api("GET", "/v1/rooms/aBc234", alice);
+  assert.equal(details.status, 200);
+  assert.equal(details.body.room.code, room.code);
+  const aliceEvents = await events("abc234", alice);
+  assert.equal((await aliceEvents.next("hello")).self.handle, "alice");
+
+  const joined = await api("POST", "/v1/rooms/abc234/join", bob);
+  assert.equal(joined.status, 200);
+  assert.equal(joined.body.room.code, "ABC234");
+  assert.deepEqual(await aliceEvents.next("member-joined"), { handle: "bob" });
+  const bobEvents = await events("aBc234", bob);
+  assert.equal((await bobEvents.next("hello")).members.length, 2);
+  assert.equal(hub.subscriberCount("ABC234"), 2);
+  assert.equal(hub.subscriberCount("abc234"), 0);
+
+  const sent = await api("POST", "/v1/rooms/abc234/signal", alice, { to: "bob", kind: "custom", payload: null });
+  assert.equal(sent.status, 202);
+  assert.deepEqual(sent.body, { delivered: true });
+  assert.deepEqual(await bobEvents.next("signal"), { from: "alice", kind: "custom", payload: null });
+  assert.equal((await api("POST", "/v1/rooms/aBc234/leave", bob)).status, 204);
+  assert.deepEqual(await aliceEvents.next("member-left"), { handle: "bob" });
+  assert.deepEqual(await bobEvents.next("member-left"), { handle: "bob" });
+  assert.equal(hub.subscriberCount("ABC234"), 1);
+  assert.deepEqual((await api("GET", "/v1/rooms/abc234", alice)).body.members.map((member: { handle: string }) => member.handle), ["alice"]);
+});
+
+test("PATCH /v1/me는 표시 이름만 변경하고 회원가입과 같은 이름 규칙을 적용한다", { timeout: 15_000 }, async (t) => {
+  const { api, signup } = await fixture(t);
+  const alice = await signup("alice", "앨리스");
+  const bob = await signup("bob", "보비");
+  assertError(await api("PATCH", "/v1/me", undefined, { displayName: "새 이름" }), 401);
+  const updated = await api("PATCH", "/v1/me", alice, {
+    displayName: "  새 이름  ", handle: "changed", password: "changed-password",
+  });
+  assert.equal(updated.status, 200);
+  assert.deepEqual(updated.body, { user: { handle: "alice", displayName: "새 이름" } });
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body, updated.body);
+  assert.deepEqual((await api("GET", "/v1/users/alice", bob)).body, updated.body);
+  assert.deepEqual((await api("GET", "/v1/me", bob)).body, { user: { handle: "bob", displayName: "보비" } });
+  assert.equal((await api("POST", "/v1/auth/login", undefined, { handle: "alice", password: "password123!" })).status, 200);
+
+  for (const body of [{}, { displayName: "가" }, { displayName: "  가  " }, { displayName: "" },
+    { displayName: "가".repeat(21) }, { displayName: null }, { displayName: 123 }]) {
+    assertError(await api("PATCH", "/v1/me", alice, body), 400);
+  }
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body, updated.body);
+  for (const displayName of ["새봄", "🚗".repeat(20)]) {
+    const boundary = await api("PATCH", "/v1/me", alice, { displayName });
+    assert.equal(boundary.status, 200);
+    assert.deepEqual(boundary.body, { user: { handle: "alice", displayName } });
+  }
+});
+
 test("입력 오류·충돌·미존재·폐기 및 만료 토큰을 정해진 JSON 오류로 돌려준다", { timeout: 15_000 }, async (t) => {
   const { api, signup, db } = await fixture(t);
   assertError(await api("GET", "/v1/me"), 401);
@@ -238,6 +359,7 @@ test("입력 오류·충돌·미존재·폐기 및 만료 토큰을 정해진 JS
   assertError(await api("POST", "/v1/auth/login", undefined, { handle: "missing", password: "password123!" }), 401);
   assertError(await api("POST", "/v1/auth/login", undefined, {}), 400);
   assertError(await api("GET", "/v1/users/missing", alice), 404);
+  assertError(await api("GET", "/v1/users/Alice", alice), 400);
   assertError(await api("GET", "/v1/users/%ZZ", alice), 400);
   assertError(await api("POST", "/v1/contacts", alice, { handle: "missing" }), 404);
   assertError(await api("POST", "/v1/contacts", alice, { handle: "alice" }), 409);

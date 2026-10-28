@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, scryptSync } from "node:crypto";
 import { test } from "node:test";
-import { hashPassword, issueToken, lookupToken, revokeToken, TOKEN_TTL_MS, verifyPassword } from "../../src/auth.ts";
+import { hashPassword, issueToken, lookupToken, revokeToken, tokenHash, TOKEN_TTL_MS, verifyPassword } from "../../src/auth.ts";
 import { openDb } from "../../src/db.ts";
 import { createUser, findTokenUser } from "../../src/store.ts";
 
@@ -47,6 +47,7 @@ test("토큰은 32바이트 base64url이며 원문 대신 SHA-256으로 조회�
   assert.equal(Buffer.from(token, "base64url").length, 32);
   assert.equal(lookupToken(db, token, now)?.handle, "alice");
   const digest = createHash("sha256").update(token).digest("hex");
+  assert.equal(tokenHash(token), digest);
   assert.equal(findTokenUser(db, digest, now.toISOString())?.id, user.id);
   assert.equal(findTokenUser(db, token, now.toISOString()), undefined);
 });

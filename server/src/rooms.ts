@@ -10,6 +10,7 @@ export function generateRoomCode(): string {
 type SendEvent = (name: string, data: unknown) => boolean | void;
 interface Subscriber {
   handle: string;
+  tokenHash: string;
   send: SendEvent;
   close: () => void;
 }
@@ -17,13 +18,13 @@ interface Subscriber {
 export class RoomEventHub extends EventEmitter {
   #subscribers = new Map<string, Set<Subscriber>>();
 
-  subscribe(code: string, handle: string, send: SendEvent, close: () => void = () => {}): () => void {
+  subscribe(code: string, handle: string, tokenHash: string, send: SendEvent, close: () => void = () => {}): () => void {
     let subscribers = this.#subscribers.get(code);
     if (!subscribers) {
       subscribers = new Set();
       this.#subscribers.set(code, subscribers);
     }
-    const subscriber = { handle, send, close };
+    const subscriber = { handle, tokenHash, send, close };
     subscribers.add(subscriber);
     this.emit("subscribed", { code, handle });
     return () => this.#remove(code, subscriber);
@@ -44,6 +45,15 @@ export class RoomEventHub extends EventEmitter {
   disconnectUser(code: string, handle: string): void {
     for (const subscriber of [...(this.#subscribers.get(code) ?? [])]) {
       if (subscriber.handle === handle) this.#disconnect(code, subscriber);
+    }
+  }
+
+  disconnectToken(tokenHash: string): void {
+    // 로그아웃한 토큰의 모든 방 연결을 닫되 다른 기기의 토큰은 유지한다.
+    for (const [code, subscribers] of [...this.#subscribers]) {
+      for (const subscriber of [...subscribers]) {
+        if (subscriber.tokenHash === tokenHash) this.#disconnect(code, subscriber);
+      }
     }
   }
 

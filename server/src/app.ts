@@ -1,12 +1,13 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import type { DatabaseSync } from "node:sqlite";
-import { hashPassword, issueToken, lookupToken, revokeToken, verifyPassword } from "./auth.ts";
+import { hashPassword, issueToken, lookupToken, revokeToken, tokenHash, verifyPassword } from "./auth.ts";
 import { isValidDisplayName, isValidHandle, isValidPassword } from "./handles.ts";
 import { generateRoomCode, RoomEventHub } from "./rooms.ts";
 import { openEventStream } from "./sse.ts";
 import {
   addContact, createRoom, createUser, deleteContact, findRoomByCode, findUserByHandle,
   isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicUser,
+  updateDisplayName,
 } from "./store.ts";
 import type { StoredRoom, StoredUser } from "./store.ts";
 
@@ -166,12 +167,22 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
     if (method === "POST" && path === "/v1/auth/logout") {
       await readJson(request, true);
       revokeToken(db, token);
+      hub.disconnectToken(tokenHash(token));
       json(response, 204);
       return;
     }
 
     if (method === "GET" && path === "/v1/me") {
       json(response, 200, { user: publicUser(user) });
+      return;
+    }
+
+    if (method === "PATCH" && path === "/v1/me") {
+      const body = await readJson(request);
+      if (!isValidDisplayName(body.displayName)) invalid("표시 이름은 앞뒤 공백을 제외하고 2~20자여야 합니다.");
+      const updated = updateDisplayName(db, user.id, body.displayName);
+      if (!updated) throw new HttpError(404, "USER_NOT_FOUND", "사용자를 찾을 수 없습니다.");
+      json(response, 200, { user: publicUser(updated) });
       return;
     }
 
@@ -240,7 +251,7 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
 
     const roomMatch = /^\/v1\/rooms\/([^/]+)(?:\/(join|leave|events|signal))?$/.exec(path);
     if (roomMatch) {
-      const code = pathValue(roomMatch[1]);
+      const code = pathValue(roomMatch[1]).toUpperCase();
       const action = roomMatch[2];
       const room = findRoomByCode(db, code);
       if (!room) throw new HttpError(404, "ROOM_NOT_FOUND", "방을 찾을 수 없습니다.");
@@ -265,8 +276,8 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
       if (method === "GET" && action === "events") {
         requireMember(db, room, user);
         let unsubscribe = () => {};
-        const stream = openEventStream(response, () => unsubscribe());
-        unsubscribe = hub.subscribe(code, user.handle, stream.send, stream.close);
+        const stream = openEventStream(response, () => unsubscribe(), () => Boolean(lookupToken(db, token)));
+        unsubscribe = hub.subscribe(code, user.handle, tokenHash(token), stream.send, stream.close);
         if (!stream.send("hello", { self: publicUser(user), members: listRoomMembers(db, room.id) })) {
           unsubscribe();
         }

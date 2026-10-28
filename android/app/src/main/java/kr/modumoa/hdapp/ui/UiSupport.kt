@@ -17,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import java.io.IOException
+import kotlin.math.roundToInt
 import kr.modumoa.hdapp.audio.MicState
 import kr.modumoa.hdapp.net.ApiException
 import kotlinx.coroutines.CancellationException
@@ -69,8 +70,10 @@ fun ErrorText(message: String?) {
 
 @Composable
 fun MicStatus(state: MicState) {
-    Text("마이크: ${state.selected?.name ?: "사용 가능한 장치 없음"}")
-    Text(if (state.isRecording) "입력 측정 중 · RMS ${state.rms}" else "통화 참여 후 입력 레벨을 측정합니다.")
+    val device = state.selected?.let { "${it.type}:${it.name}" } ?: "사용 가능한 장치 없음"
+    val dbfs = if (state.dbfs.isFinite()) "${state.dbfs.roundToInt()} dBFS" else "−∞ dBFS"
+    Text("마이크: $device")
+    Text(if (state.isRecording) "입력 측정 중 · $dbfs" else "마이크 시험을 켜거나 통화에 참여하면 입력 레벨을 측정합니다.")
     LinearProgressIndicator(progress = { state.level }, modifier = Modifier.fillMaxWidth())
     ErrorText(state.error)
 }

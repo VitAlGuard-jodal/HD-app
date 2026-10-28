@@ -33,7 +33,7 @@ export async function verifyPassword(password: string, passwordHash: string): Pr
   return timingSafeEqual(actual, Buffer.from(keyHex, "hex"));
 }
 
-function tokenHash(token: string): string {
+export function tokenHash(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 

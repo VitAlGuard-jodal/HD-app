@@ -104,6 +104,15 @@ export function createUser(
   return result.changes ? findUserByHandle(db, input.handle) : undefined;
 }
 
+export function updateDisplayName(db: DatabaseSync, userId: number, displayName: string): StoredUser | undefined {
+  const row = db.prepare(`
+    UPDATE users SET display_name = ? WHERE id = ?
+    RETURNING id, handle, display_name AS displayName,
+              password_hash AS passwordHash, created_at AS createdAt
+  `).get(displayName.trim(), userId) as StoredUser | undefined;
+  return row ? { ...row } : undefined;
+}
+
 export function saveToken(
   db: DatabaseSync,
   tokenHash: string,

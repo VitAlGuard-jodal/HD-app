@@ -8,8 +8,9 @@
   },
   "scripts": {
     "start": "node src/main.ts",
-    "test": "node --test test/unit test/http",
-    "test:unit": "node --test test/unit"
+    "test": "node --test \"test/unit/*.test.ts\" \"test/http/*.test.ts\"",
+    "test:unit": "node --test \"test/unit/*.test.ts\"",
+    "test:http": "node --test \"test/http/*.test.ts\""
   },
   "dependencies": {},
   "devDependencies": {}

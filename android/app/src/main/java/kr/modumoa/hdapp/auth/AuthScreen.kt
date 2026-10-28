@@ -7,8 +7,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -37,7 +37,7 @@ fun AuthScreen(services: ServiceLocator) {
 
     ScreenColumn(Modifier.verticalScroll(rememberScrollState())) {
         Text("모두모아", style = MaterialTheme.typography.headlineMedium)
-        TabRow(selectedTabIndex = if (signup) 1 else 0) {
+        PrimaryTabRow(selectedTabIndex = if (signup) 1 else 0) {
             Tab(selected = !signup, onClick = { signup = false }, enabled = !action.busy, text = { Text("로그인") })
             Tab(selected = signup, onClick = { signup = true }, enabled = !action.busy, text = { Text("회원가입") })
         }

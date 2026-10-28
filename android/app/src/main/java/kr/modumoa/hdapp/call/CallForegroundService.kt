@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.content.ContextCompat
 import kr.modumoa.hdapp.HdApp
 import kr.modumoa.hdapp.MainActivity
@@ -32,6 +33,7 @@ class CallForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var joinJob: Job? = null
     private var microphoneObserver: Job? = null
+    private var ownsCall = false
 
     override fun onCreate() {
         super.onCreate()
@@ -46,10 +48,14 @@ class CallForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_JOIN -> {
+                if (services.callState.value.isStopping) {
+                    stopWithForeground(startId)
+                    return START_NOT_STICKY
+                }
                 val code = intent.getStringExtra(EXTRA_ROOM_CODE)
                 val handle = intent.getStringExtra(EXTRA_HANDLE)
                 if (code.isNullOrBlank() || handle.isNullOrBlank() || handle != services.sessionStore.handle) {
-                    stopSelf()
+                    stopWithForeground(startId)
                     return START_NOT_STICKY
                 }
                 if (services.callState.value.roomCode == code &&
@@ -61,12 +67,8 @@ class CallForegroundService : Service() {
                 try {
                     check(ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
                         PackageManager.PERMISSION_GRANTED) { "마이크 권한을 먼저 허용해 주세요." }
-                    val notification = notification(code)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-                    } else {
-                        startForeground(NOTIFICATION_ID, notification)
-                    }
+                    showForegroundNotification(notification(code))
+                    ownsCall = true
                     services.callState.value = CallState(roomCode = code, selfHandle = handle, isStarting = true)
                     joinJob?.cancel()
                     microphoneObserver?.cancel()
@@ -96,17 +98,14 @@ class CallForegroundService : Service() {
                     }
                 } catch (error: Exception) {
                     services.callState.value = CallState(error = error.message ?: "통화 서비스를 시작하지 못했습니다.")
-                    stopSelf()
+                    stopWithForeground(startId)
                 }
             }
             ACTION_LEAVE -> {
-                // 알림에서 나가도 마이크는 즉시 종료하고 서버 멤버십을 정리한다.
-                services.scope.launch {
-                    try { services.rooms.leave() } catch (_: Exception) { /* 오류는 방 화면에 남는다. */ }
-                }
-                stopSelf()
+                // 알림은 통화만 끊는다. 방 멤버십과 SSE 구독은 그대로 유지한다.
+                stopWithForeground(startId)
             }
-            else -> stopSelf()
+            else -> stopWithForeground(startId)
         }
         // API 34에서는 보이는 화면에서만 마이크 FGS에 다시 참여한다.
         return START_NOT_STICKY
@@ -114,14 +113,47 @@ class CallForegroundService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
-        services.mediaEngine.leave()
-        services.callState.value = CallState(error = services.callState.value.error)
-        services.scope.launch { services.micRouter.release() }
+        // 참여를 맡지 않은 서비스가 지연된 알림 요청 등으로 생성돼도 다른 캡처는 정리하지 않는다.
+        if (ownsCall) {
+            // SSE 재연결이 종료 중인 미디어 엔진을 다시 참여시키지 않도록 활성 상태부터 내린다.
+            services.callState.update { it.copy(isStarting = false, isActive = false, isStopping = true) }
+            services.mediaEngine.leave()
+            services.scope.launch {
+                // IO 정리가 끝날 때까지 종료 상태를 유지하여 새 캡처가 먼저 시작되지 않게 한다.
+                joinJob?.join()
+                services.micRouter.release()
+                services.callState.value = CallState(error = services.callState.value.error)
+            }
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 
-    private fun notification(code: String): Notification {
+    private fun showForegroundNotification(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun stopWithForeground(startId: Int) {
+        // 즉시 종료하는 요청도 먼저 전경에 등록해 시작 시간 제한을 해제한다.
+        try {
+            showForegroundNotification(notification(services.callState.value.roomCode, "통화 종료 중"))
+        } catch (error: Exception) {
+            // 권한 회수 등으로 전경 등록이 거부되어도 종료 처리는 끝낸다.
+            Log.w("CallForegroundService", "종료 전 전경 서비스 등록에 실패했습니다.", error)
+        } finally {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+        }
+    }
+
+    private fun notification(
+        code: String?,
+        status: String = "통화 중",
+    ): Notification {
         val open = PendingIntent.getActivity(this, 0,
             Intent(this, MainActivity::class.java).putExtra(EXTRA_ROOM_CODE, code)
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
@@ -131,13 +163,13 @@ class CallForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_mic)
-            .setContentTitle("모두모아 · 방 $code")
-            .setContentText("마이크 사용 중 · 음성 전송은 아직 연결되지 않았습니다.")
+            .setContentTitle(if (code.isNullOrBlank()) "모두모아 · $status" else "모두모아 · 방 $code · $status")
+            .setContentText(null)
             .setContentIntent(open)
-            .setCategory(Notification.CATEGORY_CALL)
+            .setCategory(Notification.CATEGORY_SERVICE)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .addAction(Notification.Action.Builder(null, "나가기", leave).build())
+            .addAction(Notification.Action.Builder(null, "통화 끊기", leave).build())
             .build()
     }
 

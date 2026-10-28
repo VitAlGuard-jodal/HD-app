@@ -8,6 +8,7 @@ import { openDb } from "../../src/db.ts";
 import {
   addContact, createRoom, createUser, deleteContact, findRoomByCode, findRoomMembership,
   findUserByHandle, isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicUser,
+  updateDisplayName,
 } from "../../src/store.ts";
 
 function fixture(t: TestContext) {
@@ -32,6 +33,21 @@ test("같은 아이디의 중복 저장은 기존 계정을 바꾸지 않는다"
   const { db, alice } = fixture(t);
   assert.equal(createUser(db, { handle: "alice", displayName: "다른사람", passwordHash: "changed" }), undefined);
   assert.deepEqual(findUserByHandle(db, "alice"), alice);
+});
+
+test("표시 이름만 갱신하고 사용자 조회·친구 목록·방 참여자에 반영한다", (t) => {
+  const { db, alice, bob } = fixture(t);
+  addContact(db, bob.id, alice.id);
+  const room = createRoom(db, { code: "ABC234", name: "같이 출발", createdBy: alice.id })!;
+  const updated = updateDisplayName(db, alice.id, "  새로운 이름  ");
+  assert.deepEqual(updated, { ...alice, displayName: "새로운 이름" });
+  assert.deepEqual(findUserByHandle(db, "alice"), updated);
+  assert.deepEqual(findUserByHandle(db, "bob"), bob);
+  assert.deepEqual(listContacts(db, bob.id), [{ handle: "alice", displayName: "새로운 이름" }]);
+  assert.deepEqual(listRoomMembers(db, room.id), [
+    { handle: "alice", displayName: "새로운 이름", joinedAt: room.createdAt },
+  ]);
+  assert.equal(updateDisplayName(db, -1, "없는 사용자"), undefined);
 });
 
 test("친구는 단방향이며 자기 자신과 중복을 허용하지 않는다", (t) => {

@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { ServerResponse } from "node:http";
 import { test } from "node:test";
+import { issueToken, lookupToken, revokeToken, TOKEN_TTL_MS } from "../../src/auth.ts";
+import { openDb } from "../../src/db.ts";
 import { formatEvent, openEventStream, PING_INTERVAL_MS } from "../../src/sse.ts";
+import { createUser } from "../../src/store.ts";
 
 // 실제 소켓 대신 응답 이벤트와 버퍼만 재현한다.
 class FakeResponse extends EventEmitter {
@@ -78,6 +81,60 @@ test("SSE 연결은 헤더를 즉시 보내고 15초마다 주석 ping을 보낸
   assert.deepEqual(response.writes, [": ping\n\n"]);
   t.mock.timers.tick(15_000);
   assert.deepEqual(response.writes, [": ping\n\n", ": ping\n\n"]);
+});
+
+for (const reason of ["폐기", "만료"] as const) {
+  test(`ping 시 ${reason}된 토큰의 SSE만 닫고 타이머를 정리한다`, (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "Date"], now: new Date("2026-01-01T00:00:00.000Z") });
+    const db = openDb(":memory:");
+    const user = createUser(db, { handle: "alice", displayName: "앨리스", passwordHash: "hash" })!;
+    // 만료 검증은 두 번째 ping 시점에 정확히 유효 기간이 끝나도록 한다.
+    const issuedAt = reason === "만료" ? Date.now() - TOKEN_TTL_MS + 2 * PING_INTERVAL_MS : Date.now();
+    const token = issueToken(db, user.id, new Date(issuedAt));
+    const otherToken = issueToken(db, user.id);
+    const response = new FakeResponse();
+    const otherResponse = new FakeResponse();
+    let cleaned = 0;
+    const stream = openEventStream(response.asResponse(), () => { cleaned += 1; }, () => Boolean(lookupToken(db, token)));
+    const otherStream = openEventStream(otherResponse.asResponse(), () => {}, () => Boolean(lookupToken(db, otherToken)));
+    t.after(() => {
+      stream.close();
+      otherStream.close();
+      db.close();
+    });
+
+    t.mock.timers.tick(PING_INTERVAL_MS);
+    assert.deepEqual(response.writes, [": ping\n\n"]);
+    assert.equal(response.writableEnded, false);
+    if (reason === "폐기") revokeToken(db, token);
+    t.mock.timers.tick(PING_INTERVAL_MS);
+    assert.equal(response.writableEnded, true);
+    assert.equal(cleaned, 1);
+    assert.deepEqual(response.writes, [": ping\n\n"]);
+    assert.equal(otherResponse.writableEnded, false);
+    assert.deepEqual(otherResponse.writes, [": ping\n\n", ": ping\n\n"]);
+    t.mock.timers.tick(PING_INTERVAL_MS);
+    assert.equal(cleaned, 1);
+    assert.deepEqual(response.writes, [": ping\n\n"]);
+    assert.equal(otherResponse.writes.length, 3);
+    assert.equal(stream.send("signal", null), false);
+  });
+}
+
+test("ping의 인증 검사에 실패해도 연결과 타이머를 정리한다", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const response = new FakeResponse();
+  let cleaned = 0;
+  const stream = openEventStream(response.asResponse(), () => { cleaned += 1; }, () => {
+    throw new Error("인증 저장소 조회 실패");
+  });
+  t.after(() => stream.close());
+  t.mock.timers.tick(PING_INTERVAL_MS);
+  assert.equal(response.writableEnded, true);
+  assert.equal(cleaned, 1);
+  t.mock.timers.tick(PING_INTERVAL_MS);
+  assert.equal(cleaned, 1);
+  assert.deepEqual(response.writes, []);
 });
 
 test("연결이 끊기면 구독 정리를 한 번 호출하고 ping을 중단한다", (t) => {
