@@ -8,18 +8,31 @@ import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.Button
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import kr.modumoa.hdapp.ui.CarButtonStyle
+import kr.modumoa.hdapp.ui.CarIconButton
+import kr.modumoa.hdapp.ui.StatusIcon
 
 data class AudioPermissions(val microphone: Boolean, val notifications: Boolean, val request: () -> Unit)
 
@@ -49,12 +62,16 @@ fun rememberAudioPermissions(): AudioPermissions {
 @Composable
 fun AudioPermissionControls(permissions: AudioPermissions) {
     val context = LocalContext.current
-    Text("마이크 권한: ${if (permissions.microphone) "허용됨" else "필요함"}")
     if (!permissions.microphone || !permissions.notifications) {
-        Button(onClick = permissions.request) { Text("마이크·알림 권한 요청") }
-        if (!permissions.notifications) Text("통화 알림을 보려면 알림 권한을 허용해 주세요.")
-        TextButton(onClick = {
-            context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
-        }) { Text("앱 권한 설정 열기") }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            if (!permissions.microphone) StatusIcon(Icons.Filled.MicOff, "마이크 권한 필요", MaterialTheme.colorScheme.error)
+            if (!permissions.notifications) StatusIcon(Icons.Filled.NotificationsOff, "알림 권한 필요", MaterialTheme.colorScheme.error)
+            Spacer(Modifier.weight(1f))
+            CarIconButton(Icons.Filled.Key, "마이크·알림 권한 요청", onClick = permissions.request, style = CarButtonStyle.Filled)
+            CarIconButton(Icons.Filled.Settings, "앱 권한 설정 열기", onClick = {
+                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
+            })
+        }
     }
 }

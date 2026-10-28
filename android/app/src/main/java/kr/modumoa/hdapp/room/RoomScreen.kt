@@ -2,28 +2,55 @@ package kr.modumoa.hdapp.room
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SettingsVoice
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kr.modumoa.hdapp.ServiceLocator
 import kr.modumoa.hdapp.audio.AudioPermissionControls
 import kr.modumoa.hdapp.audio.rememberAudioPermissions
 import kr.modumoa.hdapp.call.CallForegroundService
+import kr.modumoa.hdapp.ui.CarButtonStyle
+import kr.modumoa.hdapp.ui.CarGap
+import kr.modumoa.hdapp.ui.CarIconButton
+import kr.modumoa.hdapp.ui.CarTouchTarget
 import kr.modumoa.hdapp.ui.ErrorText
+import kr.modumoa.hdapp.ui.IconPrimary
+import kr.modumoa.hdapp.ui.IconTertiary
 import kr.modumoa.hdapp.ui.MicStatus
+import kr.modumoa.hdapp.ui.StatusIcon
 import kr.modumoa.hdapp.ui.rememberActionState
 
 @Composable
@@ -39,51 +66,88 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
         if (services.rooms.state.value.code == code) services.rooms.open(code)
     }
 
-    LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(Modifier.fillMaxSize().padding(CarGap), verticalArrangement = Arrangement.spacedBy(CarGap)) {
         item {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("방 코드", style = MaterialTheme.typography.titleMedium)
+            Column(verticalArrangement = Arrangement.spacedBy(CarGap)) {
                 Text(code, style = MaterialTheme.typography.displaySmall)
                 room.room?.name?.let { Text(it) }
-                Text(if (room.isConnected) "참여자 목록 연결됨" else "참여자 목록 연결 대기 중")
-                Text("현재는 마이크 입력만 확인할 수 있으며, 다른 참여자에게 음성은 전송되지 않습니다.")
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (room.isConnected) {
+                        StatusIcon(Icons.Filled.CheckCircle, "참여자 목록 연결됨", Color(0xFF1B5E20))
+                    } else {
+                        CircularProgressIndicator(Modifier.size(IconTertiary).semantics {
+                            contentDescription = "참여자 목록 연결 대기 중"
+                        })
+                        CarIconButton(Icons.Filled.Refresh, "연결 다시 시도",
+                            enabled = !action.busy && !room.isLeaving && room.code != null,
+                            onClick = { services.rooms.open(code, force = true) })
+                    }
+                    AssistChip(
+                        onClick = {}, modifier = Modifier.heightIn(min = CarTouchTarget),
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.VolumeOff, null, Modifier.size(IconTertiary)) },
+                        label = { Text("음성 미전송") },
+                    )
+                }
                 MicStatus(mic)
                 AudioPermissionControls(permissions)
-                TextButton(onClick = onMic) { Text("마이크 선택") }
-                Button(enabled = !action.busy && !room.isLeaving && !call.isStopping &&
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CarGap, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    CarIconButton(Icons.Filled.SettingsVoice, "마이크 선택", onClick = onMic)
+                    CarIconButton(
+                        icon = if (inCall) Icons.Filled.CallEnd else Icons.Filled.Call,
+                        contentDescription = if (inCall) "통화 끊기" else "통화 참여",
+                        containerColor = if (inCall) MaterialTheme.colorScheme.error else Color(0xFF1B5E20),
+                        iconSize = IconPrimary, style = CarButtonStyle.Filled,
+                        busy = (call.roomCode == code && (call.isStopping || call.isStarting)),
+                        enabled = !action.busy && !room.isLeaving && !call.isStopping &&
                     (inCall || (permissions.microphone && !call.isStarting && !call.isActive && room.code == code)),
-                    onClick = {
-                        action.run {
-                            if (inCall) {
-                                CallForegroundService.stop(context)
-                            } else {
-                                val handle = services.sessionStore.handle ?: error("다시 로그인해 주세요.")
-                                CallForegroundService.join(context, code, handle)
+                        onClick = {
+                            action.run {
+                                if (inCall) {
+                                    CallForegroundService.stop(context)
+                                } else {
+                                    val handle = services.sessionStore.handle ?: error("다시 로그인해 주세요.")
+                                    CallForegroundService.join(context, code, handle)
+                                }
                             }
-                        }
-                    }) {
-                    Text(if (call.roomCode == code && call.isStopping) "통화 종료 중…" else if (inCall) "통화 끊기" else "통화 참여")
-                }
-                if (call.roomCode == code && call.isStarting) Text("마이크 시작 중…")
-                OutlinedButton(enabled = !action.busy && !room.isLeaving, onClick = {
-                    action.run {
-                        CallForegroundService.stop(context)
-                        services.rooms.leave()
-                        onLeft()
-                    }
-                }) { Text(if (room.isLeaving) "방 나가는 중…" else "방 나가기") }
-                TextButton(enabled = !action.busy && !room.isLeaving && room.code != null, onClick = { services.rooms.open(code, force = true) }) {
-                    Text("연결 다시 시도")
+                        })
+                    CarIconButton(Icons.AutoMirrored.Filled.ExitToApp, "방 나가기",
+                        style = CarButtonStyle.Outlined, busy = room.isLeaving,
+                        enabled = !action.busy && !room.isLeaving, onClick = {
+                            action.run {
+                                CallForegroundService.stop(context)
+                                services.rooms.leave()
+                                onLeft()
+                            }
+                        })
                 }
                 ErrorText(action.error)
                 ErrorText(room.error)
                 ErrorText(call.error)
-                if (room.code == null) Text("방에서 나갔습니다. 방 목록으로 돌아가 주세요.")
-                Text("참여자 ${room.members.size}명", style = MaterialTheme.typography.titleMedium)
+                if (room.code == null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Info, null, Modifier.size(IconTertiary), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("나간 방")
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    StatusIcon(Icons.Filled.Groups, "참여자")
+                    Text("${room.members.size}", style = MaterialTheme.typography.titleMedium)
+                }
             }
         }
         items(room.members, key = { it.handle }) { member ->
-            Text("${member.displayName} (@${member.handle})${if (member.handle == services.sessionStore.handle) " · 나" else ""}")
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                val isSelf = member.handle == services.sessionStore.handle
+                Icon(if (isSelf) Icons.Filled.AccountCircle else Icons.Outlined.Person,
+                    contentDescription = if (isSelf) "나" else null, modifier = Modifier.size(IconTertiary),
+                    tint = if (isSelf) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                Column(Modifier.weight(1f)) {
+                    Text(member.displayName, style = MaterialTheme.typography.bodyLarge)
+                    Text("@${member.handle}", style = MaterialTheme.typography.bodySmall)
+                }
+            }
         }
     }
 }

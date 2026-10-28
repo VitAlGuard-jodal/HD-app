@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -169,7 +170,7 @@ class CallForegroundService : Service() {
             .setCategory(Notification.CATEGORY_SERVICE)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .addAction(Notification.Action.Builder(null, "통화 끊기", leave).build())
+            .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_call_end), "통화 끊기", leave).build())
             .build()
     }
 
