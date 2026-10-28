@@ -35,6 +35,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -62,9 +64,10 @@ fun ContactsScreen(services: ServiceLocator, onRoom: (String) -> Unit) {
             Column(verticalArrangement = Arrangement.spacedBy(CarGap)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(handle, { handle = it }, Modifier.weight(1f).heightIn(min = CarTouchTarget), enabled = !action.busy,
+                    OutlinedTextField(handle, { handle = it }, Modifier.weight(1f).heightIn(min = CarTouchTarget)
+                        .semantics(mergeDescendants = true) { contentDescription = "친구 아이디" }, enabled = !action.busy,
                         placeholder = { Text("아이디") },
-                        leadingIcon = { Icon(Icons.Filled.AlternateEmail, null, Modifier.size(IconTertiary)) }, singleLine = true,
+                        leadingIcon = { Icon(Icons.Filled.AlternateEmail, null, Modifier.size(IconTertiary)) }, singleLine = true, // 장식: 입력창 설명이 뜻을 전달
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false))
                     CarIconButton(Icons.Filled.PersonAdd, "친구 추가", style = CarButtonStyle.Filled,
                         busy = action.busy, enabled = !action.busy, onClick = {
@@ -92,7 +95,7 @@ fun ContactsScreen(services: ServiceLocator, onRoom: (String) -> Unit) {
             Column(verticalArrangement = Arrangement.spacedBy(CarGap)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Person, null, Modifier.size(IconTertiary), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(Icons.Outlined.Person, null, Modifier.size(IconTertiary), tint = MaterialTheme.colorScheme.onSurfaceVariant) // 장식: 옆 이름과 아이디가 뜻을 전달
                     Column(Modifier.weight(1f)) {
                         Text(contact.displayName, style = MaterialTheme.typography.bodyLarge)
                         Text("@${contact.handle}", style = MaterialTheme.typography.bodySmall)

@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -19,8 +20,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -31,6 +34,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -59,40 +63,50 @@ fun AuthScreen(services: ServiceLocator) {
     val action = rememberActionState()
 
     ScreenColumn(Modifier.verticalScroll(rememberScrollState())) {
-        Image(painterResource(R.drawable.ic_launcher_foreground), contentDescription = "모두모아",
-            modifier = Modifier.size(96.dp).align(Alignment.CenterHorizontally))
+        // 임시 로고이며 디자인 라운드에서 정식 아이콘으로 교체한다.
+        Surface(
+            modifier = Modifier.size(96.dp).align(Alignment.CenterHorizontally),
+            shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer,
+        ) {
+            Image(painterResource(R.drawable.ic_launcher_foreground), contentDescription = "모두모아",
+                modifier = Modifier.size(96.dp), colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.primary))
+        }
         PrimaryTabRow(selectedTabIndex = if (signup) 1 else 0) {
             Tab(selected = !signup, onClick = { signup = false }, enabled = !action.busy,
-                modifier = Modifier.height(CarTouchTarget),
-                icon = { Icon(Icons.AutoMirrored.Filled.Login, "로그인", Modifier.size(IconSecondary)) })
+                modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "로그인" },
+                icon = { Icon(Icons.AutoMirrored.Filled.Login, null, Modifier.size(IconSecondary)) }) // 장식: 탭 설명이 뜻을 전달
             Tab(selected = signup, onClick = { signup = true }, enabled = !action.busy,
-                modifier = Modifier.height(CarTouchTarget),
-                icon = { Icon(Icons.Filled.PersonAdd, "회원가입", Modifier.size(IconSecondary)) })
+                modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "회원가입" },
+                icon = { Icon(Icons.Filled.PersonAdd, null, Modifier.size(IconSecondary)) }) // 장식: 탭 설명이 뜻을 전달
         }
-        OutlinedTextField(handle, { handle = it }, Modifier.fillMaxWidth().heightIn(min = CarTouchTarget), enabled = !action.busy,
+        OutlinedTextField(handle, { handle = it }, Modifier.fillMaxWidth().heightIn(min = CarTouchTarget)
+            .semantics(mergeDescendants = true) { contentDescription = "아이디" }, enabled = !action.busy,
             placeholder = { Text("아이디") },
-            leadingIcon = { Icon(Icons.Filled.AlternateEmail, null, Modifier.size(IconTertiary)) },
+            leadingIcon = { Icon(Icons.Filled.AlternateEmail, null, Modifier.size(IconTertiary)) }, // 장식: 입력창 설명이 뜻을 전달
             supportingText = if (handle.isNotEmpty() && !HandleRules.isValid(handle.trim())) {
                 { Text(HandleRules.HELP) }
             } else null, singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false))
-        OutlinedTextField(password, { password = it }, Modifier.fillMaxWidth().heightIn(min = CarTouchTarget), enabled = !action.busy,
+        OutlinedTextField(password, { password = it }, Modifier.fillMaxWidth().heightIn(min = CarTouchTarget)
+            .semantics(mergeDescendants = true) { contentDescription = "비밀번호" }, enabled = !action.busy,
             placeholder = { Text("비밀번호") },
-            leadingIcon = { Icon(Icons.Filled.Lock, null, Modifier.size(IconTertiary)) },
+            leadingIcon = { Icon(Icons.Filled.Lock, null, Modifier.size(IconTertiary)) }, // 장식: 입력창 설명이 뜻을 전달
             singleLine = true, visualTransformation = PasswordVisualTransformation(),
             supportingText = if (signup && password.isNotEmpty() && password.codePointCount(0, password.length) !in 8..72) {
                 { Text("8~72자") }
             } else null,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
-        if (signup) OutlinedTextField(displayName, { displayName = it }, Modifier.fillMaxWidth().heightIn(min = CarTouchTarget),
+        if (signup) OutlinedTextField(displayName, { displayName = it }, Modifier.fillMaxWidth().heightIn(min = CarTouchTarget)
+            .semantics(mergeDescendants = true) { contentDescription = "표시 이름" },
             enabled = !action.busy, placeholder = { Text("표시 이름") },
-            leadingIcon = { Icon(Icons.Filled.Badge, null, Modifier.size(IconTertiary)) },
+            leadingIcon = { Icon(Icons.Filled.Badge, null, Modifier.size(IconTertiary)) }, // 장식: 입력창 설명이 뜻을 전달
             supportingText = if (displayName.isNotEmpty() && displayName.trim().let { it.codePointCount(0, it.length) !in 2..20 }) {
                 { Text("2~20자") }
             } else null, singleLine = true)
-        OutlinedTextField(baseUrl, { baseUrl = it }, Modifier.fillMaxWidth().heightIn(min = CarTouchTarget), enabled = !action.busy,
-            placeholder = { Text("http://…") },
-            leadingIcon = { Icon(Icons.Filled.Dns, null, Modifier.size(IconTertiary)) }, singleLine = true,
+        OutlinedTextField(baseUrl, { baseUrl = it }, Modifier.fillMaxWidth().heightIn(min = CarTouchTarget)
+            .semantics(mergeDescendants = true) { contentDescription = "서버 주소" }, enabled = !action.busy,
+            placeholder = { Text("서버 주소") },
+            leadingIcon = { Icon(Icons.Filled.Dns, null, Modifier.size(IconTertiary)) }, singleLine = true, // 장식: 입력창 설명이 뜻을 전달
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false))
         ErrorText(action.error)
         Button(modifier = Modifier.fillMaxWidth().height(CarTouchTarget).semantics {
@@ -118,7 +132,7 @@ fun AuthScreen(services: ServiceLocator) {
                 CircularProgressIndicator(Modifier.size(IconTertiary), color = LocalContentColor.current, strokeWidth = 2.dp)
             } else {
                 Icon(if (signup) Icons.Filled.PersonAdd else Icons.AutoMirrored.Filled.Login,
-                    contentDescription = null, modifier = Modifier.size(IconPrimary))
+                    contentDescription = null, modifier = Modifier.size(IconPrimary)) // 장식: 버튼 설명이 뜻을 전달
             }
         }
     }

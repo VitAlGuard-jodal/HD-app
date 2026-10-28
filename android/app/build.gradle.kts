@@ -19,6 +19,14 @@ android {
         buildConfigField("String", "DEFAULT_BASE_URL", "\"http://10.0.2.2:8787\"")
     }
 
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true

@@ -82,14 +82,14 @@ fun MicScreen(services: ServiceLocator) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     StatusIcon(Icons.Filled.Autorenew, "자동 선택")
                     Spacer(Modifier.weight(1f))
-                    Switch(modifier = Modifier.size(CarTouchTarget).semantics { contentDescription = "자동 선택" },
+                    Switch(modifier = Modifier.size(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "자동 선택" },
                         checked = state.manualId == null, enabled = state.selected != null,
                         onCheckedChange = { automatic -> router.choose(if (automatic) null else state.selected?.id) })
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     StatusIcon(Icons.Filled.GraphicEq, "마이크 시험")
                     Spacer(Modifier.weight(1f))
-                    Switch(modifier = Modifier.size(CarTouchTarget).semantics { contentDescription = "마이크 시험" },
+                    Switch(modifier = Modifier.size(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "마이크 시험" },
                         checked = state.isPreviewing && !inCall,
                         enabled = !inCall && !previewBusy &&
                             (state.isPreviewing || (permissions.microphone && state.selected != null)),
@@ -124,7 +124,7 @@ fun MicScreen(services: ServiceLocator) {
                 RadioButton(modifier = Modifier.size(CarTouchTarget).semantics { contentDescription = "${device.type}:${device.name}" },
                     selected = state.selected?.id == device.id, enabled = device.id in eligible,
                     onClick = { router.choose(device.id) })
-                Icon(iconFor(device.type), contentDescription = null, modifier = Modifier.size(IconTertiary),
+                Icon(iconFor(device.type), contentDescription = null, modifier = Modifier.size(IconTertiary), // 장식: 옆 장치 이름과 선택 항목 설명이 뜻을 전달
                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("${device.type}:${device.name}", Modifier.weight(1f))
                 if (device.id !in eligible) {

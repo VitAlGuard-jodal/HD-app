@@ -1,6 +1,7 @@
 package kr.modumoa.hdapp.room
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,10 +23,10 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SettingsVoice
 import androidx.compose.material.icons.outlined.Person
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -45,7 +46,6 @@ import kr.modumoa.hdapp.call.CallForegroundService
 import kr.modumoa.hdapp.ui.CarButtonStyle
 import kr.modumoa.hdapp.ui.CarGap
 import kr.modumoa.hdapp.ui.CarIconButton
-import kr.modumoa.hdapp.ui.CarTouchTarget
 import kr.modumoa.hdapp.ui.ErrorText
 import kr.modumoa.hdapp.ui.IconPrimary
 import kr.modumoa.hdapp.ui.IconTertiary
@@ -82,35 +82,53 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
                             enabled = !action.busy && !room.isLeaving && room.code != null,
                             onClick = { services.rooms.open(code, force = true) })
                     }
-                    AssistChip(
-                        onClick = {}, modifier = Modifier.heightIn(min = CarTouchTarget),
-                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.VolumeOff, null, Modifier.size(IconTertiary)) },
-                        label = { Text("음성 미전송") },
-                    )
+                    Surface(
+                        modifier = Modifier.heightIn(min = 48.dp).semantics(mergeDescendants = true) {
+                            contentDescription = "음성 미전송"
+                        },
+                        shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceVariant,
+                    ) {
+                        Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.AutoMirrored.Filled.VolumeOff, null, Modifier.size(IconTertiary)) // 장식: 부모 설명과 옆 글자가 뜻을 전달
+                            Text("음성 미전송")
+                        }
+                    }
                 }
                 MicStatus(mic)
                 AudioPermissionControls(permissions)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CarGap, Alignment.CenterHorizontally),
                     verticalAlignment = Alignment.CenterVertically) {
                     CarIconButton(Icons.Filled.SettingsVoice, "마이크 선택", onClick = onMic)
-                    CarIconButton(
-                        icon = if (inCall) Icons.Filled.CallEnd else Icons.Filled.Call,
-                        contentDescription = if (inCall) "통화 끊기" else "통화 참여",
-                        containerColor = if (inCall) MaterialTheme.colorScheme.error else Color(0xFF1B5E20),
-                        iconSize = IconPrimary, style = CarButtonStyle.Filled,
-                        busy = (call.roomCode == code && (call.isStopping || call.isStarting)),
-                        enabled = !action.busy && !room.isLeaving && !call.isStopping &&
-                    (inCall || (permissions.microphone && !call.isStarting && !call.isActive && room.code == code)),
-                        onClick = {
-                            action.run {
-                                if (inCall) {
-                                    CallForegroundService.stop(context)
-                                } else {
-                                    val handle = services.sessionStore.handle ?: error("다시 로그인해 주세요.")
-                                    CallForegroundService.join(context, code, handle)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CarIconButton(
+                            icon = if (inCall) Icons.Filled.CallEnd else Icons.Filled.Call,
+                            contentDescription = if (inCall) "통화 끊기" else "통화 참여",
+                            containerColor = if (inCall) MaterialTheme.colorScheme.error else Color(0xFF1B5E20),
+                            iconSize = IconPrimary, style = CarButtonStyle.Filled,
+                            busy = (call.roomCode == code && call.isStopping),
+                            enabled = !action.busy && !room.isLeaving && !call.isStopping &&
+                                (inCall || (permissions.microphone && !call.isStarting && !call.isActive && room.code == code)),
+                            onClick = {
+                                action.run {
+                                    if (inCall) {
+                                        CallForegroundService.stop(context)
+                                    } else {
+                                        val handle = services.sessionStore.handle ?: error("다시 로그인해 주세요.")
+                                        CallForegroundService.join(context, code, handle)
+                                    }
                                 }
+                            })
+                        // 진행 표시 자리를 항상 확보해 시작 중에도 행 높이가 바뀌지 않게 한다.
+                        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                            if (call.roomCode == code && call.isStarting) {
+                                CircularProgressIndicator(Modifier.size(24.dp).semantics {
+                                    contentDescription = "마이크 시작 중"
+                                })
                             }
-                        })
+                        }
+                    }
                     CarIconButton(Icons.AutoMirrored.Filled.ExitToApp, "방 나가기",
                         style = CarButtonStyle.Outlined, busy = room.isLeaving,
                         enabled = !action.busy && !room.isLeaving, onClick = {
@@ -126,7 +144,7 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
                 ErrorText(call.error)
                 if (room.code == null) {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Info, null, Modifier.size(IconTertiary), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Icon(Icons.Filled.Info, null, Modifier.size(IconTertiary), tint = MaterialTheme.colorScheme.onSurfaceVariant) // 장식: 옆 글자가 뜻을 전달
                         Text("나간 방")
                     }
                 }
@@ -141,7 +159,7 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
                 verticalAlignment = Alignment.CenterVertically) {
                 val isSelf = member.handle == services.sessionStore.handle
                 Icon(if (isSelf) Icons.Filled.AccountCircle else Icons.Outlined.Person,
-                    contentDescription = if (isSelf) "나" else null, modifier = Modifier.size(IconTertiary),
+                    contentDescription = if (isSelf) "나" else null, modifier = Modifier.size(IconTertiary), // 장식: 다른 참여자는 옆 이름과 아이디가 뜻을 전달
                     tint = if (isSelf) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 Column(Modifier.weight(1f)) {
                     Text(member.displayName, style = MaterialTheme.typography.bodyLarge)

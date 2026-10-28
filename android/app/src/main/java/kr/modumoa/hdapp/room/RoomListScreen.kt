@@ -28,6 +28,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -61,9 +63,10 @@ fun RoomListScreen(services: ServiceLocator, onRoom: (String) -> Unit) {
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(name, { name = it }, Modifier.weight(1f).heightIn(min = CarTouchTarget),
+            OutlinedTextField(name, { name = it }, Modifier.weight(1f).heightIn(min = CarTouchTarget)
+                .semantics(mergeDescendants = true) { contentDescription = "방 이름" },
                 enabled = !action.busy && current.code == null, placeholder = { Text("방 이름") },
-                leadingIcon = { Icon(Icons.Filled.Edit, null, Modifier.size(IconTertiary)) }, singleLine = true)
+                leadingIcon = { Icon(Icons.Filled.Edit, null, Modifier.size(IconTertiary)) }, singleLine = true) // 장식: 입력창 설명이 뜻을 전달
             CarIconButton(Icons.Filled.Add, "방 만들기", style = CarButtonStyle.Filled,
                 busy = action.busy, enabled = !action.busy && current.code == null, onClick = {
                     action.run {
@@ -75,9 +78,10 @@ fun RoomListScreen(services: ServiceLocator, onRoom: (String) -> Unit) {
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(code, { code = it }, Modifier.weight(1f).heightIn(min = CarTouchTarget),
+            OutlinedTextField(code, { code = it }, Modifier.weight(1f).heightIn(min = CarTouchTarget)
+                .semantics(mergeDescendants = true) { contentDescription = "방 코드" },
                 enabled = !action.busy && current.code == null, placeholder = { Text("방 코드") },
-                leadingIcon = { Icon(Icons.Filled.Tag, null, Modifier.size(IconTertiary)) }, singleLine = true,
+                leadingIcon = { Icon(Icons.Filled.Tag, null, Modifier.size(IconTertiary)) }, singleLine = true, // 장식: 입력창 설명이 뜻을 전달
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters,
                     keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false))
             CarIconButton(Icons.AutoMirrored.Filled.Login, "코드로 참여", style = CarButtonStyle.Filled,

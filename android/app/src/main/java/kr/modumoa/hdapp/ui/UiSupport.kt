@@ -87,7 +87,7 @@ fun CarIconButton(
                 strokeWidth = 2.dp,
             )
         } else {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(iconSize))
+            Icon(icon, contentDescription = null, modifier = Modifier.size(iconSize)) // 장식: 버튼 설명이 뜻을 전달
         }
     }
     when (style) {
@@ -158,7 +158,7 @@ fun ScreenColumn(modifier: Modifier = Modifier, content: @Composable ColumnScope
 fun ErrorText(message: String?) {
     if (!message.isNullOrBlank()) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Warning, contentDescription = null,
+            Icon(Icons.Filled.Warning, contentDescription = null, // 장식: 옆 오류 글자가 뜻을 전달
                 modifier = Modifier.size(IconTertiary), tint = MaterialTheme.colorScheme.error)
             Text(message, color = MaterialTheme.colorScheme.error)
         }

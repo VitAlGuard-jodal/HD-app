@@ -42,6 +42,8 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -152,24 +154,24 @@ private fun HdNavigation(
                 NavigationBarItem(
                     selected = route == "rooms" || route == "room/{code}",
                     onClick = { nav.popBackStack("rooms", false) },
-                    icon = { Icon(Icons.Filled.Groups, "통화 방", Modifier.size(IconSecondary)) },
-                    modifier = Modifier.height(CarTouchTarget),
+                    icon = { Icon(Icons.Filled.Groups, null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
+                    modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "통화 방" },
                     label = null, alwaysShowLabel = false, enabled = !action.busy,
                 )
                 Spacer(Modifier.width(CarGap))
                 NavigationBarItem(
                     selected = route == "contacts",
                     onClick = { nav.navigate("contacts") { launchSingleTop = true } },
-                    icon = { Icon(Icons.Filled.Contacts, "친구", Modifier.size(IconSecondary)) },
-                    modifier = Modifier.height(CarTouchTarget),
+                    icon = { Icon(Icons.Filled.Contacts, null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
+                    modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "친구" },
                     label = null, alwaysShowLabel = false, enabled = !action.busy,
                 )
                 Spacer(Modifier.width(CarGap))
                 NavigationBarItem(
                     selected = route == "mic",
                     onClick = { nav.navigate("mic") { launchSingleTop = true } },
-                    icon = { Icon(Icons.Filled.Mic, "마이크", Modifier.size(IconSecondary)) },
-                    modifier = Modifier.height(CarTouchTarget),
+                    icon = { Icon(Icons.Filled.Mic, null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
+                    modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "마이크" },
                     label = null, alwaysShowLabel = false, enabled = !action.busy,
                 )
             }
