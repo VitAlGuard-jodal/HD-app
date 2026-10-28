@@ -139,23 +139,31 @@ fun CarIconButton(
         }
         .semantics { this.contentDescription = contentDescription }
     val content: @Composable () -> Unit = {
-        if (busy) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(IconTertiary),
-                color = LocalContentColor.current,
-                strokeWidth = 2.dp,
-            )
-        } else if (animateContainerColor) {
-            AnimatedContent(
-                targetState = icon,
+        if (animateContainerColor) {
+            AnimatedContent<ImageVector?>(
+                targetState = if (busy) null else icon,
                 transitionSpec = {
                     ((fadeIn(motionTween(MotionNormal)) + scaleIn(motionTween(MotionNormal), initialScale = 0.8f))
                         togetherWith fadeOut(motionTween(MotionFast))).using(null)
                 },
                 label = "통화 참여·끊기 아이콘",
             ) { targetIcon ->
-                Icon(targetIcon, contentDescription = null, modifier = Modifier.size(iconSize))
+                if (targetIcon == null) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(IconTertiary),
+                        color = LocalContentColor.current,
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(targetIcon, contentDescription = null, modifier = Modifier.size(iconSize))
+                }
             }
+        } else if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(IconTertiary),
+                color = LocalContentColor.current,
+                strokeWidth = 2.dp,
+            )
         } else {
             Icon(icon, contentDescription = null, modifier = Modifier.size(iconSize)) // 장식: 버튼 설명이 뜻을 전달
         }

@@ -1,5 +1,6 @@
 package kr.modumoa.hdapp.ui
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LocalTonalElevationEnabled
@@ -13,6 +14,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -244,11 +246,20 @@ fun modumoaTextFieldColors() = OutlinedTextFieldDefaults.colors(
     unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
     disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
     errorContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
-    focusedBorderColor = MaterialTheme.colorScheme.outline,
-    unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-    disabledBorderColor = MaterialTheme.colorScheme.outline,
+    focusedBorderColor = Color.Transparent,
+    unfocusedBorderColor = Color.Transparent,
+    disabledBorderColor = Color.Transparent,
+    errorBorderColor = Color.Transparent,
     disabledTextColor = MaterialTheme.colorScheme.onSurface,
     disabledPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
     disabledLeadingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
     disabledSupportingTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+)
+
+// 포커스·비활성 여부와 무관하게 2dp를 유지하고 오류일 때만 오류색을 쓴다.
+@Composable
+fun Modifier.modumoaFieldBorder(isError: Boolean = false): Modifier = border(
+    width = 2.dp,
+    color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline,
+    shape = MaterialTheme.shapes.medium,
 )

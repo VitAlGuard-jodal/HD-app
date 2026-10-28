@@ -1,6 +1,7 @@
 package kr.modumoa.hdapp.contacts
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,6 +15,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddIcCall
 import androidx.compose.material.icons.filled.AlternateEmail
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Refresh
@@ -44,13 +46,15 @@ import kr.modumoa.hdapp.net.User
 import kr.modumoa.hdapp.ui.CarButtonStyle
 import kr.modumoa.hdapp.ui.CarGap
 import kr.modumoa.hdapp.ui.CarIconButton
+import kr.modumoa.hdapp.ui.CarTouchTarget
 import kr.modumoa.hdapp.ui.EmptyListArtwork
 import kr.modumoa.hdapp.ui.ErrorText
 import kr.modumoa.hdapp.ui.IconSecondary
 import kr.modumoa.hdapp.ui.IconTertiary
 import kr.modumoa.hdapp.ui.LocalModumoaColors
 import kr.modumoa.hdapp.ui.MotionItemFade
-import kr.modumoa.hdapp.ui.MotionItemPlacement
+import kr.modumoa.hdapp.ui.StatusIcon
+import kr.modumoa.hdapp.ui.modumoaFieldBorder
 import kr.modumoa.hdapp.ui.modumoaTextFieldColors
 import kr.modumoa.hdapp.ui.rememberActionState
 
@@ -68,7 +72,7 @@ fun ContactsScreen(services: ServiceLocator, onRoom: (String) -> Unit) {
             Column(verticalArrangement = Arrangement.spacedBy(CarGap)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(handle, { handle = it }, Modifier.weight(1f).heightIn(min = 96.dp)
+                    OutlinedTextField(handle, { handle = it }, Modifier.weight(1f).heightIn(min = 96.dp).modumoaFieldBorder()
                         .semantics(mergeDescendants = true) { contentDescription = "친구 아이디" }, enabled = !action.busy,
                         shape = MaterialTheme.shapes.medium, colors = modumoaTextFieldColors(), placeholder = { Text("아이디") },
                         leadingIcon = { Icon(Icons.Filled.AlternateEmail, null, Modifier.size(IconTertiary)) }, singleLine = true, // 장식: 입력창 설명이 뜻을 전달
@@ -95,7 +99,7 @@ fun ContactsScreen(services: ServiceLocator, onRoom: (String) -> Unit) {
         items(contacts, key = { it.handle }) { contact ->
             Surface(
                 modifier = Modifier.fillMaxWidth().animateItem(
-                    fadeInSpec = MotionItemFade, placementSpec = MotionItemPlacement, fadeOutSpec = MotionItemFade),
+                    fadeInSpec = MotionItemFade, placementSpec = null, fadeOutSpec = MotionItemFade),
                 shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow,
             ) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 136.dp).padding(CarGap), horizontalArrangement = Arrangement.spacedBy(CarGap),
@@ -106,15 +110,27 @@ fun ContactsScreen(services: ServiceLocator, onRoom: (String) -> Unit) {
                         Text("@${contact.handle}", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    CarIconButton(Icons.Filled.AddIcCall, "이 친구와 방 만들기",
-                        containerColor = colors.call, contentColor = colors.onCall, style = CarButtonStyle.Filled,
-                        enabled = !action.busy && room.code == null, onClick = {
-                            action.run {
-                                val created = services.apiClient.createRoom(invitees = listOf(contact.handle))
-                                services.rooms.open(created.code)
-                                onRoom(created.code)
+                    if (room.code != null) {
+                        Surface(
+                            modifier = Modifier.size(CarTouchTarget),
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        ) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                StatusIcon(Icons.Filled.Call, "이미 참여 중인 방이 있음 — 나간 뒤 만들 수 있음", colors.call)
                             }
-                        })
+                        }
+                    } else {
+                        CarIconButton(Icons.Filled.AddIcCall, "이 친구와 방 만들기",
+                            containerColor = colors.call, contentColor = colors.onCall, style = CarButtonStyle.Filled,
+                            enabled = !action.busy && room.code == null, onClick = {
+                                action.run {
+                                    val created = services.apiClient.createRoom(invitees = listOf(contact.handle))
+                                    services.rooms.open(created.code)
+                                    onRoom(created.code)
+                                }
+                            })
+                    }
                     CarIconButton(Icons.Filled.Delete, "친구 삭제", containerColor = colors.destructive, contentColor = colors.onDestructive,
                         enabled = !action.busy, onClick = {
                             action.run {

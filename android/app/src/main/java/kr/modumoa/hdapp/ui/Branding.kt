@@ -21,6 +21,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.RenderVectorGroup
@@ -29,6 +30,7 @@ import androidx.compose.ui.graphics.vector.VectorProperty
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.dp
 import kr.modumoa.hdapp.R
@@ -76,8 +78,9 @@ fun LoginBranding() {
         }
         Image(cockpit, contentDescription = null,
             modifier = Modifier.fillMaxWidth().height(260.dp), contentScale = ContentScale.Fit)
-        Image(painterResource(R.drawable.brand_wordmark), contentDescription = "모두모아",
+        Image(painterResource(R.drawable.brand_wordmark), contentDescription = stringResource(R.string.app_name),
             modifier = Modifier.fillMaxWidth().height(64.dp).graphicsLayer { alpha = wordmark.value },
+            colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.onSurface),
             contentScale = ContentScale.Fit, alignment = Alignment.CenterStart)
         Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
             // 보조 엠블럼 사방 40dp를 예약하고 주 워드마크와 별도 행에 둔다.

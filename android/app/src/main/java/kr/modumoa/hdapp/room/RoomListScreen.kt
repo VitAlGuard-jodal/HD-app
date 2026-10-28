@@ -48,6 +48,7 @@ import kr.modumoa.hdapp.ui.MotionDismiss
 import kr.modumoa.hdapp.ui.MotionReveal
 import kr.modumoa.hdapp.ui.ScreenColumn
 import kr.modumoa.hdapp.ui.StatusIcon
+import kr.modumoa.hdapp.ui.modumoaFieldBorder
 import kr.modumoa.hdapp.ui.modumoaTextFieldColors
 import kr.modumoa.hdapp.ui.rememberActionState
 
@@ -76,7 +77,7 @@ fun RoomListScreen(services: ServiceLocator, onRoom: (String) -> Unit) {
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(name, { name = it }, Modifier.weight(1f).heightIn(min = 96.dp)
+            OutlinedTextField(name, { name = it }, Modifier.weight(1f).heightIn(min = 96.dp).modumoaFieldBorder()
                 .semantics(mergeDescendants = true) { contentDescription = "방 이름" },
                 enabled = !action.busy && current.code == null, shape = MaterialTheme.shapes.medium,
                 colors = modumoaTextFieldColors(), placeholder = { Text("방 이름") },
@@ -92,7 +93,7 @@ fun RoomListScreen(services: ServiceLocator, onRoom: (String) -> Unit) {
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(code, { code = it }, Modifier.weight(1f).heightIn(min = 96.dp)
+            OutlinedTextField(code, { code = it }, Modifier.weight(1f).heightIn(min = 96.dp).modumoaFieldBorder()
                 .semantics(mergeDescendants = true) { contentDescription = "방 코드" },
                 enabled = !action.busy && current.code == null, shape = MaterialTheme.shapes.medium,
                 colors = modumoaTextFieldColors(), placeholder = { Text("방 코드") },

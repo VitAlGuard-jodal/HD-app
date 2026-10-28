@@ -45,6 +45,7 @@ import kr.modumoa.hdapp.ui.IconSecondary
 import kr.modumoa.hdapp.ui.IconTertiary
 import kr.modumoa.hdapp.ui.LoginBranding
 import kr.modumoa.hdapp.ui.ScreenColumn
+import kr.modumoa.hdapp.ui.modumoaFieldBorder
 import kr.modumoa.hdapp.ui.modumoaTextFieldColors
 import kr.modumoa.hdapp.ui.rememberActionState
 
@@ -68,7 +69,7 @@ fun AuthScreen(services: ServiceLocator) {
                 modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "회원가입" },
                 icon = { Icon(Icons.Filled.PersonAdd, null, Modifier.size(IconSecondary)) }) // 장식: 탭 설명이 뜻을 전달
         }
-        OutlinedTextField(handle, { handle = it }, Modifier.fillMaxWidth().heightIn(min = 96.dp)
+        OutlinedTextField(handle, { handle = it }, Modifier.fillMaxWidth().heightIn(min = 96.dp).modumoaFieldBorder()
             .semantics(mergeDescendants = true) { contentDescription = "아이디" }, enabled = !action.busy,
             shape = MaterialTheme.shapes.medium, colors = modumoaTextFieldColors(), placeholder = { Text("아이디") },
             leadingIcon = { Icon(Icons.Filled.AlternateEmail, null, Modifier.size(IconTertiary)) }, // 장식: 입력창 설명이 뜻을 전달
@@ -76,7 +77,7 @@ fun AuthScreen(services: ServiceLocator) {
                 { Text(HandleRules.HELP) }
             } else null, singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false))
-        OutlinedTextField(password, { password = it }, Modifier.fillMaxWidth().heightIn(min = 96.dp)
+        OutlinedTextField(password, { password = it }, Modifier.fillMaxWidth().heightIn(min = 96.dp).modumoaFieldBorder()
             .semantics(mergeDescendants = true) { contentDescription = "비밀번호" }, enabled = !action.busy,
             shape = MaterialTheme.shapes.medium, colors = modumoaTextFieldColors(), placeholder = { Text("비밀번호") },
             leadingIcon = { Icon(Icons.Filled.Lock, null, Modifier.size(IconTertiary)) }, // 장식: 입력창 설명이 뜻을 전달
@@ -85,14 +86,14 @@ fun AuthScreen(services: ServiceLocator) {
                 { Text("8~72자") }
             } else null,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
-        if (signup) OutlinedTextField(displayName, { displayName = it }, Modifier.fillMaxWidth().heightIn(min = 96.dp)
+        if (signup) OutlinedTextField(displayName, { displayName = it }, Modifier.fillMaxWidth().heightIn(min = 96.dp).modumoaFieldBorder()
             .semantics(mergeDescendants = true) { contentDescription = "표시 이름" },
             enabled = !action.busy, shape = MaterialTheme.shapes.medium, colors = modumoaTextFieldColors(), placeholder = { Text("표시 이름") },
             leadingIcon = { Icon(Icons.Filled.Badge, null, Modifier.size(IconTertiary)) }, // 장식: 입력창 설명이 뜻을 전달
             supportingText = if (displayName.isNotEmpty() && displayName.trim().let { it.codePointCount(0, it.length) !in 2..20 }) {
                 { Text("2~20자") }
             } else null, singleLine = true)
-        OutlinedTextField(baseUrl, { baseUrl = it }, Modifier.fillMaxWidth().heightIn(min = 96.dp)
+        OutlinedTextField(baseUrl, { baseUrl = it }, Modifier.fillMaxWidth().heightIn(min = 96.dp).modumoaFieldBorder()
             .semantics(mergeDescendants = true) { contentDescription = "서버 주소" }, enabled = !action.busy,
             shape = MaterialTheme.shapes.medium, colors = modumoaTextFieldColors(), placeholder = { Text("서버 주소") },
             leadingIcon = { Icon(Icons.Filled.Dns, null, Modifier.size(IconTertiary)) }, singleLine = true, // 장식: 입력창 설명이 뜻을 전달

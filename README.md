@@ -1,4 +1,5 @@
-# HD-app — 「모두모아」 Pleos Connect 앱
+# HD-app — 「우나보(Unavo)」 Pleos Connect 앱
+구 이름: 모두모아(아이디어 심사 문서에서는 이 이름으로 표기)
 
 현대자동차 차량용 앱 개발 공모전 출품작의 코드 저장소입니다. 차량(Pleos Connect, Android Automotive API 34)과 폰에서 같이 도는 앱과, 회원가입·친구·통화 방을 담당하는 서버로 이루어집니다.
 

@@ -5,7 +5,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,12 +39,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kr.modumoa.hdapp.R
 import kr.modumoa.hdapp.ServiceLocator
 import kr.modumoa.hdapp.audio.AudioPermissionControls
 import kr.modumoa.hdapp.audio.rememberAudioPermissions
@@ -62,7 +59,6 @@ import kr.modumoa.hdapp.ui.LocalModumoaColors
 import kr.modumoa.hdapp.ui.MotionConnectionSpring
 import kr.modumoa.hdapp.ui.MotionFast
 import kr.modumoa.hdapp.ui.MotionItemFade
-import kr.modumoa.hdapp.ui.MotionItemPlacement
 import kr.modumoa.hdapp.ui.MotionNormal
 import kr.modumoa.hdapp.ui.StatusIcon
 import kr.modumoa.hdapp.ui.motionTween
@@ -108,7 +104,7 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
                             }
                         }
                     }
-                    if (!room.isConnected) {
+                    if (!room.isConnected && !room.isLeaving) {
                         CarIconButton(Icons.Filled.Refresh, "연결 다시 시도",
                             enabled = !action.busy && !room.isLeaving && room.code != null,
                             onClick = { services.rooms.open(code, force = true) })
@@ -140,7 +136,6 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
                             contentColor = if (inCall) colors.onDestructive else colors.onCall,
                             animateContainerColor = true,
                             iconSize = IconPrimary, style = CarButtonStyle.Filled,
-                            busy = (call.roomCode == code && call.isStopping),
                             enabled = !action.busy && !room.isLeaving && !call.isStopping &&
                                 (inCall || (permissions.microphone && !call.isStarting && !call.isActive && room.code == code)),
                             onClick = {
@@ -184,17 +179,13 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     StatusIcon(Icons.Filled.Groups, "참여자")
                     Text("${room.members.size}", style = MaterialTheme.typography.titleMedium)
-                    if (room.members.isEmpty()) {
-                        Image(painterResource(R.drawable.brand_voice_bloom), contentDescription = null,
-                            modifier = Modifier.size(32.dp))
-                    }
                 }
             }
         }
         items(room.members, key = { it.handle }) { member ->
             Surface(
                 modifier = Modifier.fillMaxWidth().animateItem(
-                    fadeInSpec = MotionItemFade, placementSpec = MotionItemPlacement, fadeOutSpec = MotionItemFade),
+                    fadeInSpec = MotionItemFade, placementSpec = null, fadeOutSpec = MotionItemFade),
                 shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow,
             ) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 128.dp).padding(CarGap), horizontalArrangement = Arrangement.spacedBy(CarGap),

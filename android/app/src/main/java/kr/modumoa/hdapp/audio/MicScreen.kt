@@ -50,7 +50,6 @@ import kr.modumoa.hdapp.ui.IconTertiary
 import kr.modumoa.hdapp.ui.MicStatus
 import kr.modumoa.hdapp.ui.ModumoaDeviceShape
 import kr.modumoa.hdapp.ui.MotionItemFade
-import kr.modumoa.hdapp.ui.MotionItemPlacement
 import kr.modumoa.hdapp.ui.StatusIcon
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -127,7 +126,7 @@ fun MicScreen(services: ServiceLocator) {
             val deviceContent = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
             Surface(
                 modifier = Modifier.fillMaxWidth().animateItem(
-                    fadeInSpec = MotionItemFade, placementSpec = MotionItemPlacement, fadeOutSpec = MotionItemFade),
+                    fadeInSpec = MotionItemFade, placementSpec = null, fadeOutSpec = MotionItemFade),
                 shape = ModumoaDeviceShape,
                 color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
                 contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,

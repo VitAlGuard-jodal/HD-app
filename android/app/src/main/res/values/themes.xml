@@ -5,5 +5,4 @@
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowActionModeOverlay">true</item>
     </style>
-    <color name="launcher_background">#234C3C</color>
 </resources>
