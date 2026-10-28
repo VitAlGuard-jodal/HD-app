@@ -1,5 +1,11 @@
 package kr.modumoa.hdapp.room
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,12 +39,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kr.modumoa.hdapp.R
 import kr.modumoa.hdapp.ServiceLocator
 import kr.modumoa.hdapp.audio.AudioPermissionControls
 import kr.modumoa.hdapp.audio.rememberAudioPermissions
@@ -48,9 +55,17 @@ import kr.modumoa.hdapp.ui.CarGap
 import kr.modumoa.hdapp.ui.CarIconButton
 import kr.modumoa.hdapp.ui.ErrorText
 import kr.modumoa.hdapp.ui.IconPrimary
+import kr.modumoa.hdapp.ui.IconSecondary
 import kr.modumoa.hdapp.ui.IconTertiary
 import kr.modumoa.hdapp.ui.MicStatus
+import kr.modumoa.hdapp.ui.LocalModumoaColors
+import kr.modumoa.hdapp.ui.MotionConnectionSpring
+import kr.modumoa.hdapp.ui.MotionFast
+import kr.modumoa.hdapp.ui.MotionItemFade
+import kr.modumoa.hdapp.ui.MotionItemPlacement
+import kr.modumoa.hdapp.ui.MotionNormal
 import kr.modumoa.hdapp.ui.StatusIcon
+import kr.modumoa.hdapp.ui.motionTween
 import kr.modumoa.hdapp.ui.rememberActionState
 
 @Composable
@@ -61,6 +76,7 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
     val call by services.callState.collectAsStateWithLifecycle()
     val permissions = rememberAudioPermissions()
     val action = rememberActionState()
+    val colors = LocalModumoaColors.current
     val inCall = call.roomCode == code && (call.isStarting || call.isActive)
     LaunchedEffect(code) {
         if (services.rooms.state.value.code == code) services.rooms.open(code)
@@ -69,15 +85,30 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
     LazyColumn(Modifier.fillMaxSize().padding(CarGap), verticalArrangement = Arrangement.spacedBy(CarGap)) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(CarGap)) {
-                Text(code, style = MaterialTheme.typography.displaySmall)
-                room.room?.name?.let { Text(it) }
+                // 정본 §8에 따라 방 코드·연결 상태·계기 뒤에는 선버스트를 배치하지 않는다.
+                Text(code, style = MaterialTheme.typography.displayLarge)
+                room.room?.name?.let { Text(it, style = MaterialTheme.typography.displaySmall) }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (room.isConnected) {
-                        StatusIcon(Icons.Filled.CheckCircle, "참여자 목록 연결됨", Color(0xFF1B5E20))
-                    } else {
-                        CircularProgressIndicator(Modifier.size(IconTertiary).semantics {
-                            contentDescription = "참여자 목록 연결 대기 중"
-                        })
+                    Surface(shape = MaterialTheme.shapes.small,
+                        color = colors.callContainer, contentColor = colors.onCallContainer) {
+                        AnimatedContent(targetState = room.isConnected,
+                            modifier = Modifier.padding(12.dp),
+                            transitionSpec = {
+                                val enter = if (targetState) {
+                                    fadeIn(motionTween(MotionNormal)) + scaleIn(MotionConnectionSpring, initialScale = 0.6f)
+                                } else fadeIn(motionTween(MotionFast))
+                                (enter togetherWith fadeOut(motionTween(MotionFast))).using(null)
+                            }, label = "참여자 목록 연결 상태") { connected ->
+                            if (connected) {
+                                StatusIcon(Icons.Filled.CheckCircle, "참여자 목록 연결됨", colors.onCallContainer)
+                            } else {
+                                CircularProgressIndicator(Modifier.size(IconTertiary).semantics {
+                                    contentDescription = "참여자 목록 연결 대기 중"
+                                }, color = colors.onCallContainer)
+                            }
+                        }
+                    }
+                    if (!room.isConnected) {
                         CarIconButton(Icons.Filled.Refresh, "연결 다시 시도",
                             enabled = !action.busy && !room.isLeaving && room.code != null,
                             onClick = { services.rooms.open(code, force = true) })
@@ -86,7 +117,7 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
                         modifier = Modifier.heightIn(min = 48.dp).semantics(mergeDescendants = true) {
                             contentDescription = "음성 미전송"
                         },
-                        shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = MaterialTheme.shapes.small, color = colors.warningContainer, contentColor = colors.warning,
                     ) {
                         Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -105,7 +136,9 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
                         CarIconButton(
                             icon = if (inCall) Icons.Filled.CallEnd else Icons.Filled.Call,
                             contentDescription = if (inCall) "통화 끊기" else "통화 참여",
-                            containerColor = if (inCall) MaterialTheme.colorScheme.error else Color(0xFF1B5E20),
+                            containerColor = if (inCall) colors.destructive else colors.call,
+                            contentColor = if (inCall) colors.onDestructive else colors.onCall,
+                            animateContainerColor = true,
                             iconSize = IconPrimary, style = CarButtonStyle.Filled,
                             busy = (call.roomCode == code && call.isStopping),
                             enabled = !action.busy && !room.isLeaving && !call.isStopping &&
@@ -151,19 +184,30 @@ fun RoomScreen(code: String, services: ServiceLocator, onLeft: () -> Unit, onMic
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     StatusIcon(Icons.Filled.Groups, "참여자")
                     Text("${room.members.size}", style = MaterialTheme.typography.titleMedium)
+                    if (room.members.isEmpty()) {
+                        Image(painterResource(R.drawable.brand_voice_bloom), contentDescription = null,
+                            modifier = Modifier.size(32.dp))
+                    }
                 }
             }
         }
         items(room.members, key = { it.handle }) { member ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                val isSelf = member.handle == services.sessionStore.handle
-                Icon(if (isSelf) Icons.Filled.AccountCircle else Icons.Outlined.Person,
-                    contentDescription = if (isSelf) "나" else null, modifier = Modifier.size(IconTertiary), // 장식: 다른 참여자는 옆 이름과 아이디가 뜻을 전달
-                    tint = if (isSelf) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                Column(Modifier.weight(1f)) {
-                    Text(member.displayName, style = MaterialTheme.typography.bodyLarge)
-                    Text("@${member.handle}", style = MaterialTheme.typography.bodySmall)
+            Surface(
+                modifier = Modifier.fillMaxWidth().animateItem(
+                    fadeInSpec = MotionItemFade, placementSpec = MotionItemPlacement, fadeOutSpec = MotionItemFade),
+                shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow,
+            ) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 128.dp).padding(CarGap), horizontalArrangement = Arrangement.spacedBy(CarGap),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    val isSelf = member.handle == services.sessionStore.handle
+                    Icon(if (isSelf) Icons.Filled.AccountCircle else Icons.Outlined.Person,
+                        contentDescription = if (isSelf) "나" else null, modifier = Modifier.size(IconSecondary), // 장식: 다른 참여자는 옆 이름과 아이디가 뜻을 전달
+                        tint = if (isSelf) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Column(Modifier.weight(1f)) {
+                        Text(member.displayName, style = MaterialTheme.typography.headlineSmall)
+                        Text("@${member.handle}", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
         }

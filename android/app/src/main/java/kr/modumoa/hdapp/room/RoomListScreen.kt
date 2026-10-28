@@ -1,5 +1,6 @@
 package kr.modumoa.hdapp.room
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -17,13 +18,16 @@ import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -37,11 +41,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kr.modumoa.hdapp.ServiceLocator
 import kr.modumoa.hdapp.ui.CarButtonStyle
 import kr.modumoa.hdapp.ui.CarIconButton
-import kr.modumoa.hdapp.ui.CarTouchTarget
 import kr.modumoa.hdapp.ui.ErrorText
 import kr.modumoa.hdapp.ui.IconTertiary
+import kr.modumoa.hdapp.ui.LocalModumoaColors
+import kr.modumoa.hdapp.ui.MotionDismiss
+import kr.modumoa.hdapp.ui.MotionReveal
 import kr.modumoa.hdapp.ui.ScreenColumn
 import kr.modumoa.hdapp.ui.StatusIcon
+import kr.modumoa.hdapp.ui.modumoaTextFieldColors
 import kr.modumoa.hdapp.ui.rememberActionState
 
 @Composable
@@ -50,22 +57,29 @@ fun RoomListScreen(services: ServiceLocator, onRoom: (String) -> Unit) {
     var code by rememberSaveable { mutableStateOf("") }
     val current by services.rooms.state.collectAsStateWithLifecycle()
     val action = rememberActionState()
+    var lastJoinedCode by remember { mutableStateOf(current.code.orEmpty()) }
+    LaunchedEffect(current.code) {
+        current.code?.let { lastJoinedCode = it }
+    }
     ScreenColumn(Modifier.verticalScroll(rememberScrollState())) {
-        current.code?.let { joinedCode ->
-            Card(Modifier.fillMaxWidth()) {
+        AnimatedVisibility(visible = current.code != null, enter = MotionReveal, exit = MotionDismiss) {
+            val joinedCode = current.code ?: lastJoinedCode
+            Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
                 Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    StatusIcon(Icons.Filled.Call, "참여 중인 방", MaterialTheme.colorScheme.primary)
-                    Text(joinedCode, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                    StatusIcon(Icons.Filled.Call, "참여 중인 방", LocalModumoaColors.current.call)
+                    Text(joinedCode, Modifier.weight(1f), style = MaterialTheme.typography.displayMedium)
                     CarIconButton(Icons.AutoMirrored.Filled.ArrowForward, "현재 방으로", onClick = { onRoom(joinedCode) })
                 }
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(name, { name = it }, Modifier.weight(1f).heightIn(min = CarTouchTarget)
+            OutlinedTextField(name, { name = it }, Modifier.weight(1f).heightIn(min = 96.dp)
                 .semantics(mergeDescendants = true) { contentDescription = "방 이름" },
-                enabled = !action.busy && current.code == null, placeholder = { Text("방 이름") },
+                enabled = !action.busy && current.code == null, shape = MaterialTheme.shapes.medium,
+                colors = modumoaTextFieldColors(), placeholder = { Text("방 이름") },
                 leadingIcon = { Icon(Icons.Filled.Edit, null, Modifier.size(IconTertiary)) }, singleLine = true) // 장식: 입력창 설명이 뜻을 전달
             CarIconButton(Icons.Filled.Add, "방 만들기", style = CarButtonStyle.Filled,
                 busy = action.busy, enabled = !action.busy && current.code == null, onClick = {
@@ -78,9 +92,10 @@ fun RoomListScreen(services: ServiceLocator, onRoom: (String) -> Unit) {
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(code, { code = it }, Modifier.weight(1f).heightIn(min = CarTouchTarget)
+            OutlinedTextField(code, { code = it }, Modifier.weight(1f).heightIn(min = 96.dp)
                 .semantics(mergeDescendants = true) { contentDescription = "방 코드" },
-                enabled = !action.busy && current.code == null, placeholder = { Text("방 코드") },
+                enabled = !action.busy && current.code == null, shape = MaterialTheme.shapes.medium,
+                colors = modumoaTextFieldColors(), placeholder = { Text("방 코드") },
                 leadingIcon = { Icon(Icons.Filled.Tag, null, Modifier.size(IconTertiary)) }, singleLine = true, // 장식: 입력창 설명이 뜻을 전달
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters,
                     keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false))

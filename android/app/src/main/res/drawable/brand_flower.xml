@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 원본 SVG 경로와 A 팔레트의 고정 색상을 보존한다. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="240dp" android:height="240dp" android:viewportWidth="240" android:viewportHeight="240">
+    <group android:rotation="0" android:pivotX="120" android:pivotY="120">
+        <path android:pathData="M120 110 C90 95 96 35 120 23 C144 35 150 95 120 110 Z" android:fillColor="#FFF5DD" android:strokeColor="#273329" android:strokeWidth="3" />
+    </group>
+    <group android:rotation="45" android:pivotX="120" android:pivotY="120">
+        <path android:pathData="M120 110 C90 95 96 35 120 23 C144 35 150 95 120 110 Z" android:fillColor="#FFF5DD" android:strokeColor="#273329" android:strokeWidth="3" />
+    </group>
+    <group android:rotation="90" android:pivotX="120" android:pivotY="120">
+        <path android:pathData="M120 110 C90 95 96 35 120 23 C144 35 150 95 120 110 Z" android:fillColor="#FFF5DD" android:strokeColor="#273329" android:strokeWidth="3" />
+    </group>
+    <group android:rotation="135" android:pivotX="120" android:pivotY="120">
+        <path android:pathData="M120 110 C90 95 96 35 120 23 C144 35 150 95 120 110 Z" android:fillColor="#FFF5DD" android:strokeColor="#273329" android:strokeWidth="3" />
+    </group>
+    <group android:rotation="180" android:pivotX="120" android:pivotY="120">
+        <path android:pathData="M120 110 C90 95 96 35 120 23 C144 35 150 95 120 110 Z" android:fillColor="#FFF5DD" android:strokeColor="#273329" android:strokeWidth="3" />
+    </group>
+    <group android:rotation="225" android:pivotX="120" android:pivotY="120">
+        <path android:pathData="M120 110 C90 95 96 35 120 23 C144 35 150 95 120 110 Z" android:fillColor="#FFF5DD" android:strokeColor="#273329" android:strokeWidth="3" />
+    </group>
+    <group android:rotation="270" android:pivotX="120" android:pivotY="120">
+        <path android:pathData="M120 110 C90 95 96 35 120 23 C144 35 150 95 120 110 Z" android:fillColor="#FFF5DD" android:strokeColor="#273329" android:strokeWidth="3" />
+    </group>
+    <group android:rotation="315" android:pivotX="120" android:pivotY="120">
+        <path android:pathData="M120 110 C90 95 96 35 120 23 C144 35 150 95 120 110 Z" android:fillColor="#FFF5DD" android:strokeColor="#273329" android:strokeWidth="3" />
+    </group>
+    <path android:pathData="M89 120 A31 31 0 1 0 151 120 A31 31 0 1 0 89 120 Z" android:fillColor="#EAB33D" android:strokeColor="#273329" android:strokeWidth="3" />
+</vector>

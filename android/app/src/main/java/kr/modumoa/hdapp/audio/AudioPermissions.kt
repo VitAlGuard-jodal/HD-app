@@ -8,6 +8,7 @@ import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -32,6 +33,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import kr.modumoa.hdapp.ui.CarButtonStyle
 import kr.modumoa.hdapp.ui.CarIconButton
+import kr.modumoa.hdapp.ui.MotionDismiss
+import kr.modumoa.hdapp.ui.MotionReveal
 import kr.modumoa.hdapp.ui.StatusIcon
 
 data class AudioPermissions(val microphone: Boolean, val notifications: Boolean, val request: () -> Unit)
@@ -62,7 +65,8 @@ fun rememberAudioPermissions(): AudioPermissions {
 @Composable
 fun AudioPermissionControls(permissions: AudioPermissions) {
     val context = LocalContext.current
-    if (!permissions.microphone || !permissions.notifications) {
+    AnimatedVisibility(visible = !permissions.microphone || !permissions.notifications,
+        enter = MotionReveal, exit = MotionDismiss) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically) {
             if (!permissions.microphone) StatusIcon(Icons.Filled.MicOff, "마이크 권한 필요", MaterialTheme.colorScheme.error)

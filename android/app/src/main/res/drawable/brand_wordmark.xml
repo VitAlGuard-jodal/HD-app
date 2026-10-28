@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 원본 SVG 경로와 A 팔레트의 고정 색상을 보존한다. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="740dp" android:height="224dp" android:viewportWidth="740" android:viewportHeight="224">
+    <group android:translateX="4" android:translateY="12">
+        <group android:rotation="-3" android:pivotX="80" android:pivotY="100">
+            <path android:pathData="M20 24 C47 12 111 14 139 27 C148 45 144 82 135 106 C111 116 49 119 20 107 C9 88 9 48 20 24 Z M52 49 C48 59 48 80 53 85 C67 89 101 88 110 82 L111 50 C94 44 68 45 52 49 Z" android:fillColor="#292E25" android:fillType="evenOdd" />
+            <path android:pathData="M70 111 C81 106 95 107 105 112 L101 143 C117 141 139 137 150 141 L153 177 C111 182 51 186 9 177 L12 143 C29 145 50 146 70 144 Z" android:fillColor="#292E25" />
+        </group>
+    </group>
+    <group android:translateX="179" android:translateY="1">
+        <group android:rotation="2" android:pivotX="80" android:pivotY="100">
+            <path android:pathData="M20 24 C54 11 110 13 145 24 L141 58 C110 47 73 46 49 53 L47 85 C78 91 115 87 146 77 L148 112 C101 124 45 119 15 110 C8 89 10 47 20 24 Z" android:fillColor="#292E25" />
+            <path android:pathData="M10 132 C54 142 110 139 151 128 L154 161 C140 166 119 168 100 167 L98 197 C88 204 73 202 65 196 L65 167 C44 167 23 165 8 162 Z" android:fillColor="#292E25" />
+        </group>
+    </group>
+    <group android:translateX="354" android:translateY="8">
+        <group android:rotation="-2" android:pivotX="80" android:pivotY="100">
+            <path android:pathData="M20 24 C47 12 111 14 139 27 C148 45 144 82 135 106 C111 116 49 119 20 107 C9 88 9 48 20 24 Z M52 49 C48 59 48 80 53 85 C67 89 101 88 110 82 L111 50 C94 44 68 45 52 49 Z" android:fillColor="#292E25" android:fillType="evenOdd" />
+            <path android:pathData="M70 111 C81 106 95 107 105 112 L101 143 C117 141 139 137 150 141 L153 177 C111 182 51 186 9 177 L12 143 C29 145 50 146 70 144 Z" android:fillColor="#292E25" />
+        </group>
+    </group>
+    <group android:translateX="528" android:translateY="0">
+        <group android:rotation="3" android:pivotX="80" android:pivotY="100">
+            <path android:pathData="M57 22 C92 17 112 52 110 100 C108 148 91 181 56 185 C20 185 7 149 9 102 C10 55 22 28 57 22 Z M59 59 C43 61 40 80 40 105 C39 131 43 149 55 148 C71 148 78 128 78 100 C79 75 74 57 59 59 Z" android:fillColor="#292E25" android:fillType="evenOdd" />
+            <path android:pathData="M126 18 C137 14 150 16 160 20 L157 81 C171 79 179 76 188 72 L190 108 C178 114 168 115 156 116 L153 190 C143 198 127 198 118 192 Z" android:fillColor="#292E25" />
+        </group>
+    </group>
+</vector>

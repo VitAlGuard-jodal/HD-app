@@ -6,6 +6,10 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -26,15 +30,20 @@ import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.outlined.Contacts
+import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -42,8 +51,10 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -60,6 +71,10 @@ import kr.modumoa.hdapp.ui.CarIconButton
 import kr.modumoa.hdapp.ui.CarTouchTarget
 import kr.modumoa.hdapp.ui.ErrorText
 import kr.modumoa.hdapp.ui.IconSecondary
+import kr.modumoa.hdapp.ui.ModumoaTheme
+import kr.modumoa.hdapp.ui.MotionFast
+import kr.modumoa.hdapp.ui.MotionNormal
+import kr.modumoa.hdapp.ui.motionTween
 import kr.modumoa.hdapp.ui.rememberActionState
 import kotlinx.coroutines.CancellationException
 
@@ -72,7 +87,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val services = (application as HdApp).services
         setContent {
-            MaterialTheme {
+            ModumoaTheme {
                 Surface(Modifier.fillMaxSize()) {
                     val session by services.sessionStore.session.collectAsStateWithLifecycle()
                     key(session?.token) {
@@ -136,7 +151,11 @@ private fun HdNavigation(
         topBar = {
             TopAppBar(
                 title = { Text("@${services.sessionStore.handle.orEmpty()}") },
-                expandedHeight = CarTouchTarget,
+                expandedHeight = 128.dp,
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
+                ),
                 windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
                 navigationIcon = {
                     if (route != "rooms") {
@@ -150,36 +169,66 @@ private fun HdNavigation(
             )
         },
         bottomBar = {
-            NavigationBar(windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)) {
+            val navigationColors = NavigationBarItemDefaults.colors(
+                selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
+                unselectedIconColor = MaterialTheme.colorScheme.onSurface,
+                disabledIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            NavigationBar(
+                modifier = Modifier.padding(horizontal = CarGap, vertical = 12.dp).clip(MaterialTheme.shapes.extraLarge),
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                tonalElevation = 0.dp,
+                windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom),
+            ) {
                 NavigationBarItem(
                     selected = route == "rooms" || route == "room/{code}",
                     onClick = { nav.popBackStack("rooms", false) },
-                    icon = { Icon(Icons.Filled.Groups, null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
+                    icon = { Icon(if (route == "rooms" || route == "room/{code}") Icons.Filled.Groups else Icons.Outlined.Groups,
+                        null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
                     modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "통화 방" },
                     label = null, alwaysShowLabel = false, enabled = !action.busy,
+                    colors = navigationColors,
                 )
                 Spacer(Modifier.width(CarGap))
                 NavigationBarItem(
                     selected = route == "contacts",
                     onClick = { nav.navigate("contacts") { launchSingleTop = true } },
-                    icon = { Icon(Icons.Filled.Contacts, null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
+                    icon = { Icon(if (route == "contacts") Icons.Filled.Contacts else Icons.Outlined.Contacts,
+                        null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
                     modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "친구" },
                     label = null, alwaysShowLabel = false, enabled = !action.busy,
+                    colors = navigationColors,
                 )
                 Spacer(Modifier.width(CarGap))
                 NavigationBarItem(
                     selected = route == "mic",
                     onClick = { nav.navigate("mic") { launchSingleTop = true } },
-                    icon = { Icon(Icons.Filled.Mic, null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
+                    icon = { Icon(if (route == "mic") Icons.Filled.Mic else Icons.Outlined.Mic,
+                        null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
                     modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "마이크" },
                     label = null, alwaysShowLabel = false, enabled = !action.busy,
+                    colors = navigationColors,
                 )
             }
         },
     ) { innerPadding ->
         Column(Modifier.fillMaxSize().padding(innerPadding).consumeWindowInsets(innerPadding)) {
             ErrorText(action.error)
-            NavHost(navController = nav, startDestination = "rooms", modifier = Modifier.weight(1f)) {
+            NavHost(
+                navController = nav, startDestination = "rooms", modifier = Modifier.weight(1f),
+                enterTransition = {
+                    fadeIn(motionTween(MotionNormal)) + slideInHorizontally(motionTween(MotionNormal)) { it / 8 }
+                },
+                exitTransition = { fadeOut(motionTween(MotionFast)) },
+                popEnterTransition = {
+                    fadeIn(motionTween(MotionNormal)) + slideInHorizontally(motionTween(MotionNormal)) { -it / 8 }
+                },
+                popExitTransition = {
+                    fadeOut(motionTween(MotionFast)) + slideOutHorizontally(motionTween(MotionFast)) { it / 8 }
+                },
+            ) {
                 composable("rooms") { RoomListScreen(services, openRoom) }
                 composable("contacts") { ContactsScreen(services, openRoom) }
                 composable("mic") { MicScreen(services) }

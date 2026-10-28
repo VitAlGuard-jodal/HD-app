@@ -1,12 +1,13 @@
 package kr.modumoa.hdapp.audio
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -42,8 +44,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kr.modumoa.hdapp.ServiceLocator
 import kr.modumoa.hdapp.ui.CarGap
 import kr.modumoa.hdapp.ui.CarTouchTarget
+import kr.modumoa.hdapp.ui.EmptyListArtwork
+import kr.modumoa.hdapp.ui.IconSecondary
 import kr.modumoa.hdapp.ui.IconTertiary
 import kr.modumoa.hdapp.ui.MicStatus
+import kr.modumoa.hdapp.ui.ModumoaDeviceShape
+import kr.modumoa.hdapp.ui.MotionItemFade
+import kr.modumoa.hdapp.ui.MotionItemPlacement
 import kr.modumoa.hdapp.ui.StatusIcon
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -113,22 +120,30 @@ fun MicScreen(services: ServiceLocator) {
             }
         }
         if (state.devices.isEmpty()) item {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.MicOff, "연결된 입력 장치 없음", Modifier.size(64.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+            EmptyListArtwork(Icons.Filled.MicOff, "연결된 입력 장치 없음")
         }
         items(state.devices, key = { it.id }) { device ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                RadioButton(modifier = Modifier.size(CarTouchTarget).semantics { contentDescription = "${device.type}:${device.name}" },
-                    selected = state.selected?.id == device.id, enabled = device.id in eligible,
-                    onClick = { router.choose(device.id) })
-                Icon(iconFor(device.type), contentDescription = null, modifier = Modifier.size(IconTertiary), // 장식: 옆 장치 이름과 선택 항목 설명이 뜻을 전달
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("${device.type}:${device.name}", Modifier.weight(1f))
-                if (device.id !in eligible) {
-                    Icon(Icons.Filled.Block, "통화 입력 제외", Modifier.size(IconTertiary), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            val selected = state.selected?.id == device.id
+            val deviceContent = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            Surface(
+                modifier = Modifier.fillMaxWidth().animateItem(
+                    fadeInSpec = MotionItemFade, placementSpec = MotionItemPlacement, fadeOutSpec = MotionItemFade),
+                shape = ModumoaDeviceShape,
+                color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+                contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                border = BorderStroke(2.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline),
+            ) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 128.dp).padding(CarGap), horizontalArrangement = Arrangement.spacedBy(CarGap),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(modifier = Modifier.size(CarTouchTarget).semantics { contentDescription = "${device.type}:${device.name}" },
+                        selected = state.selected?.id == device.id, enabled = device.id in eligible,
+                        onClick = { router.choose(device.id) })
+                    Icon(iconFor(device.type), contentDescription = null, modifier = Modifier.size(IconSecondary), // 장식: 옆 장치 이름과 선택 항목 설명이 뜻을 전달
+                        tint = deviceContent)
+                    Text("${device.type}:${device.name}", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                    if (device.id !in eligible) {
+                        Icon(Icons.Filled.Block, "통화 입력 제외", Modifier.size(IconTertiary), tint = deviceContent)
+                    }
                 }
             }
         }
