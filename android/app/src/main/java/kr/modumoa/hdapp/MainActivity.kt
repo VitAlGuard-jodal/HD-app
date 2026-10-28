@@ -4,46 +4,27 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
-import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.only
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.outlined.Contacts
-import androidx.compose.material.icons.outlined.Groups
-import androidx.compose.material.icons.outlined.Mic
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -51,32 +32,32 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import kotlinx.coroutines.CancellationException
 import kr.modumoa.hdapp.audio.MicScreen
 import kr.modumoa.hdapp.auth.AuthScreen
 import kr.modumoa.hdapp.call.CallForegroundService
 import kr.modumoa.hdapp.contacts.ContactsScreen
 import kr.modumoa.hdapp.room.RoomListScreen
 import kr.modumoa.hdapp.room.RoomScreen
-import kr.modumoa.hdapp.ui.CarGap
+import kr.modumoa.hdapp.ui.CarButtonStyle
 import kr.modumoa.hdapp.ui.CarIconButton
-import kr.modumoa.hdapp.ui.CarTouchTarget
 import kr.modumoa.hdapp.ui.ErrorText
-import kr.modumoa.hdapp.ui.IconSecondary
+import kr.modumoa.hdapp.ui.LocalModumoaColors
+import kr.modumoa.hdapp.ui.ModumoaBackdrop
 import kr.modumoa.hdapp.ui.ModumoaTheme
 import kr.modumoa.hdapp.ui.MotionFast
 import kr.modumoa.hdapp.ui.MotionNormal
+import kr.modumoa.hdapp.ui.WesternFooter
+import kr.modumoa.hdapp.ui.WesternHeader
 import kr.modumoa.hdapp.ui.motionTween
 import kr.modumoa.hdapp.ui.rememberActionState
-import kotlinx.coroutines.CancellationException
 
 class MainActivity : ComponentActivity() {
     private var requestedRoom by mutableStateOf<String?>(null)
@@ -84,16 +65,24 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedRoom = intent.getStringExtra(CallForegroundService.EXTRA_ROOM_CODE)
-        enableEdgeToEdge()
+        // 낮 배경에서도 잉크 조작부와 같은 밝은 시스템 아이콘을 유지한다.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         val services = (application as HdApp).services
         setContent {
             ModumoaTheme {
-                Surface(Modifier.fillMaxSize()) {
+                ModumoaBackdrop {
                     val session by services.sessionStore.session.collectAsStateWithLifecycle()
                     key(session?.token) {
                         if (session == null) {
                             Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
-                                AuthScreen(services)
+                                WesternHeader {
+                                    Text("여러 차, 하나의 목소리", style = MaterialTheme.typography.bodyMedium)
+                                }
+                                Box(Modifier.weight(1f)) { AuthScreen(services) }
+                                WesternFooter()
                             }
                         } else {
                             HdNavigation(services, requestedRoom, { requestedRoom = null }, {
@@ -124,7 +113,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HdNavigation(
     services: ServiceLocator,
@@ -145,100 +133,55 @@ private fun HdNavigation(
         }
     }
     val route = backStack?.destination?.route
-    Scaffold(
-        modifier = Modifier.fillMaxSize().imePadding(),
-        contentWindowInsets = WindowInsets.safeDrawing,
-        topBar = {
-            TopAppBar(
-                title = { Text("@${services.sessionStore.handle.orEmpty()}") },
-                expandedHeight = 128.dp,
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
-                ),
-                windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
-                navigationIcon = {
-                    if (route != "rooms") {
-                        CarIconButton(Icons.AutoMirrored.Filled.ArrowBack, "뒤로", onClick = { nav.popBackStack() })
-                    }
-                },
-                actions = {
-                    CarIconButton(Icons.AutoMirrored.Filled.Logout, "로그아웃",
-                        enabled = !action.busy, busy = action.busy, onClick = { action.run { onLogout() } })
-                },
-            )
-        },
-        bottomBar = {
-            val navigationColors = NavigationBarItemDefaults.colors(
-                selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
-                unselectedIconColor = MaterialTheme.colorScheme.onSurface,
-                disabledIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            NavigationBar(
-                modifier = Modifier.padding(horizontal = CarGap, vertical = 12.dp).clip(MaterialTheme.shapes.extraLarge),
-                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                contentColor = MaterialTheme.colorScheme.onSurface,
-                tonalElevation = 0.dp,
-                windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom),
-            ) {
-                NavigationBarItem(
-                    selected = route == "rooms" || route == "room/{code}",
-                    onClick = { nav.popBackStack("rooms", false) },
-                    icon = { Icon(if (route == "rooms" || route == "room/{code}") Icons.Filled.Groups else Icons.Outlined.Groups,
-                        null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
-                    modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "통화 방" },
-                    label = null, alwaysShowLabel = false, enabled = !action.busy,
-                    colors = navigationColors,
-                )
-                Spacer(Modifier.width(CarGap))
-                NavigationBarItem(
-                    selected = route == "contacts",
-                    onClick = { nav.navigate("contacts") { launchSingleTop = true } },
-                    icon = { Icon(if (route == "contacts") Icons.Filled.Contacts else Icons.Outlined.Contacts,
-                        null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
-                    modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "친구" },
-                    label = null, alwaysShowLabel = false, enabled = !action.busy,
-                    colors = navigationColors,
-                )
-                Spacer(Modifier.width(CarGap))
-                NavigationBarItem(
-                    selected = route == "mic",
-                    onClick = { nav.navigate("mic") { launchSingleTop = true } },
-                    icon = { Icon(if (route == "mic") Icons.Filled.Mic else Icons.Outlined.Mic,
-                        null, Modifier.size(IconSecondary)) }, // 장식: 하단 탐색 항목 설명이 뜻을 전달
-                    modifier = Modifier.height(CarTouchTarget).semantics(mergeDescendants = true) { contentDescription = "마이크" },
-                    label = null, alwaysShowLabel = false, enabled = !action.busy,
-                    colors = navigationColors,
-                )
+    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+        WesternHeader {
+            Text("@${services.sessionStore.handle.orEmpty()}", Modifier.weight(1f, fill = false),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (route != "rooms") {
+                CarIconButton(Icons.AutoMirrored.Filled.ArrowBack, "뒤로", onClick = { nav.popBackStack() })
             }
-        },
-    ) { innerPadding ->
-        Column(Modifier.fillMaxSize().padding(innerPadding).consumeWindowInsets(innerPadding)) {
-            ErrorText(action.error)
-            NavHost(
-                navController = nav, startDestination = "rooms", modifier = Modifier.weight(1f),
-                enterTransition = {
-                    fadeIn(motionTween(MotionNormal)) + slideInHorizontally(motionTween(MotionNormal)) { it / 8 }
-                },
-                exitTransition = { fadeOut(motionTween(MotionFast)) },
-                popEnterTransition = {
-                    fadeIn(motionTween(MotionNormal)) + slideInHorizontally(motionTween(MotionNormal)) { -it / 8 }
-                },
-                popExitTransition = {
-                    fadeOut(motionTween(MotionFast)) + slideOutHorizontally(motionTween(MotionFast)) { it / 8 }
-                },
-            ) {
-                composable("rooms") { RoomListScreen(services, openRoom) }
-                composable("contacts") { ContactsScreen(services, openRoom) }
-                composable("mic") { MicScreen(services) }
-                composable("room/{code}") { entry ->
-                    val code = entry.arguments?.getString("code") ?: return@composable
-                    RoomScreen(code, services, { nav.popBackStack("rooms", false) }, {
-                        nav.navigate("mic") { launchSingleTop = true }
-                    })
-                }
+            CarIconButton(Icons.AutoMirrored.Filled.Logout, "로그아웃",
+                enabled = !action.busy, busy = action.busy, onClick = { action.run { onLogout() } })
+        }
+        Surface(color = LocalModumoaColors.current.panel) { ErrorText(action.error) }
+        NavHost(
+            navController = nav, startDestination = "rooms", modifier = Modifier.weight(1f),
+            enterTransition = {
+                fadeIn(motionTween(MotionNormal)) + slideInHorizontally(motionTween(MotionNormal)) { it / 8 }
+            },
+            exitTransition = { fadeOut(motionTween(MotionFast)) },
+            popEnterTransition = {
+                fadeIn(motionTween(MotionNormal)) + slideInHorizontally(motionTween(MotionNormal)) { -it / 8 }
+            },
+            popExitTransition = {
+                fadeOut(motionTween(MotionFast)) + slideOutHorizontally(motionTween(MotionFast)) { it / 8 }
+            },
+        ) {
+            composable("rooms") { RoomListScreen(services, openRoom) }
+            composable("contacts") { ContactsScreen(services, openRoom) }
+            composable("mic") { MicScreen(services) }
+            composable("room/{code}") { entry ->
+                val code = entry.arguments?.getString("code") ?: return@composable
+                RoomScreen(code, services, { nav.popBackStack("rooms", false) }, {
+                    nav.navigate("mic") { launchSingleTop = true }
+                })
             }
+        }
+        WesternFooter {
+            val roomsSelected = route == "rooms" || route == "room/{code}"
+            CarIconButton(Icons.Filled.Groups, "통화 방", enabled = !action.busy,
+                modifier = Modifier.semantics { selected = roomsSelected },
+                style = if (roomsSelected) CarButtonStyle.Filled else CarButtonStyle.Tonal,
+                onClick = { nav.popBackStack("rooms", false) })
+            CarIconButton(Icons.Filled.Contacts, "친구", enabled = !action.busy,
+                modifier = Modifier.semantics { selected = route == "contacts" },
+                style = if (route == "contacts") CarButtonStyle.Filled else CarButtonStyle.Tonal,
+                onClick = { nav.navigate("contacts") { launchSingleTop = true } })
+            CarIconButton(Icons.Filled.Mic, "마이크", enabled = !action.busy,
+                modifier = Modifier.semantics { selected = route == "mic" },
+                style = if (route == "mic") CarButtonStyle.Filled else CarButtonStyle.Tonal,
+                onClick = { nav.navigate("mic") { launchSingleTop = true } })
         }
     }
 }

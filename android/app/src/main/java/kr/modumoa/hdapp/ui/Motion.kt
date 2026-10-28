@@ -14,8 +14,6 @@ const val MotionFast = 150
 const val MotionNormal = 250
 const val MotionBrand = 600
 const val MotionMicLevel = 80
-const val MotionBloomDelay = 300
-const val MotionWordmarkDelay = 450
 val MotionEasing = FastOutSlowInEasing
 
 // Compose 기본 시계를 사용해 시스템 MotionDurationScale을 그대로 따른다.

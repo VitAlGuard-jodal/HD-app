@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 정본의 필터 없는 도형을 경로로 이식한다. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="60dp" android:height="66dp" android:viewportWidth="60.0" android:viewportHeight="66.0">
+    <group android:translateX="30" android:translateY="30">
+        <path android:pathData="M-22 -17 -20 -25 20 -25 23 -14 24 25 16 33 -17 33 -24 24Z" android:fillColor="#c8c1ae" />
+        <path android:pathData="M-16 -13 -12 -21 12 -21 17 -12 13 -5 -13 -5Z" android:fillColor="#171e29" />
+        <path android:pathData="M-16 18 16 18 13 25 -13 25Z" android:fillColor="#252b36" />
+        <path android:pathData="M-23 -11H-28V3H-23M23 -11H28V3H23" android:fillColor="#20242d" />
+        <path android:pathData="M-21 -22h8v4h-8Zm34 0h8v4h-8Z" android:fillColor="#fff2c7" />
+        <path android:pathData="M-20 26h10v4h-10Zm30 0h10v4H10Z" android:fillColor="#ff6746" />
+    </group>
+</vector>
