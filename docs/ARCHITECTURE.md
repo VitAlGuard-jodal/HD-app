@@ -72,3 +72,15 @@ SSE 이벤트(`event:` 이름 / `data:` JSON): `hello{self}`, `member-joined{han
 - Q-3 앱 이름·패키지명(`kr.modumoa.hdapp` 임시).
 - Q-4 libwebrtc(Android AAR)·SFU 설치 승인.
 - 서버 배포 위치(Cloud Run 등)와 TURN 운영 주체.
+
+## 7. 단일 앱·모드 분기·플랫폼 채널 3종 (Flutter F1, 2026-10-29)
+
+앱은 `app/`의 Flutter 단일 프로젝트다. Android applicationId와 iOS bundle ID는 `kr.modumoa.hdapp`이다. 폰 레이아웃을 기본으로 사용하고, Android `FEATURE_AUTOMOTIVE`가 true이면 `DeviceMode.car`로 분기한다. F1의 `CarShell`은 같은 폰 화면을 감싸며 F2에서 차량 레이아웃으로 교체한다. 별도 폰/차량 앱을 만들지 않는다.
+
+Dart는 인증·서버 주소·HTTP/SSE·방 세션·미디어 엔진 인터페이스 및 화면 상태를 소유한다. 상태 관리는 ChangeNotifier, 화면 이동은 기본 Navigator다. HTTP/SSE는 dart:io HttpClient, 영속 저장은 shared_preferences, SVG 아이콘은 flutter_svg를 사용한다.
+
+플랫폼 채널은 세 종류다. `unavo/device`는 automotive/마이크 기능을 조회한다. `unavo/audio`는 기존 Kotlin MicRouter의 장치 선택·자동 복귀·권한·입력 시험·스피커 출력을 연결하고 `unavo/audio/levels`에서 100ms 레벨 상태를 받는다. `unavo/call`은 microphone foreground service를 시작/종료하며 `unavo/call/events`에서 상태·알림 끊기·방 열기 이벤트를 받는다.
+
+Android 캡처는 앱 소유 MicRouter 한 개가 관리한다. 시험 입력은 화면 이탈 시 중지하고, 통화 캡처는 FGS가 소유한다. 통화 끊기는 미디어·마이크·FGS만 정리하고 방 멤버십/SSE를 유지한다. 방 나가기는 서버 leave까지 수행한다. 알림의 비공개 브로드캐스트는 Dart 엔진이 없어도 네이티브 캡처를 종료한다.
+
+Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 같은 서버 API와 같은 계정을 사용한다. iOS 네이티브 오디오는 F2, WebRTC는 F3이며 현재 MediaEngine은 Noop이다. 기존 `android/` Compose 차량 앱은 F2 완료 뒤 archive할 예정이다.

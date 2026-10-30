@@ -1,0 +1,33 @@
+name: unavo
+description: 우나보 — 폰 기본, Android Automotive 차량 모드의 단일 앱.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.8.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # F1에서는 설치하지 않는다. 메인의 pub get에서 최신 호환 안정판을
+  # 선택하고 pubspec.lock으로 확정한다. 추가 런타임 패키지는 없다.
+  flutter_svg: ^2.3.2
+  flutter_webrtc: ^1.6.3
+  shared_preferences: ^2.5.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: false
+  assets:
+    - assets/backdrop/
+    - assets/icons/
+  fonts:
+    - family: Rye
+      fonts:
+        - asset: assets/fonts/Rye-Regular.ttf
+    - family: BlackHanSans
+      fonts:
+        - asset: assets/fonts/BlackHanSans-Regular.ttf

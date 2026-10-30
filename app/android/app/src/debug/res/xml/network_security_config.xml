@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Dart ServerAddress가 debug의 RFC1918/로컬 HTTP만 허용한다. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

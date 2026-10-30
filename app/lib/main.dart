@@ -1,0 +1,202 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'auth/session_store.dart';
+import 'core/app_services.dart';
+import 'core/device_mode.dart';
+import 'net/models.dart';
+import 'screens/car/car_shell.dart';
+import 'screens/phone/auth.dart';
+import 'screens/phone/cover.dart';
+import 'screens/phone/friends.dart';
+import 'screens/phone/mic.dart';
+import 'screens/phone/room.dart';
+import 'screens/phone/rooms.dart';
+import 'ui/appearance.dart';
+import 'ui/theme.dart';
+import 'ui/widgets/bottom_nav.dart';
+import 'ui/widgets/phone_frame.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  SystemChrome.setSystemUIOverlayStyle(
+    SystemUiOverlayStyle.light.copyWith(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarContrastEnforced: false,
+    ),
+  );
+  final store = SessionStore(await SharedPreferences.getInstance());
+  final services = AppServices(store);
+  final capabilities = await DeviceCapabilities.detect();
+  try {
+    await services.initialize();
+  } catch (error) {
+    debugPrint('플랫폼 초기화 실패: ${error.runtimeType}');
+  }
+  runApp(UnavoApp(services: services, mode: capabilities.mode));
+}
+
+class UnavoApp extends StatefulWidget {
+  const UnavoApp({super.key, required this.services, required this.mode});
+  final AppServices services;
+  final DeviceMode mode;
+  @override
+  State<UnavoApp> createState() => _UnavoAppState();
+}
+
+class _UnavoAppState extends State<UnavoApp> {
+  final _appearance = AppearanceController();
+  final _navigator = GlobalKey<NavigatorState>();
+  bool _cover = true;
+  bool _roomVisible = false;
+  @override
+  void initState() {
+    super.initState();
+    widget.services.store.addListener(_sessionChanged);
+    widget.services.calls.onOpenRoom = _openRoom;
+    unawaited(_restore());
+  }
+
+  Future<void> _restore() async {
+    if (widget.services.store.session == null) return;
+    final token = widget.services.store.token;
+    try {
+      final user = await widget.services.api.me();
+      if (mounted && token != null && token == widget.services.store.token)
+        await widget.services.store.save(AuthResult(user, token));
+    } on ApiException catch (error) {
+      if (mounted &&
+          error.status == 401 &&
+          token == widget.services.store.token) {
+        await widget.services.rooms.forget();
+        await widget.services.store.clear();
+      }
+    } catch (_) {
+      /* 오프라인에서는 저장된 세션을 유지하고 화면별 재시도를 제공한다. */
+    }
+  }
+
+  void _sessionChanged() {
+    if (!mounted) return;
+    if (widget.services.store.session == null)
+      _navigator.currentState?.popUntil((route) => route.isFirst);
+    setState(() {});
+  }
+
+  Widget _shell(Widget child) =>
+      widget.mode == DeviceMode.car ? CarShell(child: child) : child;
+  void _openRoom(String code) {
+    if (_cover ||
+        widget.services.store.session == null ||
+        _roomVisible ||
+        !mounted)
+      return;
+    if (widget.services.rooms.state.code != code) return;
+    widget.services.calls.pendingOpenRoom = null;
+    _roomVisible = true;
+    unawaited(
+      _navigator.currentState!
+          .push<void>(
+            MaterialPageRoute(
+              builder: (_) => _shell(
+                RoomScreen(services: widget.services, mode: widget.mode),
+              ),
+            ),
+          )
+          .whenComplete(() {
+            _roomVisible = false;
+          }),
+    );
+  }
+
+  void _continue() {
+    setState(() {
+      _cover = false;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final pending = widget.services.calls.pendingOpenRoom;
+      if (mounted && pending != null) _openRoom(pending);
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.services.store.removeListener(_sessionChanged);
+    widget.services.calls.onOpenRoom = null;
+    _appearance.dispose();
+    widget.services.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => UnavoAppearance(
+    controller: _appearance,
+    child: ListenableBuilder(
+      listenable: _appearance,
+      builder: (context, _) => MaterialApp(
+        title: '우나보',
+        debugShowCheckedModeBanner: false,
+        navigatorKey: _navigator,
+        theme: unavoTheme(Brightness.light),
+        darkTheme: unavoTheme(Brightness.dark),
+        themeMode: _appearance.themeMode,
+        home: _shell(
+          _cover
+              ? CoverScreen(mode: widget.mode, onContinue: _continue)
+              : widget.services.store.session == null
+              ? AuthScreen(
+                  api: widget.services.api,
+                  store: widget.services.store,
+                  mode: widget.mode,
+                )
+              : _PhoneTabs(
+                  services: widget.services,
+                  mode: widget.mode,
+                  onRoom: _openRoom,
+                ),
+        ),
+      ),
+    ),
+  );
+}
+
+class _PhoneTabs extends StatefulWidget {
+  const _PhoneTabs({
+    required this.services,
+    required this.mode,
+    required this.onRoom,
+  });
+  final AppServices services;
+  final DeviceMode mode;
+  final ValueChanged<String> onRoom;
+  @override
+  State<_PhoneTabs> createState() => _PhoneTabsState();
+}
+
+class _PhoneTabsState extends State<_PhoneTabs> {
+  int _index = 0;
+  @override
+  Widget build(BuildContext context) => PhoneFrame(
+    mode: widget.mode,
+    bottomNav: BottomNav(
+      index: _index,
+      onChanged: (index) {
+        FocusScope.of(context).unfocus();
+        setState(() {
+          _index = index;
+        });
+      },
+    ),
+    // 화면을 떠나면 MicScreen이 dispose되어 시험 입력이 즉시 정리된다.
+    child: switch (_index) {
+      0 => RoomsScreen(services: widget.services, onRoom: widget.onRoom),
+      1 => FriendsScreen(services: widget.services, onRoom: widget.onRoom),
+      _ => MicScreen(router: widget.services.mic),
+    },
+  );
+}
