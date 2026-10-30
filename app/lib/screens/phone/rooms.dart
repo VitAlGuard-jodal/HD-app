@@ -45,6 +45,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
       final Room room = create
           ? await widget.services.api.createRoom(name: _name.text.trim())
           : await widget.services.api.joinRoom(_code.text.trim());
+      if (create && mounted) _name.clear();
       await widget.services.rooms.open(room.code);
       if (mounted) {
         FocusScope.of(context).unfocus();

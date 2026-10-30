@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../../core/device_mode.dart';
 import '../appearance.dart';
 import '../backdrop.dart';
+import '../phone_frame_layout.dart';
 import '../theme.dart';
 import 'panel_button.dart';
 
@@ -42,14 +43,23 @@ class PhoneFrame extends StatelessWidget {
             final bottom = keyboard > 0
                 ? keyboard + 12
                 : safeBottom + (hasDock ? 96 : 8);
-            final headerTop = media.viewPadding.top + 12;
+            final phoneLayout = mode == DeviceMode.phone
+                ? calculatePhoneFrameLayout(
+                    width: size.width,
+                    height: size.height,
+                    safeTop: media.viewPadding.top,
+                  )
+                : null;
+            final headerTop =
+                phoneLayout?.headerTop ?? media.viewPadding.top + 12;
             final letteringSafe = math.max(
               headerTop + 68,
               Backdrop.letteringBottom(size, mode) + 12,
             );
             final preferredTop =
                 size.height * (Backdrop.isNarrow(size) ? 260 / 780 : 304 / 915);
-            var top = math.max(letteringSafe, preferredTop);
+            var top =
+                phoneLayout?.panelTop ?? math.max(letteringSafe, preferredTop);
             if (keyboard > 0) {
               // 키보드가 보이는 동안만 포스터 위로 패널을 올린다. 배경은 움직이지 않는다.
               top = math.max(
@@ -61,12 +71,16 @@ class PhoneFrame extends StatelessWidget {
             return Stack(
               fit: StackFit.expand,
               children: [
-                Backdrop(mode: mode, brightness: brightness),
+                Backdrop(
+                  mode: mode,
+                  brightness: brightness,
+                  verticalOffset: phoneLayout?.backdropOffset ?? 0,
+                ),
                 Positioned(
                   left: media.viewPadding.left + 16,
                   right: media.viewPadding.right + 16,
                   top: headerTop,
-                  height: 56,
+                  height: PhoneFrameLayout.headerHeight,
                   child: Row(
                     children: [
                       Text(

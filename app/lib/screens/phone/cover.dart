@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../core/device_mode.dart';
 import '../../ui/appearance.dart';
 import '../../ui/backdrop.dart';
+import '../../ui/icons.dart';
 import '../../ui/theme.dart';
 
 class CoverScreen extends StatefulWidget {
@@ -17,6 +18,7 @@ class CoverScreen extends StatefulWidget {
 
 class _CoverScreenState extends State<CoverScreen> {
   Timer? _timer;
+  Future<void>? _iconsReady;
   bool _continued = false;
   @override
   void initState() {
@@ -24,11 +26,19 @@ class _CoverScreenState extends State<CoverScreen> {
     _timer = Timer(const Duration(milliseconds: 1200), _continue);
   }
 
-  void _continue() {
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _iconsReady ??= UnavoIcon.precache(context);
+  }
+
+  Future<void> _continue() async {
     if (!mounted || _continued) return;
     _continued = true;
     _timer?.cancel();
-    widget.onContinue();
+    // 자동 전환의 1.2초 동안 예열한다. 이른 탭도 예열이 끝난 뒤 진행한다.
+    await _iconsReady;
+    if (mounted) widget.onContinue();
   }
 
   @override
