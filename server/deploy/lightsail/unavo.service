@@ -1,0 +1,17 @@
+[Unit]
+Description=Unavo signaling/room server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=unavo
+Group=unavo
+Environment=PORT=8787
+Environment=HDAPP_DB=/var/lib/unavo/unavo.sqlite
+WorkingDirectory=/opt/unavo/server
+ExecStart=/usr/local/bin/node src/main.ts
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
