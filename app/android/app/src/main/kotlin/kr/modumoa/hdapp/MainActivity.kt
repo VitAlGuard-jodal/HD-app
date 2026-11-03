@@ -1,6 +1,7 @@
 package kr.modumoa.hdapp
 
 import android.content.Intent
+import android.media.AudioManager
 import android.content.pm.PackageManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -16,6 +17,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        volumeControlStream = AudioManager.STREAM_VOICE_CALL
         val app = application as UnavoApplication
         val messenger = flutterEngine.dartExecutor.binaryMessenger
         deviceChannel = MethodChannel(messenger, "unavo/device").also { channel ->

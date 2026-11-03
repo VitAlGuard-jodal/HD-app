@@ -9,7 +9,6 @@ import '../../core/server_address.dart';
 import '../../net/api_client.dart';
 import '../../ui/icons.dart';
 import '../../ui/control_scale.dart';
-import '../../ui/theme.dart';
 import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/panel_scroll.dart';
 import '../../ui/widgets/panel_field.dart';
@@ -136,7 +135,10 @@ class _AuthScreenState extends State<AuthScreen> {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text('함께 갈 준비.', style: UnavoType.title),
+        const Align(
+          alignment: Alignment.centerLeft,
+          child: StatusChip('로그인·가입', icon: 'user'),
+        ),
         const SizedBox(height: 16),
         Row(
           children: [

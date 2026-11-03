@@ -47,6 +47,7 @@ data class MicState(
     val isRecording: Boolean = false,
     val isPreviewing: Boolean = false,
     val isCallActive: Boolean = false,
+    val isInterrupted: Boolean = false,
     val error: String? = null,
 )
 
@@ -194,13 +195,16 @@ class MicRouter(context: Context) {
                         .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                     .setOnAudioFocusChangeListener({ change ->
-                        if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-                            scope.launch {
-                                routeLock.withLock {
-                                    // 이전 통화에서 늦게 도착한 포커스 이벤트는 새 캡처에 적용하지 않는다.
-                                    if (captureMode == CaptureMode.CALL && focusRequest === request) {
-                                        releaseLocked()
-                                        mutableState.update { it.copy(error = "다른 오디오가 우선되어 마이크를 중지했습니다. 다시 참여해 주세요.") }
+                        scope.launch {
+                            routeLock.withLock {
+                                if (captureMode == CaptureMode.CALL && focusRequest === request) {
+                                    // Retain the FGS/session during an interruption; Dart suspends
+                                    // and resumes existing tracks without recreating the mesh.
+                                    when (change) {
+                                        AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ->
+                                            mutableState.update { it.copy(isInterrupted = true) }
+                                        AudioManager.AUDIOFOCUS_GAIN ->
+                                            mutableState.update { it.copy(isInterrupted = false, error = null) }
                                     }
                                 }
                             }
@@ -287,6 +291,7 @@ class MicRouter(context: Context) {
 
     private suspend fun releaseLocked() = withContext(NonCancellable + Dispatchers.IO) {
         captureMode = CaptureMode.NONE
+        mutableState.update { it.copy(isInterrupted = false) }
         stopCaptureLocked()
         if (audioConfigured) {
             runCatching { manager.mode = AudioManager.MODE_NORMAL }

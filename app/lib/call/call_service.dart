@@ -11,6 +11,7 @@ class CallService extends ChangeNotifier {
   StreamSubscription<dynamic>? _subscription;
   CallState state = const CallState();
   Future<void> Function()? onLeaveCall;
+  VoidCallback? onToggleMute;
   void Function(String code)? onOpenRoom;
   String? pendingOpenRoom;
 
@@ -27,7 +28,10 @@ class CallService extends ChangeNotifier {
         switch (event['event']) {
           case 'leaveCall':
             final callback = onLeaveCall;
-            if (callback != null) unawaited(callback());
+            if (callback != null)
+              unawaited(callback().catchError((Object _) {}));
+          case 'toggleMute':
+            onToggleMute?.call();
           case 'openRoom':
             final code = event['roomCode'] as String?;
             if (code != null) {
@@ -68,6 +72,11 @@ class CallService extends ChangeNotifier {
     if (supported) await channel.invokeMethod<void>('stop');
     state = const CallState();
     notifyListeners();
+  }
+
+  Future<void> setMuted(bool muted) async {
+    if (supported)
+      await channel.invokeMethod<void>('setMuted', {'muted': muted});
   }
 
   @override

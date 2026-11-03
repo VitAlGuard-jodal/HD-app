@@ -28,10 +28,23 @@ class AudioChannel(private val activity: Activity, private val app: UnavoApplica
     private val events = EventChannel(messenger, "unavo/audio/levels")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var meterJob: Job? = null
+    private val routeEvents = EventChannel(messenger, "unavo/audio/routes")
+    private var routeJob: Job? = null
     private var permissionResult: MethodChannel.Result? = null
     private var activityVisible = false
 
-    init { methods.setMethodCallHandler(this); events.setStreamHandler(this) }
+    init {
+        methods.setMethodCallHandler(this)
+        events.setStreamHandler(this)
+        routeEvents.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, sink: EventChannel.EventSink) {
+                routeJob?.cancel()
+                app.publishOutput()
+                routeJob = scope.launch { app.outputState.collect { sink.success(it) } }
+            }
+            override fun onCancel(arguments: Any?) { routeJob?.cancel(); routeJob = null }
+        })
+    }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         scope.launch {
@@ -57,6 +70,12 @@ class AudioChannel(private val activity: Activity, private val app: UnavoApplica
                         activity.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}")))
                         result.success(null)
                     }
+                    "getOutputRoute" -> result.success(app.getOutputRoute())
+                    "setOutputRoute" -> {
+                        check(app.callState.value.isActive) { "통화 연결 후 출력을 변경해 주세요." }
+                        result.success(app.setOutputRoute(requireNotNull(call.argument<String>("route"))))
+                    }
+                    "setCallVolume" -> result.success(app.setCallVolume(call.argument<Int>("value") ?: 100))
                     "setSpeakerphone" -> {
                         check(app.callState.value.isActive) { "통화에 참여한 뒤 출력을 변경해 주세요." }
                         result.success(app.setSpeakerphone(call.argument<Boolean>("enabled") == true))
@@ -114,6 +133,7 @@ class AudioChannel(private val activity: Activity, private val app: UnavoApplica
         permissionResult = null
         methods.setMethodCallHandler(null)
         events.setStreamHandler(null)
+        routeEvents.setStreamHandler(null)
         scope.cancel()
         stopPreviewWhenHidden()
     }

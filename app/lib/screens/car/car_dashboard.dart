@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/app_services.dart';
 import '../../core/device_mode.dart';
 import '../../ui/widgets/mic_level.dart';
-import '../../ui/widgets/panel_button.dart';
+import '../../ui/widgets/floating_bar.dart';
 import '../phone/friends.dart';
 import '../phone/mic.dart';
 import '../phone/room.dart';
@@ -44,32 +44,28 @@ class _CompanionState extends State<_Companion> {
     children: [
       MicLevel(router: widget.services.mic),
       const SizedBox(height: 20),
-      Row(
-        children: [
-          for (final microphone in [false, true]) ...[
-            if (microphone) const SizedBox(width: 12),
-            Expanded(
-              child: PanelButton(
+      Expanded(
+        child: _microphone
+            ? MicScreen(router: widget.services.mic, showLevel: false)
+            : FriendsScreen(services: widget.services, onRoom: (_) {}),
+      ),
+      const SizedBox(height: 16),
+      FloatingBar(
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            for (final microphone in [false, true])
+              FloatingBarButton(
                 label: microphone ? '마이크' : '친구',
                 icon: microphone ? 'mic' : 'friends',
                 selected: _microphone == microphone,
-                style: _microphone == microphone
-                    ? PanelButtonStyle.gold
-                    : PanelButtonStyle.neutral,
                 onPressed: () {
                   FocusScope.of(context).unfocus();
                   setState(() => _microphone = microphone);
                 },
               ),
-            ),
           ],
-        ],
-      ),
-      const SizedBox(height: 20),
-      Expanded(
-        child: _microphone
-            ? MicScreen(router: widget.services.mic, showLevel: false)
-            : FriendsScreen(services: widget.services, onRoom: (_) {}),
+        ),
       ),
     ],
   );

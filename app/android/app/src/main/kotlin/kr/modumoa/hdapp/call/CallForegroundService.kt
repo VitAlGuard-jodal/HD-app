@@ -35,6 +35,7 @@ class CallForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var joinJob: Job? = null
     private var microphoneObserver: Job? = null
+    private var notificationJob: Job? = null
     private var ownsCall = false
     private var sequence = -1
 
@@ -82,11 +83,20 @@ class CallForegroundService : Service() {
                             app.micRouter.apply(chosen)
                             if (app.callState.value.isStopping || sequence != app.callSequence) return@launch
                             app.callState.value = CallState(roomCode = code, selfHandle = handle, isActive = true)
+                            app.setSpeakerphone(true)
+                            notificationJob?.cancel()
+                            notificationJob = scope.launch {
+                                app.callMuted.collect {
+                                    checkNotNull(getSystemService(NotificationManager::class.java))
+                                        .notify(NOTIFICATION_ID, notification(code))
+                                }
+                            }
                             microphoneObserver = scope.launch {
                                 app.micRouter.state.collect { mic ->
                                     if (!mic.isRecording && mic.error != null) {
                                         app.callState.update { it.copy(error = mic.error) }
-                                        stopSelf()
+                                        // Keep the already-started FGS available for reconnect.
+                                        app.publishOutput()
                                     }
                                 }
                             }
@@ -137,18 +147,23 @@ class CallForegroundService : Service() {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java)
             .putExtra(EXTRA_ROOM_CODE, code).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val leave = PendingIntent.getBroadcast(this, 1, Intent(this, CallActionReceiver::class.java).setAction(ACTION_LEAVE),
+        val leave = PendingIntent.getBroadcast(this, 1, Intent(this, CallActionReceiver::class.java).setAction(ACTION_LEAVE).putExtra(EXTRA_ROOM_CODE, code),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val mute = PendingIntent.getBroadcast(this, 2, Intent(this, CallActionReceiver::class.java).setAction(ACTION_MUTE).putExtra(EXTRA_ROOM_CODE, code),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification_small)
             .setContentTitle(if (code.isNullOrBlank()) "우나보 · $status" else "우나보 · 방 $code · $status")
             .setContentText(null).setContentIntent(open).setCategory(Notification.CATEGORY_SERVICE)
             .setOngoing(true).setOnlyAlertOnce(true)
-            .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_call_end), "통화 끊기", leave).build())
+            .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_notification_small),
+                if (app.callMuted.value) "음소거 해제" else "음소거", mute).build())
+            .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_call_end), "방 나가기", leave).build())
             .build()
     }
     companion object {
         const val ACTION_JOIN = "kr.modumoa.hdapp.action.JOIN"
+        const val ACTION_MUTE = "kr.modumoa.hdapp.action.MUTE"
         const val ACTION_LEAVE = "kr.modumoa.hdapp.action.LEAVE"
         const val EXTRA_ROOM_CODE = "roomCode"
         const val EXTRA_HANDLE = "handle"

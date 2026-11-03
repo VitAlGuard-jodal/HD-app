@@ -107,7 +107,10 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('어디서 말할까요', style: UnavoType.title),
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: StatusChip('마이크', icon: 'mic'),
+            ),
             const SizedBox(height: 12),
             if (!widget.router.supported)
               const Text('이 기기의 오디오 연결은 아직 지원하지 않습니다.', style: UnavoType.body)

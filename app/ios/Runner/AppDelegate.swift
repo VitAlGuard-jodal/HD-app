@@ -48,8 +48,10 @@ final class UnavoAudioBridge {
   private let deviceMethods: FlutterMethodChannel
   private let audioEvents: FlutterEventChannel
   private let callEvents: FlutterEventChannel
+  private let routeEvents: FlutterEventChannel
   private let levels = UnavoEventStream()
   private let calls = UnavoEventStream()
+  private let routes = UnavoEventStream()
   private var observers: [NSObjectProtocol] = []
   private var engine: AVAudioEngine?
   private var tapInstalled = false
@@ -58,7 +60,10 @@ final class UnavoAudioBridge {
   private var routeWork: DispatchWorkItem?
   private var routeSignature = ""
   private var sessionActive = false
-  private var speakerRequested = false
+  private var requestedOutput: String? // nil prefers external devices, then speaker
+  private var interrupted = false
+  private var resumeFailed = false
+  private var connectedExternalOutputs = Set<String>()
   private var requestingPermission = false
   private var devices: [AVAudioSessionPortDescription] = []
   private var manualID: Int?
@@ -82,10 +87,13 @@ final class UnavoAudioBridge {
     deviceMethods = FlutterMethodChannel(name: "unavo/device", binaryMessenger: messenger)
     audioEvents = FlutterEventChannel(name: "unavo/audio/levels", binaryMessenger: messenger)
     callEvents = FlutterEventChannel(name: "unavo/call/events", binaryMessenger: messenger)
+    routeEvents = FlutterEventChannel(name: "unavo/audio/routes", binaryMessenger: messenger)
     levels.snapshot = { [weak self] in self?.audioState() ?? [:] }
     calls.snapshot = { [weak self] in self?.callEvent() ?? [:] }
+    routes.snapshot = { [weak self] in self?.outputState() ?? [:] }
     audioEvents.setStreamHandler(levels)
     callEvents.setStreamHandler(calls)
+    routeEvents.setStreamHandler(routes)
     audioMethods.setMethodCallHandler { [weak self] call, result in
       guard let self = self else { result(FlutterError(code: "cancelled", message: "오디오 채널이 닫혔습니다.", details: nil)); return }
       self.handleAudio(call, result)
@@ -101,19 +109,56 @@ final class UnavoAudioBridge {
       default: result(FlutterMethodNotImplemented)
       }
     }
-    observe(AVAudioSession.routeChangeNotification) { [weak self] _ in self?.scheduleRouteRefresh() }
+    observe(AVAudioSession.routeChangeNotification) { [weak self] note in
+      guard let self = self else { return }
+      if let reason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+         reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue {
+        // Rebuild on hardware removal, including a headset hidden by a speaker override.
+        self.connectedExternalOutputs.removeAll()
+      }
+      self.scheduleRouteRefresh()
+    }
     observe(.AVAudioEngineConfigurationChange) { [weak self] note in
       guard let self = self, let changed = note.object as? AVAudioEngine, changed === self.engine else { return }
       self.scheduleRouteRefresh()
     }
     observe(AVAudioSession.interruptionNotification) { [weak self] note in
       guard let self = self, let type = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-            type == AVAudioSession.InterruptionType.began.rawValue,
             self.capture != .none else { return }
-      self.endForSystemEvent("다른 오디오가 우선되어 마이크를 중지했습니다. 다시 참여해 주세요.")
+      if type == AVAudioSession.InterruptionType.began.rawValue {
+        self.interrupted = true
+        self.resumeFailed = false
+        self.stopMeter()
+        // Keep room, AVAudioSession ownership and WebRTC peers. Suspend tracks.
+        self.emitAudio()
+      } else if type == AVAudioSession.InterruptionType.ended.rawValue {
+        do {
+          try self.session.setActive(true)
+          self.sessionActive = true
+          try self.applyOutputRoute()
+          try self.startMeter()
+          self.interrupted = false
+          self.audioError = nil
+        } catch {
+          self.resumeFailed = true
+          self.audioError = "통화 오디오를 재개하지 못했습니다. 다시 연결해 주세요."
+        }
+        self.emitAudio()
+      }
     }
     observe(AVAudioSession.mediaServicesWereResetNotification) { [weak self] _ in
-      self?.endForSystemEvent("오디오 서비스가 재시작되었습니다. 다시 참여해 주세요.")
+      guard let self = self, self.capture != .none else { return }
+      do {
+        self.sessionActive = false
+        try self.configureSession()
+        try self.session.setActive(true)
+        self.sessionActive = true
+        try self.applyOutputRoute()
+        try self.startMeter()
+        self.interrupted = false
+        self.audioError = nil
+        self.emitAudio()
+      } catch { self.endForSystemEvent("오디오 서비스를 재개하지 못했습니다. 다시 연결해 주세요.") }
     }
     observe(UIApplication.didEnterBackgroundNotification) { [weak self] _ in
       guard let self = self, self.capture == .preview else { return }
@@ -122,7 +167,7 @@ final class UnavoAudioBridge {
     }
     do {
       // 카테고리만 설정하고 사용자가 시험/통화를 시작하기 전에는 활성화하지 않는다.
-      try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
+      try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker])
     } catch { audioError = error.localizedDescription }
     refreshDevices()
   }
@@ -164,7 +209,15 @@ final class UnavoAudioBridge {
   }
 
   private func preferredInput() -> AVAudioSessionPortDescription? {
-    if speakerRequested { return devices.first { $0.portType == .builtInMic } }
+    if requestedOutput == "speaker" || requestedOutput == "receiver" {
+      return devices.first { $0.portType == .builtInMic }
+    }
+    if let route = requestedOutput, let port = devices.first(where: { outputName($0.portType) == route }) { return port }
+    if requestedOutput == nil {
+      for route in ["bluetooth", "carAudio", "headphones"] {
+        if let port = devices.first(where: { outputName($0.portType) == route }) { return port }
+      }
+    }
     if let id = manualID, let port = devices.first(where: { inputID($0) == id }) { return port }
     return devices.first { [7, 3, 22].contains(inputType($0)) }
       ?? devices.first { $0.portType == .builtInMic } ?? devices.first
@@ -186,7 +239,64 @@ final class UnavoAudioBridge {
             "isActive": active, "isStopping": stopping, "error": callError as Any? ?? NSNull()]
   }
 
-  private func emitAudio() { levels.sink?(audioState()) }
+  private func emitAudio() {
+    levels.sink?(audioState())
+    routes.sink?(outputState())
+  }
+
+  private func outputName(_ type: AVAudioSession.Port) -> String? {
+    switch type {
+    case .builtInSpeaker: return "speaker"
+    case .builtInReceiver: return "receiver"
+    case .bluetoothHFP, .bluetoothLE: return "bluetooth"
+    case .headphones, .headsetMic, .usbAudio: return "headphones"
+    case .carAudio: return "carAudio"
+    default: return nil
+    }
+  }
+
+  private func availableOutputs() -> [String] {
+    let external = Set((session.availableInputs ?? []).compactMap { outputName($0.portType) }
+      + session.currentRoute.outputs.compactMap { outputName($0.portType) })
+    connectedExternalOutputs.formUnion(external.filter { ["bluetooth", "carAudio", "headphones"].contains($0) })
+    return ["bluetooth", "carAudio", "headphones", "speaker", "receiver"].filter {
+      $0 == "speaker" || $0 == "receiver" || connectedExternalOutputs.contains($0)
+    }
+  }
+
+  private func outputState() -> [String: Any] {
+    return ["route": session.currentRoute.outputs.compactMap { outputName($0.portType) }.first ?? "speaker",
+            "available": availableOutputs(), "interrupted": interrupted, "resumeFailed": resumeFailed,
+            "error": audioError as Any? ?? NSNull()]
+  }
+
+  private func configureSession() throws {
+    var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP, .defaultToSpeaker]
+    // defaultToSpeaker must be removed for an explicit receiver choice.
+    if requestedOutput == "receiver" { options.remove(.defaultToSpeaker) }
+    let mode: AVAudioSession.Mode = capture == .preview ? .default : .voiceChat
+    if session.category != .playAndRecord || session.mode != mode || session.categoryOptions != options {
+      try session.setCategory(.playAndRecord, mode: mode, options: options)
+    }
+  }
+
+  private func applyOutputRoute() throws {
+    if resumeFailed {
+      try session.setActive(true)
+      sessionActive = true
+      interrupted = false
+      resumeFailed = false
+    }
+    if let route = requestedOutput, !availableOutputs().contains(route) { requestedOutput = nil }
+    try configureSession()
+    // .none allows Bluetooth HFP, wired and CarPlay to win over default speaker.
+    let speaker = requestedOutput == "speaker"
+    let isSpeaker = session.currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+    if !speaker { try session.overrideOutputAudioPort(.none) }
+    refreshDevices()
+    try applyPreferredInput()
+    if speaker && !isSpeaker { try session.overrideOutputAudioPort(.speaker) }
+  }
   private func callEvent() -> [String: Any] {
     var state = callState()
     state["event"] = "state"
@@ -212,8 +322,6 @@ final class UnavoAudioBridge {
         audioError = nil
         refreshDevices()
         if capture != .none {
-          speakerRequested = false
-          try session.overrideOutputAudioPort(.none)
           try applyPreferredInput()
           try startMeter()
         }
@@ -245,20 +353,28 @@ final class UnavoAudioBridge {
         UIApplication.shared.open(url, options: [:]) { opened in
           result(opened ? nil : FlutterError(code: "audio_error", message: "설정을 열지 못했습니다.", details: nil))
         }
+      case "getOutputRoute": result(outputState())
+      case "setOutputRoute":
+        guard active else { throw failure("통화 연결 후 출력을 변경해 주세요.") }
+        guard let route = args["route"] as? String, availableOutputs().contains(route) else {
+          throw failure("선택한 출력 장치가 연결되어 있지 않습니다.")
+        }
+        requestedOutput = route
+        try applyOutputRoute()
+        audioError = nil
+        refreshDevices(); emitAudio(); result(outputState())
       case "setSpeakerphone":
-        guard active else { throw failure("통화에 참여한 뒤 출력을 변경해 주세요.") }
-        speakerRequested = args["enabled"] as? Bool ?? false
-        try session.overrideOutputAudioPort(.none)
-        try applyPreferredInput()
-        try session.overrideOutputAudioPort(speakerRequested ? .speaker : .none)
-        try startMeter()
+        guard active else { throw failure("통화 연결 후 출력을 변경해 주세요.") }
+        requestedOutput = (args["enabled"] as? Bool) == true ? nil : "receiver"
+        try applyOutputRoute()
+        audioError = nil
         refreshDevices(); emitAudio()
         result(session.currentRoute.outputs.contains { $0.portType == .builtInSpeaker })
       default: result(FlutterMethodNotImplemented)
       }
     } catch {
-      if capture != .none { endForSystemEvent(error.localizedDescription) }
-      else { audioError = error.localizedDescription; emitAudio() }
+      audioError = error.localizedDescription
+      emitAudio()
       result(FlutterError(code: "audio_error", message: error.localizedDescription, details: nil))
     }
   }
@@ -286,6 +402,7 @@ final class UnavoAudioBridge {
           starting = false; active = true; emitCall()
         }
         result(callState())
+      case "setMuted": result(nil) // WebRTC track state is owned by Dart.
       case "stop":
         ownsTransition = true
         stopping = true; emitCall()
@@ -306,11 +423,11 @@ final class UnavoAudioBridge {
     capture = kind
     audioError = nil
     do {
-      try session.setCategory(.playAndRecord, mode: kind == .call ? .voiceChat : .default, options: [.allowBluetoothHFP])
+      try configureSession()
       try session.setActive(true)
       sessionActive = true
       refreshDevices()
-      try applyPreferredInput()
+      try applyOutputRoute()
       try startMeter()
       refreshDevices(); emitAudio()
     } catch {
@@ -386,7 +503,9 @@ final class UnavoAudioBridge {
     routeWork?.cancel(); routeWork = nil
     capture = .none
     stopMeter()
-    speakerRequested = false
+    requestedOutput = nil
+    interrupted = false
+    resumeFailed = false
     guard sessionActive else { return }
     defer { refreshDevices() }
     try? session.overrideOutputAudioPort(.none)
@@ -412,9 +531,13 @@ final class UnavoAudioBridge {
     let work = DispatchWorkItem { [weak self] in
       guard let self = self else { return }
       self.refreshDevices()
-      if self.capture != .none {
+      if self.capture != .none && !self.interrupted {
         do {
-          try self.applyPreferredInput()
+          // Applying .none repeatedly can itself emit route-change notifications.
+          // Only correct a default/explicit route when it no longer matches.
+          let actual = self.session.currentRoute.outputs.compactMap { self.outputName($0.portType) }.first
+          let preferred = self.requestedOutput ?? self.availableOutputs().first
+          if actual != preferred { try self.applyOutputRoute() }
           if self.capture == .preview && (self.engine?.isRunning != true || self.routeSignature != self.currentSignature()) {
             try self.startMeter()
           }
@@ -437,5 +560,6 @@ final class UnavoAudioBridge {
     deviceMethods.setMethodCallHandler(nil)
     audioEvents.setStreamHandler(nil)
     callEvents.setStreamHandler(nil)
+    routeEvents.setStreamHandler(nil)
   }
 }

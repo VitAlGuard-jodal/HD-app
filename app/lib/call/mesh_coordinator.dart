@@ -2,6 +2,7 @@ import 'dart:async';
 
 const meshMemberLimit = 4;
 const meshCapacityReason = '음성 통화는 먼저 입장한 4명까지 참여할 수 있습니다.';
+const meshRecoveryTimeout = Duration(seconds: 8);
 
 enum MeshPeerState { connecting, connected, failed, closed }
 
@@ -45,11 +46,15 @@ class MeshCoordinator {
   final Set<String> _ignored = {};
   List<String> _members = [];
   Future<void> _tail = Future<void>.value();
+  Future<void>? _closeFuture;
   bool _closed = false;
   bool _joined = false;
   int _offerNumber = 0;
 
   Set<String> get peers => Set.unmodifiable(_peers.keys);
+  Map<String, MeshPeerState> get peerStates => Map.unmodifiable({
+    for (final entry in _peers.entries) entry.key: entry.value.state,
+  });
   Future<void> get idle => _tail;
 
   // The server orders hello.members by joinedAt, then handle for ties.
@@ -68,7 +73,9 @@ class MeshCoordinator {
       // updates admission; incumbents wait for the newcomer's offer.
       for (final handle in admitted(_members)) {
         if (_closed) return;
-        if (handle != selfHandle) await _offer(handle);
+        if (handle != selfHandle) {
+          await _forPeer(handle, () => _offer(handle));
+        }
       }
     });
   }
@@ -85,107 +92,122 @@ class MeshCoordinator {
     });
   }
 
-  Future<void> onSignal(String from, String kind, Object? payload) =>
-      _enqueue(() async {
-        if (!_allows(from) || payload is! Map) return;
-        final data = Map<String, Object?>.from(payload);
-        final id = data['negotiationId'];
-        if (id is! String || id.isEmpty || id.length > 200) return;
-        final key = '$from/$id';
-        if (_ignored.contains(key)) return;
-        switch (kind) {
-          case 'offer':
-            if (data['type'] != 'offer' || data['sdp'] is! String) return;
-            var slot = _peers[from];
-            if (slot?.id == id && slot!.remoteDescription) return;
-            if (slot != null && slot.offerPending) {
-              if (selfHandle.compareTo(from) < 0) {
-                // Lexicographically smaller handle keeps its local offer.
-                _ignore(key);
-                // The first offer may have arrived before this member pressed
-                // Join call (or before its SSE connected). Replay it and ICE.
-                final offer = slot.localOffer;
-                if (offer != null) {
-                  await sendSignal(from, 'offer', {
-                    ...offer,
+  Future<void> onSignal(String from, String kind, Object? payload) => _enqueue(
+    () => _forPeer(from, () async {
+      if (!_allows(from) || payload is! Map) return;
+      final data = Map<String, Object?>.from(payload);
+      final id = data['negotiationId'];
+      if (id is! String || id.isEmpty || id.length > 200) return;
+      final key = '$from/$id';
+      if (_ignored.contains(key)) return;
+      switch (kind) {
+        case 'offer':
+          if (data['type'] != 'offer' || data['sdp'] is! String) return;
+          var slot = _peers[from];
+          final recoveryAttempts = slot?.retryAttempts ?? 0;
+          final recovering = slot?.recovering ?? false;
+          if (slot?.id == id && slot!.remoteDescription) return;
+          if (slot != null && slot.offerPending) {
+            if (selfHandle.compareTo(from) < 0) {
+              // Lexicographically smaller handle keeps its local offer.
+              _ignore(key);
+              // The first offer may have arrived before this member pressed
+              // Join call (or before its SSE connected). Replay it and ICE.
+              final offer = slot.localOffer;
+              if (offer != null) {
+                await sendSignal(from, 'offer', {
+                  ...offer,
+                  'negotiationId': slot.id,
+                });
+                for (final ice in slot.localIce) {
+                  await sendSignal(from, 'ice', {
+                    ...ice,
                     'negotiationId': slot.id,
                   });
-                  for (final ice in slot.localIce) {
-                    await sendSignal(from, 'ice', {
-                      ...ice,
-                      'negotiationId': slot.id,
-                    });
-                  }
                 }
-                return;
               }
-              // Recreate instead of relying on native SDP rollback support.
-              await _drop(from);
-              slot = null;
-            }
-            if (slot == null) slot = await _newPeer(from);
-            if (slot == null || !_current(from, slot)) return;
-            if (slot.id != null && slot.id != id) _ignore('$from/${slot.id}');
-            slot.id = id;
-            slot.remoteDescription = false;
-            slot.offerPending = false;
-            slot.localOffer = null;
-            slot.localIce.clear();
-            final answer = await slot.peer!.answerOffer(data);
-            if (!_current(from, slot)) return;
-            slot.remoteDescription = true;
-            await _flushIce(from, slot);
-            await sendSignal(from, 'answer', {...answer, 'negotiationId': id});
-          case 'answer':
-            final slot = _peers[from];
-            if (slot == null ||
-                !slot.offerPending ||
-                slot.id != id ||
-                data['type'] != 'answer' ||
-                data['sdp'] is! String)
               return;
-            await slot.peer!.acceptAnswer(data);
-            if (!_current(from, slot)) return;
-            slot.offerPending = false;
-            slot.remoteDescription = true;
-            await _flushIce(from, slot);
-          case 'ice':
-            if (data['candidate'] is! String) return;
-            final slot = _peers[from];
-            if (slot != null && slot.id == id && slot.remoteDescription) {
-              await slot.peer!.addCandidate(data);
-            } else {
-              if (_pendingIce.length >= 32 && !_pendingIce.containsKey(key)) {
-                _pendingIce.remove(_pendingIce.keys.first);
-              }
-              final pending = _pendingIce.putIfAbsent(key, () => []);
-              if (pending.length < 128) pending.add(data);
             }
-          case 'custom':
-            if (data['type'] == 'mesh-left' && _peers[from]?.id == id) {
-              await _drop(from);
+            // Recreate instead of relying on native SDP rollback support.
+            await _drop(from);
+            slot = null;
+          }
+          if (slot?.peer == null) slot = await _newPeer(from);
+          if (slot == null || !_current(from, slot)) return;
+          // Glare can replace the native peer, but cannot reset its retry
+          // budget or leave a silent recovery without a response deadline.
+          if (recovering) {
+            slot.retryAttempts = recoveryAttempts;
+            slot.recovering = true;
+            _schedulePeerRetry(from, slot);
+          }
+          if (slot.id != null && slot.id != id) _ignore('$from/${slot.id}');
+          slot.id = id;
+          slot.remoteDescription = false;
+          slot.offerPending = false;
+          slot.localOffer = null;
+          slot.localIce.clear();
+          final answer = await slot.peer!.answerOffer(data);
+          if (!_current(from, slot)) return;
+          slot.remoteDescription = true;
+          await _flushIce(from, slot);
+          await sendSignal(from, 'answer', {...answer, 'negotiationId': id});
+        case 'answer':
+          final slot = _peers[from];
+          if (slot == null ||
+              !slot.offerPending ||
+              slot.id != id ||
+              data['type'] != 'answer' ||
+              data['sdp'] is! String)
+            return;
+          await slot.peer!.acceptAnswer(data);
+          if (!_current(from, slot)) return;
+          slot.offerPending = false;
+          slot.remoteDescription = true;
+          await _flushIce(from, slot);
+        case 'ice':
+          if (data['candidate'] is! String) return;
+          final slot = _peers[from];
+          if (slot != null && slot.id == id && slot.remoteDescription) {
+            await slot.peer!.addCandidate(data);
+          } else {
+            if (_pendingIce.length >= 32 && !_pendingIce.containsKey(key)) {
+              _pendingIce.remove(_pendingIce.keys.first);
             }
-        }
-      });
+            final pending = _pendingIce.putIfAbsent(key, () => []);
+            if (pending.length < 128) pending.add(data);
+          }
+        case 'custom':
+          if (data['type'] == 'mesh-left' && _peers[from]?.id == id) {
+            await _drop(from);
+          }
+      }
+    }),
+  );
 
   // After credentials change, only one side initiates each ICE restart.
   Future<void> restartIce() => _enqueue(() async {
     for (final handle in _peers.keys.toList()) {
       if (_closed) return;
-      if (_peers[handle]!.offerPending) {
-        // An unanswered offer may contain an allocation using old TURN
-        // credentials. Rebuild it so a late join never replays expired ICE.
-        await _drop(handle);
-        await _offer(handle);
-      } else if (selfHandle.compareTo(handle) < 0) {
-        await _offer(handle, iceRestart: true);
-      }
+      final slot = _peers[handle]!;
+      if (slot.recovering || slot.state == MeshPeerState.failed) continue;
+      await _forPeer(handle, () async {
+        if (_peers[handle]!.offerPending) {
+          // An unanswered offer may contain an allocation using old TURN
+          // credentials. Rebuild it so a late join never replays expired ICE.
+          await _drop(handle);
+          await _offer(handle);
+        } else if (selfHandle.compareTo(handle) < 0) {
+          await _offer(handle, iceRestart: true);
+        }
+      });
     }
   });
 
   Future<void> _offer(String handle, {bool iceRestart = false}) async {
     if (!_allows(handle)) return;
-    final slot = _peers[handle] ?? await _newPeer(handle);
+    final existing = _peers[handle];
+    final slot = existing?.peer != null ? existing : await _newPeer(handle);
     if (slot == null || !_current(handle, slot)) return;
     if (slot.id != null) _ignore('$handle/${slot.id}');
     final id = '$selfHandle:$sessionId:${++_offerNumber}';
@@ -201,9 +223,9 @@ class MeshCoordinator {
   }
 
   Future<_PeerSlot?> _newPeer(String handle) async {
-    final slot = _PeerSlot();
+    final slot = _peers[handle] ?? _PeerSlot();
     _peers[handle] = slot;
-    onPeerState?.call(handle, MeshPeerState.connecting);
+    _publishPeer(handle, slot, MeshPeerState.connecting);
     try {
       slot.peer = await createPeer(
         handle,
@@ -212,18 +234,32 @@ class MeshCoordinator {
           if (id == null || !_current(handle, slot)) return;
           if (slot.localIce.length < 128) slot.localIce.add(candidate);
           unawaited(
-            _enqueue(() async {
-              if (_current(handle, slot) && slot.id == id) {
-                await sendSignal(handle, 'ice', {
-                  ...candidate,
-                  'negotiationId': id,
-                });
-              }
-            }).catchError((Object _) {}),
+            _enqueue(
+              () => _forPeer(handle, () async {
+                if (_current(handle, slot) && slot.id == id) {
+                  await sendSignal(handle, 'ice', {
+                    ...candidate,
+                    'negotiationId': id,
+                  });
+                }
+              }),
+            ).catchError((Object _) {}),
           );
         },
         (state) {
-          if (_current(handle, slot)) onPeerState?.call(handle, state);
+          if (!_current(handle, slot)) return;
+          if (state == MeshPeerState.connected) {
+            slot.retryTimer?.cancel();
+            slot.retryTimer = null;
+            slot.retryAttempts = 0;
+            slot.recovering = false;
+            _publishPeer(handle, slot, state);
+          } else if (state == MeshPeerState.failed ||
+              state == MeshPeerState.closed) {
+            _failPeer(handle, slot);
+          } else if (slot.recovering || slot.retryAttempts < 3) {
+            _publishPeer(handle, slot, state);
+          }
         },
       );
       if (!_current(handle, slot)) {
@@ -234,10 +270,67 @@ class MeshCoordinator {
       }
       return slot;
     } catch (_) {
-      _peers.remove(handle);
-      onPeerState?.call(handle, MeshPeerState.failed);
-      rethrow;
+      if (_current(handle, slot)) _failPeer(handle, slot);
+      return null;
     }
+  }
+
+  void _publishPeer(String handle, _PeerSlot slot, MeshPeerState state) {
+    slot.state = state;
+    onPeerState?.call(handle, state);
+  }
+
+  // Negotiation and ICE failures belong to this peer, never to the entire call.
+  Future<void> _forPeer(String handle, Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (_) {
+      final slot = _peers[handle];
+      if (slot != null && _current(handle, slot)) _failPeer(handle, slot);
+    }
+  }
+
+  void _failPeer(String handle, _PeerSlot slot) {
+    if (!_current(handle, slot)) return;
+    if (slot.retryAttempts >= 3) {
+      slot.retryTimer?.cancel();
+      slot.retryTimer = null;
+      slot.recovering = false;
+      _publishPeer(handle, slot, MeshPeerState.failed);
+      return;
+    }
+    slot.recovering = true;
+    _publishPeer(handle, slot, MeshPeerState.connecting);
+    _schedulePeerRetry(handle, slot);
+  }
+
+  void _schedulePeerRetry(String handle, _PeerSlot slot) {
+    if (!_current(handle, slot) || !slot.recovering || slot.retryTimer != null)
+      return;
+    final exhausted = slot.retryAttempts >= 3;
+    final delay = exhausted
+        ? meshRecoveryTimeout
+        : Duration(seconds: 2 << slot.retryAttempts);
+    slot.retryTimer = Timer(delay, () {
+      slot.retryTimer = null;
+      if (!_current(handle, slot) || !slot.recovering) return;
+      if (exhausted) {
+        slot.recovering = false;
+        _publishPeer(handle, slot, MeshPeerState.failed);
+        return;
+      }
+      unawaited(
+        _enqueue(() async {
+          // Recheck after queued SDP work: recovery/leave may have won the race.
+          if (!_current(handle, slot) || !slot.recovering) return;
+          slot.retryAttempts++;
+          await _forPeer(handle, () => _offer(handle, iceRestart: true));
+          // A silent peer may never emit another failed event. Keep a bounded
+          // response deadline, including after the third and final restart.
+          _schedulePeerRetry(handle, slot);
+        }).catchError((Object _) {}),
+      );
+    });
   }
 
   Future<void> _flushIce(String handle, _PeerSlot slot) async {
@@ -267,6 +360,8 @@ class MeshCoordinator {
   Future<void> _drop(String handle) async {
     final slot = _peers.remove(handle);
     if (slot == null) return;
+    slot.retryTimer?.cancel();
+    slot.recovering = false;
     if (slot.id != null) _ignore('$handle/${slot.id}');
     try {
       await slot.peer?.close();
@@ -276,8 +371,14 @@ class MeshCoordinator {
   }
 
   Future<void> close() {
+    final closing = _closeFuture;
+    if (closing != null) return closing;
     _closed = true; // Invalidate in-flight factory/SDP work immediately.
-    return _enqueue(() async {
+    for (final slot in _peers.values) {
+      slot.retryTimer?.cancel();
+      slot.recovering = false;
+    }
+    return _closeFuture = _enqueue(() async {
       Object? firstError;
       StackTrace? firstStack;
       for (final handle in _peers.keys.toList()) {
@@ -316,6 +417,10 @@ class MeshCoordinator {
 
 class _PeerSlot {
   MeshPeer? peer;
+  MeshPeerState state = MeshPeerState.connecting;
+  Timer? retryTimer;
+  int retryAttempts = 0;
+  bool recovering = false;
   String? id;
   bool offerPending = false;
   bool remoteDescription = false;

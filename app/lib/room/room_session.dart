@@ -9,6 +9,7 @@ import '../call/call_state.dart';
 import '../call/media_engine.dart';
 import '../call/mesh_coordinator.dart';
 import '../core/errors.dart';
+import '../core/device_mode.dart';
 import '../net/api_client.dart';
 import '../net/models.dart';
 
@@ -54,7 +55,12 @@ class RoomSession extends ChangeNotifier {
     required this.callService,
     required this.micRouter,
   }) {
-    callService.onLeaveCall = leaveCall;
+    callService.onLeaveCall = leave;
+    callService.onToggleMute = () {
+      if (call.isActive || joiningCall) setMuted(!muted);
+    };
+    micRouter.addListener(_audioChanged);
+    callVolume = store.callVolume;
     callService.addListener(_nativeCallChanged);
     mediaEngine.remoteSpeaking = (handle, speaking) {
       if (speaking) {
@@ -72,18 +78,45 @@ class RoomSession extends ChangeNotifier {
     mediaEngine.connectionChanged = (connection, message) {
       mediaConnection = connection;
       mediaError = message;
+      if (connection == MediaConnectionState.failed && !joiningCall) {
+        _scheduleRetry();
+      } else if (connection == MediaConnectionState.connected) {
+        if (!joiningCall) retryAttempts = 0;
+        _retryTimer?.cancel();
+        _retryTimer = null;
+      }
       _notify();
     };
+    _peerSubscription = mediaEngine.peerStateChanges.listen((_) => _notify());
   }
   final ApiClient api;
   final MediaEngine mediaEngine;
   final SessionStore store;
   final CallService callService;
   final MicRouter micRouter;
+  late final StreamSubscription<Map<String, MeshPeerState>> _peerSubscription;
+  Map<String, MeshPeerState> get peerStates => mediaEngine.peerStates;
   RoomState state = const RoomState();
   CallState get call => callService.state;
   bool muted = false;
-  bool speakerphone = false;
+  bool speakerphone = true;
+  late int callVolume;
+  bool permissionDenied = false;
+  int retryAttempts = 0;
+  Timer? _retryTimer;
+  bool _wantCall = false;
+  bool _interrupted = false;
+  int? _lastSystemVolume;
+  bool _settingVolume = false;
+  Future<void> _volumeQueue = Future<void>.value();
+  OutputRoute get outputRoute => micRouter.outputRoute;
+  bool get canReconnect =>
+      mediaConnection == MediaConnectionState.failed &&
+      !joiningCall &&
+      _retryTimer == null;
+  String get outputLabel =>
+      '현재 ${outputRoute.label}. 전환 순서: '
+      '${micRouter.availableOutputRoutes.map((route) => route.label).join(' → ')}';
   bool joiningCall = false;
   MediaConnectionState mediaConnection = MediaConnectionState.idle;
   String? mediaError;
@@ -117,6 +150,12 @@ class RoomSession extends ChangeNotifier {
     if (!force && state.code == code && _subscription != null) return;
     if (state.code != null && state.code != code)
       throw StateError(joinedRoomReason);
+    if (state.code == null) {
+      _wantCall = true;
+      retryAttempts = 0;
+      permissionDenied = false;
+      speakerphone = true;
+    }
     final generation = ++_generation;
     await _subscription?.cancel();
     _subscription = null;
@@ -185,12 +224,9 @@ class RoomSession extends ChangeNotifier {
       case Hello():
         await _setMembers(event.members);
         if (!_current(generation)) return;
-        if (call.isActive &&
-            !joiningCall &&
-            call.roomCode == code &&
-            call.selfHandle == event.self) {
-          await _startMedia(code, event.self);
-        }
+        // A new SSE hello must not rebuild an already running mesh.
+        state = state.copyWith(isConnected: true, error: null);
+        _maybeAutoJoin();
       case MemberJoined():
         await _refresh(code, generation);
       case MemberLeft():
@@ -201,7 +237,8 @@ class RoomSession extends ChangeNotifier {
         await _refresh(code, generation);
     }
     if (!_current(generation)) return;
-    if (event is! Disconnected) state = state.copyWith(isConnected: true);
+    // Only hello establishes readiness. Signals during a reconnect are not hello.
+    if (event is MemberJoined || event is MemberLeft) _maybeAutoJoin();
     _notify();
   }
 
@@ -228,24 +265,67 @@ class RoomSession extends ChangeNotifier {
           store.handle ?? '',
           members.map((m) => m.handle),
         )) {
-      await leaveCall();
+      _mediaJoined = false;
+      await mediaEngine.leave();
       mediaError = meshCapacityReason;
     }
   }
 
-  Future<void> _startMedia(String code, String handle) async {
-    _mediaJoined = true;
-    mediaEngine.setMuted(muted);
+  void _maybeAutoJoin() {
+    if (!_wantCall ||
+        _disposed ||
+        joiningCall ||
+        _retryTimer != null ||
+        permissionDenied ||
+        retryAttempts >= 3 && mediaConnection == MediaConnectionState.failed ||
+        callJoinBlockedReason != null)
+      return;
+    if (mediaConnection == MediaConnectionState.failed) {
+      _scheduleRetry();
+    } else if (!_mediaJoined) {
+      unawaited(_autoJoin());
+    }
+  }
+
+  Future<void> _autoJoin() async {
     try {
-      await mediaEngine.join(code, handle);
-      if (!_mediaJoined || !call.isActive) return;
-      // Reapply the existing native output choice after WebRTC configures audio.
-      speakerphone = await micRouter.setSpeakerphone(speakerphone);
-    } catch (error) {
-      await leaveCall();
-      mediaConnection = MediaConnectionState.failed;
-      mediaError = exceptionMessage(error, '음성 연결을 시작하지 못했습니다.');
-      rethrow;
+      await joinCall();
+    } catch (_) {
+      /* State and retry are owned by joinCall. */
+    }
+  }
+
+  void _scheduleRetry() {
+    if (!_wantCall ||
+        _disposed ||
+        state.isLeaving ||
+        joiningCall ||
+        permissionDenied ||
+        _retryTimer != null ||
+        retryAttempts >= 3 ||
+        callJoinBlockedReason != null)
+      return;
+    final delay = Duration(seconds: 1 << retryAttempts);
+    retryAttempts++;
+    _retryTimer = Timer(delay, () {
+      _retryTimer = null;
+      if (_wantCall && !_disposed && !state.isLeaving) unawaited(_autoJoin());
+    });
+    _notify();
+  }
+
+  Future<void> reconnect() async {
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    retryAttempts = 0;
+    permissionDenied = false;
+    _wantCall = true;
+    if (!state.isConnected && state.code != null) {
+      // Keep an existing mesh alive while reconnecting SSE.
+      await open(state.code!, force: true);
+    } else {
+      if (_mediaJoined) mediaConnection = MediaConnectionState.failed;
+      await joinCall();
     }
   }
 
@@ -256,44 +336,102 @@ class RoomSession extends ChangeNotifier {
         handle == null ||
         joiningCall ||
         call.isStopping ||
-        _stopFuture != null)
+        _stopFuture != null ||
+        state.isLeaving)
       return;
-    if (call.isActive && call.roomCode == code) return;
+    if (_mediaJoined && mediaConnection != MediaConnectionState.failed) return;
     final blocked = callJoinBlockedReason;
-    if (blocked != null) throw StateError(blocked);
-    if (call.roomCode != null && call.roomCode != code)
+    if (blocked != null) return;
+    if (call.roomCode != null && call.roomCode != code) {
       throw StateError('현재 통화에서 나간 뒤 다른 방에 참여해 주세요.');
+    }
     final generation = ++_callGeneration;
+    bool current() =>
+        !_disposed &&
+        _wantCall &&
+        generation == _callGeneration &&
+        state.code == code &&
+        !state.isLeaving;
     joiningCall = true;
+    mediaConnection = MediaConnectionState.connecting;
+    mediaError = null;
     _notify();
     try {
-      // Recheck capacity against server order just before allocating audio.
       final details = await api.getRoom(code);
-      if (_disposed || generation != _callGeneration) return;
+      if (!current()) return;
       await _setMembers(details.members);
-      final blocked = callJoinBlockedReason;
-      if (blocked != null) throw StateError(blocked);
-      await micRouter.refreshPermissions();
-      if (!micRouter.permissions.microphone)
-        await micRouter.requestPermissions();
-      if (!micRouter.permissions.microphone)
-        throw StateError('마이크 권한을 먼저 허용해 주세요.');
-      if (_disposed || generation != _callGeneration) return;
-      await micRouter.stopPreview();
-      if (_disposed || generation != _callGeneration) return;
-      await callService.start(code, handle);
-      if (_disposed || generation != _callGeneration || state.code != code) {
-        await callService.stop();
+      if (!current() || callJoinBlockedReason != null) {
+        mediaConnection = MediaConnectionState.idle;
         return;
       }
-      if (call.isActive) {
-        await _startMedia(code, handle);
+      await micRouter.refreshPermissions();
+      if (!current()) return;
+      if (!micRouter.permissions.microphone)
+        await micRouter.requestPermissions();
+      if (!current()) return;
+      if (!micRouter.permissions.microphone) {
+        permissionDenied = true;
+        throw StateError(
+          defaultTargetPlatform == TargetPlatform.iOS
+              ? '마이크 권한이 꺼져 있습니다. 설정 > 우나보 > 마이크를 켜 주세요.'
+              : '마이크 권한이 꺼져 있습니다. 설정 > 앱 > 우나보 > 권한에서 마이크를 허용해 주세요.',
+        );
       }
+      permissionDenied = false;
+      await micRouter.stopPreview();
+      if (!current()) return;
+      // On Android this starts a microphone FGS on phones AND cars, while
+      // the app is visible, before allocating WebRTC audio. Retries retain it.
+      if (!call.isActive) await callService.start(code, handle);
+      if (!current()) {
+        // A late native start must not survive the user's exit.
+        if (call.roomCode == code) await callService.stop();
+        return;
+      }
+      if (!call.isActive) throw StateError(call.error ?? '통화 서비스를 시작하지 못했습니다.');
+      if (_mediaJoined) {
+        _mediaJoined = false;
+        await mediaEngine.leave();
+        if (!current()) return;
+      }
+      await micRouter.refreshOutputRoute();
+      if (!current()) return;
+      if (carVolumeSlider &&
+          micRouter.isAutomotive &&
+          micRouter.systemVolumeWritable &&
+          micRouter.systemCallVolume != null) {
+        callVolume = micRouter.systemCallVolume!;
+        _lastSystemVolume = callVolume;
+        await store.setCallVolume(callVolume);
+      }
+      mediaEngine.setMuted(muted);
+      mediaEngine.setInterrupted(micRouter.audioInterrupted);
+      await mediaEngine.setVolume(callVolume / 100);
+      if (!current()) return;
+      _mediaJoined = true;
+      await mediaEngine.join(code, handle);
+      if (!current()) return;
+      await micRouter.applyOutputRoute();
+      if (mediaConnection == MediaConnectionState.connected) retryAttempts = 0;
+      speakerphone = outputRoute == OutputRoute.speaker;
     } catch (error) {
-      _setError(errorMessage(error));
+      if (current()) {
+        _mediaJoined = false;
+        try {
+          await mediaEngine.leave();
+        } catch (_) {
+          /* Keep the original error. */
+        }
+        if (current()) {
+          mediaConnection = MediaConnectionState.failed;
+          mediaError = exceptionMessage(error, '음성 연결을 시작하지 못했습니다.');
+        }
+      }
       rethrow;
     } finally {
       joiningCall = false;
+      if (current() && mediaConnection == MediaConnectionState.failed)
+        _scheduleRetry();
       _notify();
     }
   }
@@ -306,10 +444,14 @@ class RoomSession extends ChangeNotifier {
 
   Future<void> _stopCall() async {
     ++_callGeneration;
+    _wantCall = false;
+    _retryTimer?.cancel();
+    _retryTimer = null;
     _mediaJoined = false;
     _speaking.clear();
     muted = false;
-    speakerphone = false;
+    speakerphone = true;
+    micRouter.resetOutputPreference();
     try {
       try {
         await mediaEngine.leave();
@@ -325,6 +467,12 @@ class RoomSession extends ChangeNotifier {
   void setMuted(bool value) {
     muted = value;
     mediaEngine.setMuted(value);
+    unawaited(
+      callService.setMuted(value).catchError((Object error) {
+        mediaError = exceptionMessage(error, '음소거 알림을 갱신하지 못했습니다.');
+        _notify();
+      }),
+    );
     _notify();
   }
 
@@ -333,20 +481,80 @@ class RoomSession extends ChangeNotifier {
     _notify();
   }
 
-  // 알림의 끊기와 네이티브 오디오 포커스 상실 모두 미디어를 정리한다.
-  void _nativeCallChanged() {
-    if (!call.isActive && !call.isStarting) {
-      if (_mediaJoined) {
-        unawaited(
-          mediaEngine.leave().catchError((Object error) {
-            _setError(errorMessage(error));
-          }),
-        );
-        _mediaJoined = false;
+  Future<void> cycleOutputRoute() async {
+    await micRouter.cycleOutputRoute();
+    speakerphone = outputRoute == OutputRoute.speaker;
+    _notify();
+  }
+
+  Future<void> setCallVolume(int value) {
+    callVolume = value.clamp(0, 100);
+    _notify();
+    final volume = callVolume;
+    final operation = _volumeQueue.then((_) async {
+      if (_disposed) return;
+      _settingVolume = true;
+      try {
+        await mediaEngine.setVolume(volume / 100);
+        if (carVolumeSlider && micRouter.isAutomotive) {
+          await micRouter.setSystemCallVolume(volume);
+        }
+        _lastSystemVolume = micRouter.systemCallVolume;
+        await store.setCallVolume(volume);
+      } finally {
+        _settingVolume = false;
       }
+    });
+    _volumeQueue = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  void _audioChanged() {
+    speakerphone = outputRoute == OutputRoute.speaker;
+    if (_interrupted != micRouter.audioInterrupted) {
+      _interrupted = micRouter.audioInterrupted;
+      mediaEngine.setInterrupted(_interrupted);
+    }
+    if (_wantCall &&
+        micRouter.resumeFailed &&
+        mediaConnection != MediaConnectionState.failed) {
+      mediaConnection = MediaConnectionState.failed;
+      mediaError = micRouter.outputError ?? '통화 오디오를 재개하지 못했습니다.';
+      _scheduleRetry();
+    }
+    final volume = micRouter.systemCallVolume;
+    if (carVolumeSlider &&
+        micRouter.isAutomotive &&
+        micRouter.systemVolumeWritable &&
+        !_settingVolume &&
+        volume != null &&
+        volume != _lastSystemVolume) {
+      _lastSystemVolume = volume;
+      callVolume = volume;
+      unawaited(store.setCallVolume(volume));
+      unawaited(
+        mediaEngine.setVolume(volume / 100).catchError((Object error) {
+          mediaError = exceptionMessage(error, '통화 음량을 변경하지 못했습니다.');
+          _notify();
+        }),
+      );
+    }
+    _notify();
+  }
+
+  void _nativeCallChanged() {
+    if (!call.isActive && !call.isStarting && _mediaJoined && _wantCall) {
+      _mediaJoined = false;
       _speaking.clear();
-      muted = false;
-      speakerphone = false;
+      unawaited(
+        mediaEngine.leave().catchError((Object _) {}).whenComplete(() {
+          if (_disposed || !_wantCall) return;
+          mediaConnection = MediaConnectionState.failed;
+          mediaError = call.error ?? '통화 오디오가 중단되었습니다. 다시 연결해 주세요.';
+          _scheduleRetry();
+          _notify();
+        }),
+      );
     }
     _notify();
   }
@@ -355,6 +563,9 @@ class RoomSession extends ChangeNotifier {
     final code = state.code;
     if (code == null || state.isLeaving) return;
     state = state.copyWith(isConnected: false, isLeaving: true);
+    _wantCall = false;
+    _retryTimer?.cancel();
+    _retryTimer = null;
     ++_generation;
     _notify();
     try {
@@ -406,10 +617,14 @@ class RoomSession extends ChangeNotifier {
     unawaited(_subscription?.cancel());
     callService.removeListener(_nativeCallChanged);
     callService.onLeaveCall = null;
+    callService.onToggleMute = null;
+    micRouter.removeListener(_audioChanged);
+    _retryTimer?.cancel();
     mediaEngine.remoteSpeaking = null;
     mediaEngine.sendSignal = null;
     mediaEngine.connectionChanged = null;
-    unawaited(mediaEngine.leave().catchError((Object _) {}));
+    unawaited(_peerSubscription.cancel());
+    unawaited(mediaEngine.dispose().catchError((Object _) {}));
     super.dispose();
   }
 }

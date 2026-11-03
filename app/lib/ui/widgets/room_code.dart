@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
+import 'package:flutter/services.dart';
 
 import '../theme.dart';
 
@@ -56,4 +57,20 @@ class RoomCode extends StatelessWidget {
       },
     ),
   );
+}
+
+/// Reject an entire mixed/non-ASCII edit, including IME composition and paste.
+class RoomCodeFormatter extends TextInputFormatter {
+  const RoomCodeFormatter();
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    if (!RegExp(r'^[a-zA-Z0-9]*$').hasMatch(newValue.text)) return oldValue;
+    return newValue.copyWith(
+      text: newValue.text.toUpperCase(),
+      composing: TextRange.empty,
+    );
+  }
 }

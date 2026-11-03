@@ -77,16 +77,6 @@ class _CoverScreenState extends State<CoverScreen> {
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
                   Text('우나보', style: UnavoType.display.copyWith(fontSize: 46)),
-                  const SizedBox(height: 14),
-                  const Text(
-                    '낯선 길도, 함께라면 우리의 길.',
-                    style: TextStyle(
-                      fontSize: 21,
-                      height: 1.5,
-                      fontWeight: FontWeight.w600,
-                      color: UnavoColors.text,
-                    ),
-                  ),
                   const SizedBox(height: 16),
                   Align(
                     alignment: Alignment.centerRight,

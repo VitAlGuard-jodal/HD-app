@@ -51,6 +51,10 @@ class CallChannel(private val app: UnavoApplication, messenger: BinaryMessenger)
                         check(active.isActive) { active.error ?: "통화 참여에 실패했습니다." }
                         result.success(active.toMap())
                     }
+                    "setMuted" -> {
+                        app.callMuted.value = call.argument<Boolean>("muted") == true
+                        result.success(null)
+                    }
                     "stop" -> {
                         app.requestStop()
                         withTimeout(20_000) { app.callState.first { !it.isActive && !it.isStarting && !it.isStopping } }

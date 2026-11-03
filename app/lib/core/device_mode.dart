@@ -2,6 +2,10 @@ import 'package:flutter/services.dart';
 
 enum DeviceMode { phone, car }
 
+// Pleos CALL volume is controlled by hardware keys. Flip only after option A
+// is approved; the native system-volume bridge remains available.
+const carVolumeSlider = false;
+
 class DeviceCapabilities {
   const DeviceCapabilities({required this.mode, required this.hasMicrophone});
 

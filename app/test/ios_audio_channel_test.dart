@@ -46,6 +46,11 @@ void main() {
         case 'permissions':
         case 'requestPermissions':
           return {'microphone': true, 'notifications': true};
+        case 'getOutputRoute':
+          return {
+            'route': 'speaker',
+            'available': ['speaker', 'receiver'],
+          };
         case 'setSpeakerphone':
           return (call.arguments as Map)['enabled'];
         case 'startPreview':
@@ -68,6 +73,7 @@ void main() {
             'isActive': true,
           };
         case 'stop':
+        case 'setMuted':
           return null;
         default:
           throw MissingPluginException(call.method);
@@ -75,7 +81,8 @@ void main() {
     });
     const levelEvents = MethodChannel('unavo/audio/levels');
     const callEvents = MethodChannel('unavo/call/events');
-    for (final channel in [levelEvents, callEvents]) {
+    const routeEvents = MethodChannel('unavo/audio/routes');
+    for (final channel in [levelEvents, callEvents, routeEvents]) {
       messenger.setMockMethodCallHandler(channel, (_) async => null);
     }
     final mic = MicRouter(store);
@@ -90,6 +97,7 @@ void main() {
         CallService.channel,
         levelEvents,
         callEvents,
+        routeEvents,
       ]) {
         messenger.setMockMethodCallHandler(channel, null);
       }
@@ -114,6 +122,23 @@ void main() {
     expect(await mic.setSpeakerphone(true), isTrue);
     expect(await mic.setSpeakerphone(false), isFalse);
     await mic.openSettings();
+    await calls.setMuted(true);
+    var toggled = false;
+    var left = false;
+    calls.onToggleMute = () => toggled = true;
+    calls.onLeaveCall = () async {
+      left = true;
+    };
+    for (final event in ['toggleMute', 'leaveCall']) {
+      await messenger.handlePlatformMessage(
+        'unavo/call/events',
+        const StandardMethodCodec().encodeSuccessEnvelope({'event': event}),
+        (_) {},
+      );
+    }
+    await Future<void>.delayed(Duration.zero);
+    expect(toggled, isTrue);
+    expect(left, isTrue);
     await calls.stop();
     expect(calls.state.isActive, isFalse);
     expect(

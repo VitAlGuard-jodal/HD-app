@@ -94,7 +94,10 @@ class _RoomsScreenState extends State<RoomsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('함께 갈 길', style: UnavoType.title),
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: StatusChip('방', icon: 'rooms'),
+            ),
             const SizedBox(height: 16),
             Row(
               children: [
@@ -128,6 +131,10 @@ class _RoomsScreenState extends State<RoomsScreen> {
                     icon: 'rooms',
                     enabled: canEnter,
                     textCapitalization: TextCapitalization.characters,
+                    // Flutter iOS maps visiblePassword to UIKeyboardTypeASCIICapable.
+                    keyboardType: TextInputType.visiblePassword,
+                    enableSuggestions: false,
+                    inputFormatters: const [RoomCodeFormatter()],
                     textInputAction: TextInputAction.done,
                     onSubmitted: (_) => _enter(create: false),
                   ),
@@ -194,7 +201,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.end,
                                 children: [
                                   Text(
-                                    '${current.members.length}명',
+                                    '${current.members.length}',
                                     style: const TextStyle(
                                       fontSize: 16,
                                       color: UnavoColors.muted,
@@ -223,7 +230,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
             const SizedBox(height: 24),
             PanelButton(
               label: '로그아웃',
-              icon: 'exit',
+              icon: 'lock',
               onPressed: _busy ? null : _logout,
             ),
           ],

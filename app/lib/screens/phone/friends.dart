@@ -8,6 +8,7 @@ import '../../core/errors.dart';
 import '../../net/models.dart';
 import '../../room/room_session.dart';
 import '../../ui/theme.dart';
+import '../../ui/widgets/floating_bar.dart';
 import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/panel_field.dart';
 import '../../ui/widgets/panel_scroll.dart';
@@ -103,9 +104,14 @@ class _FriendsScreenState extends State<FriendsScreen> {
         children: [
           Row(
             children: [
-              const Expanded(child: Text('같이 가는 사람들', style: UnavoType.title)),
+              const Expanded(
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: StatusChip('친구', icon: 'friends'),
+                ),
+              ),
               Text(
-                '${_contacts.length}명',
+                '${_contacts.length}',
                 style: const TextStyle(fontSize: 16, color: UnavoColors.muted),
               ),
             ],
@@ -137,7 +143,10 @@ class _FriendsScreenState extends State<FriendsScreen> {
           Expanded(
             child: PanelViewport(
               child: ListView(
-                padding: const EdgeInsets.only(top: 18, bottom: 9),
+                padding: EdgeInsets.only(
+                  top: 18,
+                  bottom: 9 + FloatingBarInset.of(context),
+                ),
                 clipBehavior: Clip.none,
                 children: [
                   ErrorText(_error),

@@ -43,6 +43,10 @@ class SessionStore extends ChangeNotifier implements TokenStore {
   @override
   String get baseUrl => preferences.getString('baseUrl') ?? defaultBaseUrl;
   int? get manualMicId => preferences.getInt('manualMicId');
+  int get callVolume => (preferences.getInt('callVolume') ?? 100).clamp(0, 100);
+
+  Future<void> setCallVolume(int value) =>
+      preferences.setInt('callVolume', value.clamp(0, 100));
 
   Future<void> setBaseUrl(String value) async {
     await preferences.setString(

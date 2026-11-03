@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../control_scale.dart';
 import '../icons.dart';
 import '../theme.dart';
 import 'focus_ring.dart';
+import 'panel_edit_menu.dart';
 
 class PanelField extends StatelessWidget {
   const PanelField({
@@ -19,6 +21,8 @@ class PanelField extends StatelessWidget {
     this.textCapitalization = TextCapitalization.none,
     this.textInputAction = TextInputAction.next,
     this.focusNode,
+    this.inputFormatters,
+    this.enableSuggestions,
   });
   final TextEditingController controller;
   final String label;
@@ -31,6 +35,8 @@ class PanelField extends StatelessWidget {
   final TextCapitalization textCapitalization;
   final TextInputAction textInputAction;
   final FocusNode? focusNode;
+  final List<TextInputFormatter>? inputFormatters;
+  final bool? enableSuggestions;
   @override
   Widget build(BuildContext context) => FocusRing(
     child: SizedBox(
@@ -41,7 +47,8 @@ class PanelField extends StatelessWidget {
         enabled: enabled,
         obscureText: obscureText,
         autocorrect: false,
-        enableSuggestions: !obscureText,
+        enableSuggestions: enableSuggestions ?? !obscureText,
+        inputFormatters: inputFormatters,
         autofillHints: autofillHints,
         keyboardType: keyboardType,
         onSubmitted: onSubmitted,
@@ -49,6 +56,8 @@ class PanelField extends StatelessWidget {
         textInputAction: textInputAction,
         style: UnavoType.body,
         scrollPadding: const EdgeInsets.all(24),
+        contextMenuBuilder: (_, editable) =>
+            PanelEditMenu(editable: editable, car: ControlScale.isCar(context)),
         decoration: InputDecoration(
           hintText: label,
           hintStyle: const TextStyle(fontSize: 16, color: UnavoColors.muted),

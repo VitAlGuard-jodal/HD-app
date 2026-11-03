@@ -33,9 +33,14 @@ class WebRtcMediaEngine extends MediaEngine {
   Timer? _credentialTimer;
   DateTime? _credentialsExpireAt;
   bool _muted = false;
+  bool _interrupted = false;
+  double _playbackVolume = 1;
+  Future<void> _volumeWrites = Future<void>.value();
   bool _pollingStats = false;
   bool _listeningToMic = false;
   bool _signalingFailed = false;
+  MediaConnectionState _localConnection = MediaConnectionState.idle;
+  String? _localError;
   bool _acceptingSignals = false;
   String? _selectedInput;
   int _generation = 0;
@@ -44,6 +49,7 @@ class WebRtcMediaEngine extends MediaEngine {
   Future<void> setMembers(List<String> handles) async {
     _members = List.of(handles);
     await _mesh?.updateMembers(_members);
+    _publishState();
   }
 
   @override
@@ -55,7 +61,7 @@ class WebRtcMediaEngine extends MediaEngine {
       await _release();
       if (!_current(generation)) return;
       try {
-        connectionChanged?.call(MediaConnectionState.connecting, null);
+        _setLocalConnection(MediaConnectionState.connecting);
         if (!MeshCoordinator.canJoin(selfHandle, _members)) {
           throw StateError(meshCapacityReason);
         }
@@ -96,6 +102,7 @@ class WebRtcMediaEngine extends MediaEngine {
               appleAudioMode: AppleAudioMode.voiceChat,
               appleAudioCategoryOptions: {
                 AppleAudioCategoryOption.allowBluetooth,
+                AppleAudioCategoryOption.defaultToSpeaker,
               },
             ),
           );
@@ -123,17 +130,9 @@ class WebRtcMediaEngine extends MediaEngine {
             }
             _publishState();
           },
-          onError: (_) {
-            if (_current(generation)) {
-              _signalingFailed = true;
-              connectionChanged?.call(
-                MediaConnectionState.failed,
-                '음성 연결에 실패했습니다. 통화를 끊고 다시 참여해 주세요.',
-              );
-            }
-          },
         );
         _mesh = mesh;
+        _localConnection = MediaConnectionState.connected;
         await mesh.join(_members);
         if (!_current(generation)) return;
         micRouter.addListener(_micChanged);
@@ -147,7 +146,7 @@ class WebRtcMediaEngine extends MediaEngine {
         await _release();
         if (_current(generation)) {
           _acceptingSignals = false;
-          connectionChanged?.call(
+          _setLocalConnection(
             MediaConnectionState.failed,
             exceptionMessage(error, '음성 연결을 시작하지 못했습니다.'),
           );
@@ -194,7 +193,20 @@ class WebRtcMediaEngine extends MediaEngine {
       });
       // Native Android/iOS receivers play audio without a video renderer.
       pc.onTrack = (event) {
-        if (event.track.kind == 'audio') event.track.enabled = true;
+        if (event.track.kind == 'audio') {
+          event.track.enabled = true;
+          peer.audioTracks.add(event.track);
+          unawaited(
+            setVolume(_playbackVolume).catchError((Object error) {
+              if (_current(generation)) {
+                _setLocalConnection(
+                  MediaConnectionState.failed,
+                  exceptionMessage(error, '통화 음량을 적용하지 못했습니다.'),
+                );
+              }
+            }),
+          );
+        }
       };
       for (final track in _local!.getAudioTracks()) {
         await pc.addTrack(track, _local!);
@@ -228,8 +240,31 @@ class WebRtcMediaEngine extends MediaEngine {
   void setMuted(bool muted) {
     _muted = muted;
     for (final track in _local?.getAudioTracks() ?? <MediaStreamTrack>[]) {
-      track.enabled = !muted;
+      track.enabled = !muted && !_interrupted;
     }
+  }
+
+  @override
+  void setInterrupted(bool interrupted) {
+    _interrupted = interrupted;
+    // Resume the same tracks after native AVAudioSession interruption ended.
+    setMuted(_muted);
+  }
+
+  @override
+  Future<void> setVolume(double volume) {
+    // Both native RTCAudioSource.volume and org.webrtc.AudioTrack.setVolume
+    // accept gain 0..10. A user volume of 100% is unity (1), not 10x gain.
+    _playbackVolume = volume.clamp(0, 1);
+    final operation = _volumeWrites.then((_) async {
+      for (final peer in _peers.values.toList()) {
+        for (final track in peer.audioTracks.toList()) {
+          if (!peer.closed) await Helper.setVolume(_playbackVolume, track);
+        }
+      }
+    });
+    _volumeWrites = operation.catchError((Object _) {});
+    return operation;
   }
 
   @override
@@ -244,7 +279,7 @@ class WebRtcMediaEngine extends MediaEngine {
         })
         .catchError((Object error) {
           if (_current(generation) && _mesh != null) {
-            connectionChanged?.call(
+            _setLocalConnection(
               MediaConnectionState.failed,
               exceptionMessage(error, '통화 마이크를 변경하지 못했습니다.'),
             );
@@ -300,13 +335,17 @@ class WebRtcMediaEngine extends MediaEngine {
       }
       await _mesh?.restartIce();
       if (!_current(generation)) return;
+      if (_signalingFailed) {
+        _localConnection = MediaConnectionState.connected;
+        _localError = null;
+      }
       _signalingFailed = false;
       _scheduleCredentials(credentials, requestedAt, generation);
       _publishState();
     } catch (_) {
       if (!_current(generation) || _mesh == null) return;
       _signalingFailed = true;
-      connectionChanged?.call(
+      _setLocalConnection(
         MediaConnectionState.failed,
         '통화 연결 정보를 갱신하지 못해 다시 시도합니다.',
       );
@@ -347,7 +386,11 @@ class WebRtcMediaEngine extends MediaEngine {
         }
         if (!_current(generation)) return;
         if (identical(_peers[entry.key], entry.value)) {
-          _setSpeaking(entry.key, level > remoteSpeakingThreshold);
+          _setSpeaking(
+            entry.key,
+            _states[entry.key] == MeshPeerState.connected &&
+                level > remoteSpeakingThreshold,
+          );
         }
       }
     } finally {
@@ -361,18 +404,15 @@ class WebRtcMediaEngine extends MediaEngine {
   }
 
   void _publishState() {
-    if (_signalingFailed || _mesh == null) return;
-    final state = _states.values.contains(MeshPeerState.failed)
-        ? MediaConnectionState.failed
-        : _states.values.every((state) => state == MeshPeerState.connected)
-        ? MediaConnectionState.connected
-        : MediaConnectionState.connecting;
-    connectionChanged?.call(
-      state,
-      state == MediaConnectionState.failed
-          ? '음성 연결에 실패했습니다. 통화를 끊고 다시 참여해 주세요.'
-          : null,
-    );
+    publishPeerStates(_states);
+    final state = receiveConnectionState(_localConnection, _states.values);
+    connectionChanged?.call(state, _localError);
+  }
+
+  void _setLocalConnection(MediaConnectionState state, [String? message]) {
+    _localConnection = state;
+    _localError = message;
+    _publishState();
   }
 
   bool _current(int generation) => generation == _generation;
@@ -385,8 +425,12 @@ class WebRtcMediaEngine extends MediaEngine {
     for (final track in _local?.getAudioTracks() ?? <MediaStreamTrack>[]) {
       track.enabled = false;
     }
+    // Invalidate peer retry timers now, even if native track teardown is slow.
+    // _release awaits the same idempotent close Future and handles its error.
+    unawaited(_mesh?.close().catchError((Object _) {}));
     _starting = null;
-    connectionChanged?.call(MediaConnectionState.idle, null);
+    _states.clear();
+    _setLocalConnection(MediaConnectionState.idle);
     return _schedule(_release);
   }
 
@@ -424,6 +468,7 @@ class WebRtcMediaEngine extends MediaEngine {
         } finally {
           _peers.clear();
           _states.clear();
+          publishPeerStates(_states);
           for (final handle in _speaking.toList()) {
             _setSpeaking(handle, false);
           }
@@ -446,6 +491,7 @@ class _WebRtcPeer implements MeshPeer {
   final RTCPeerConnection pc;
   final void Function() onClosed;
   bool closed = false;
+  final Set<MediaStreamTrack> audioTracks = {};
 
   @override
   Future<Map<String, Object?>> createOffer({bool iceRestart = false}) async {
@@ -487,6 +533,7 @@ class _WebRtcPeer implements MeshPeer {
   Future<void> close() async {
     if (closed) return;
     closed = true;
+    audioTracks.clear();
     pc.onIceCandidate = null;
     pc.onConnectionState = null;
     pc.onTrack = null;

@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 
 import '../../net/models.dart';
+import '../../call/mesh_coordinator.dart';
 import '../control_scale.dart';
 import '../icons.dart';
 import '../theme.dart';
@@ -11,14 +12,23 @@ class MemberTile extends StatelessWidget {
     required this.member,
     this.self = false,
     this.speaking = false,
+    this.connection,
   });
   final Member member;
   final bool self;
   final bool speaking;
+  final MeshPeerState? connection;
+  String get _connectionLabel => self || speaking
+      ? ''
+      : switch (connection) {
+          MeshPeerState.connecting => ', 연결 중',
+          MeshPeerState.failed || MeshPeerState.closed => ', 연결 실패',
+          _ => '',
+        };
   @override
   Widget build(BuildContext context) => Semantics(
     label:
-        '${member.displayName}, @${member.handle}${self ? ", 나" : ""}${speaking ? ", 말하는 중" : ""}',
+        '${member.displayName}, @${member.handle}${self ? ", 나" : ""}${speaking ? ", 말하는 중" : ""}$_connectionLabel',
     child: ExcludeSemantics(
       child: Container(
         width: double.infinity,
@@ -64,6 +74,16 @@ class MemberTile extends StatelessWidget {
                 ],
               ),
             ),
+            if (_connectionLabel.isNotEmpty) ...[
+              const SizedBox(width: 8),
+              UnavoIcon(
+                connection == MeshPeerState.connecting ? 'refresh' : 'hangup',
+                size: ControlScale.isCar(context) ? 24 : 18,
+                color: connection == MeshPeerState.connecting
+                    ? UnavoColors.muted
+                    : UnavoColors.onDanger,
+              ),
+            ],
             if (self) ...[
               const SizedBox(width: 12),
               UnavoIcon(

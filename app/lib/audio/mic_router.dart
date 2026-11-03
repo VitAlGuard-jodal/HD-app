@@ -6,6 +6,25 @@ import 'package:flutter/services.dart';
 import '../auth/session_store.dart';
 import 'mic_ranker.dart';
 
+enum OutputRoute { speaker, receiver, bluetooth, headphones, carAudio }
+
+extension OutputRouteLabel on OutputRoute {
+  String get label => switch (this) {
+    OutputRoute.speaker => '스피커',
+    OutputRoute.receiver => '수화부',
+    OutputRoute.bluetooth => '블루투스',
+    OutputRoute.headphones => '이어폰',
+    OutputRoute.carAudio => '차량 오디오',
+  };
+  String get icon => switch (this) {
+    OutputRoute.speaker => 'speaker',
+    OutputRoute.receiver => 'earpiece',
+    OutputRoute.bluetooth => 'bluetooth',
+    OutputRoute.headphones => 'headset',
+    OutputRoute.carAudio => 'carplay',
+  };
+}
+
 class AudioPermissions {
   const AudioPermissions({this.microphone = false, this.notifications = false});
   factory AudioPermissions.fromMap(Map<Object?, Object?> map) =>
@@ -69,7 +88,23 @@ class MicRouter extends ChangeNotifier {
   final SessionStore store;
   static const channel = MethodChannel('unavo/audio');
   static const events = EventChannel('unavo/audio/levels');
+  static const routeEvents = EventChannel('unavo/audio/routes');
   StreamSubscription<dynamic>? _subscription;
+  StreamSubscription<dynamic>? _routeSubscription;
+  final _outputRoutes = StreamController<OutputRoute>.broadcast();
+  Stream<OutputRoute> get outputRoutes => _outputRoutes.stream;
+  OutputRoute outputRoute = OutputRoute.speaker;
+  List<OutputRoute> availableOutputRoutes = const [
+    OutputRoute.speaker,
+    OutputRoute.receiver,
+  ];
+  OutputRoute? _requestedOutput;
+  int? systemCallVolume;
+  bool systemVolumeWritable = true;
+  bool audioInterrupted = false;
+  bool resumeFailed = false;
+  String? outputError;
+  bool get isAutomotive => state.mode == MicMode.car;
   MicState state = const MicState();
   AudioPermissions permissions = const AudioPermissions();
   bool get supported =>
@@ -100,6 +135,88 @@ class MicRouter extends ChangeNotifier {
         notifyListeners();
       },
     );
+    await refreshOutputRoute();
+    _routeSubscription = routeEvents.receiveBroadcastStream().listen(
+      (dynamic event) => _readOutput(Map<Object?, Object?>.from(event as Map)),
+      onError: (Object error) {
+        outputError = error is PlatformException
+            ? error.message
+            : error.toString();
+        notifyListeners();
+      },
+    );
+  }
+
+  OutputRoute _route(Object? value) => OutputRoute.values.firstWhere(
+    (route) => route.name == value,
+    orElse: () => OutputRoute.speaker,
+  );
+
+  void _readOutput(Map<Object?, Object?> snapshot) {
+    final next = _route(snapshot['route']);
+    final changed = next != outputRoute;
+    outputRoute = next;
+    if (snapshot['available'] case final List<dynamic> routes) {
+      availableOutputRoutes = routes.map(_route).toSet().toList();
+    }
+    systemCallVolume = (snapshot['callVolume'] as num?)?.round().clamp(0, 100);
+    systemVolumeWritable = snapshot['volumeWritable'] as bool? ?? true;
+    audioInterrupted = snapshot['interrupted'] as bool? ?? false;
+    resumeFailed = snapshot['resumeFailed'] as bool? ?? false;
+    outputError = snapshot['error'] as String?;
+    if (changed) _outputRoutes.add(next);
+    notifyListeners();
+  }
+
+  Future<void> refreshOutputRoute() async {
+    if (!supported) return;
+    final snapshot = await channel.invokeMapMethod<Object?, Object?>(
+      'getOutputRoute',
+    );
+    if (snapshot != null) _readOutput(snapshot);
+  }
+
+  Future<void> setOutputRoute(OutputRoute route) async {
+    _requirePlatform();
+    final snapshot = await channel.invokeMapMethod<Object?, Object?>(
+      'setOutputRoute',
+      {'route': route.name},
+    );
+    _requestedOutput = route;
+    if (snapshot != null) _readOutput(snapshot);
+  }
+
+  Future<void> applyOutputRoute() async {
+    final requested = _requestedOutput;
+    if (requested != null && availableOutputRoutes.contains(requested)) {
+      await setOutputRoute(requested);
+    } else {
+      _requestedOutput = null;
+      await setSpeakerphone(true); // Automatic: external device, then speaker.
+    }
+    await refreshOutputRoute();
+  }
+
+  Future<void> cycleOutputRoute() async {
+    await refreshOutputRoute();
+    if (availableOutputRoutes.isEmpty) return;
+    final index = availableOutputRoutes.indexOf(outputRoute);
+    await setOutputRoute(
+      availableOutputRoutes[(index + 1) % availableOutputRoutes.length],
+    );
+  }
+
+  void resetOutputPreference() {
+    _requestedOutput = null;
+  }
+
+  Future<void> setSystemCallVolume(int percent) async {
+    if (!isAutomotive || !supported) return;
+    final snapshot = await channel.invokeMapMethod<Object?, Object?>(
+      'setCallVolume',
+      {'value': percent.clamp(0, 100)},
+    );
+    if (snapshot != null) _readOutput(snapshot);
   }
 
   Future<void> refreshPermissions() async {
@@ -164,6 +281,8 @@ class MicRouter extends ChangeNotifier {
   @override
   void dispose() {
     unawaited(_subscription?.cancel());
+    unawaited(_routeSubscription?.cancel());
+    unawaited(_outputRoutes.close());
     super.dispose();
   }
 }

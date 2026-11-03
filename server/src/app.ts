@@ -115,6 +115,9 @@ function pathValue(value: string): string {
   }
 }
 
+// 로그에 요청자 아이디만 남긴다(토큰·본문·헤더는 남기지 않는다).
+const actors = new WeakMap<ServerResponse, string>();
+
 function authenticate(db: DatabaseSync, request: IncomingMessage): { user: StoredUser; token: string } {
   const match = /^Bearer +([^\s]+)$/i.exec(request.headers.authorization ?? "");
   const token = match?.[1];
@@ -164,6 +167,7 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
     }
 
     const { user, token } = authenticate(db, request);
+    actors.set(response, user.handle);
 
     if (method === "GET" && path === "/v1/turn") {
       response.setHeader("cache-control", "no-store");
@@ -328,7 +332,8 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
     const log = () => {
       if (logged) return;
       logged = true;
-      process.stdout.write(`${request.method ?? "UNKNOWN"} ${path} ${response.statusCode} ${Date.now() - started}\n`);
+      const actor = actors.get(response);
+      process.stdout.write(`${request.method ?? "UNKNOWN"} ${path} ${response.statusCode} ${Date.now() - started}${actor ? ` ${actor}` : ""}\n`);
     };
     response.once("finish", log);
     response.once("close", log);

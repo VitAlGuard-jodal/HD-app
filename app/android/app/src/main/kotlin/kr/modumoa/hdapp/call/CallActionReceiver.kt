@@ -5,13 +5,19 @@ import android.content.Context
 import android.content.Intent
 import kr.modumoa.hdapp.UnavoApplication
 
-// 명시적·비공개 브로드캐스트. 알림은 통화만 끊고 방 멤버십은 유지한다.
+// 명시적·비공개 브로드캐스트. 방 멤버십과 WebRTC는 Dart에서 함께 정리한다.
 class CallActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != CallForegroundService.ACTION_LEAVE) return
         val app = context.applicationContext as UnavoApplication
-        app.callActions.tryEmit(mapOf("event" to "leaveCall"))
-        // Dart 구독/Activity가 사라져도 녹음과 FGS를 반드시 종료한다.
-        app.requestStop()
+        val code = intent.getStringExtra(CallForegroundService.EXTRA_ROOM_CODE)
+        if (code == null || code != app.callState.value.roomCode) return
+        when (intent.action) {
+            CallForegroundService.ACTION_MUTE -> app.callActions.tryEmit(mapOf("event" to "toggleMute"))
+            CallForegroundService.ACTION_LEAVE -> {
+                app.callActions.tryEmit(mapOf("event" to "leaveCall"))
+                // Also stop native audio if the Flutter engine has been destroyed.
+                app.requestStop()
+            }
+        }
     }
 }

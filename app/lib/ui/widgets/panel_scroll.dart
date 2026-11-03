@@ -1,5 +1,7 @@
 import 'package:flutter/widgets.dart';
 
+import 'floating_bar.dart';
+
 // 스크롤 내용은 뷰포트에서 자르되 바깥 6dp + 3dp 포커스 링만 허용한다.
 // Clip.none 단독 사용으로 내용이 패널/레터링 위로 그려지는 것을 막는다.
 class PanelViewport extends StatelessWidget {
@@ -25,6 +27,7 @@ class PanelScroll extends StatelessWidget {
   Widget build(BuildContext context) => PanelViewport(
     child: SingleChildScrollView(
       controller: controller,
+      padding: EdgeInsets.only(bottom: FloatingBarInset.of(context)),
       clipBehavior: Clip.none,
       child: child,
     ),

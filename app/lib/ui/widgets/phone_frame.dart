@@ -10,6 +10,7 @@ import '../backdrop.dart';
 import '../phone_frame_layout.dart';
 import '../theme.dart';
 import 'panel_button.dart';
+import 'floating_bar.dart';
 
 class PhoneFrame extends StatelessWidget {
   const PhoneFrame({
@@ -17,10 +18,12 @@ class PhoneFrame extends StatelessWidget {
     required this.mode,
     required this.child,
     this.bottomNav,
+    this.keepControlsVisible = false,
   });
   final DeviceMode mode;
   final Widget child;
   final Widget? bottomNav;
+  final bool keepControlsVisible;
 
   @override
   Widget build(BuildContext context) {
@@ -42,9 +45,7 @@ class PhoneFrame extends StatelessWidget {
             final keyboard = media.viewInsets.bottom;
             final safeBottom = media.viewPadding.bottom;
             final hasDock = bottomNav != null && keyboard == 0;
-            final bottom = keyboard > 0
-                ? keyboard + 12
-                : safeBottom + (hasDock ? 96 : 8);
+            final bottom = keyboard > 0 ? keyboard + 12 : safeBottom + 8;
             final phoneLayout = mode == DeviceMode.phone
                 ? calculatePhoneFrameLayout(
                     width: size.width,
@@ -70,7 +71,7 @@ class PhoneFrame extends StatelessWidget {
               );
             }
             final panelArea = math.max(0.0, size.height - bottom - top);
-            return Stack(
+            final content = Stack(
               fit: StackFit.expand,
               children: [
                 Backdrop(
@@ -120,16 +121,16 @@ class PhoneFrame extends StatelessWidget {
                     child: child,
                   ),
                 ),
-                if (hasDock)
-                  Positioned(
-                    left: media.viewPadding.left + 16,
-                    right: media.viewPadding.right + 16,
-                    bottom: safeBottom + 8,
-                    height: 76,
-                    child: bottomNav!,
-                  ),
               ],
             );
+            return hasDock
+                ? FloatingBarOverlay(
+                    bar: bottomNav!,
+                    keepVisible: keepControlsVisible,
+                    bottom: safeBottom + 8,
+                    child: content,
+                  )
+                : content;
           },
         ),
       ),

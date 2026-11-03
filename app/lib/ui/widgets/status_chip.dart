@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../control_scale.dart';
 import '../icons.dart';
 import '../theme.dart';
+import 'floating_bar.dart';
 
 class StatusChip extends StatelessWidget {
   const StatusChip(
@@ -61,20 +62,23 @@ class ErrorText extends StatelessWidget {
   const ErrorText(this.message, {super.key});
   final String? message;
   @override
-  Widget build(BuildContext context) => message == null || message!.isEmpty
-      ? const SizedBox.shrink()
-      : Semantics(
-          liveRegion: true,
-          child: Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Text(
-              message!,
-              style: const TextStyle(
-                color: UnavoColors.onDanger,
-                fontSize: 16,
-                height: 1.4,
+  Widget build(BuildContext context) => FloatingBarHold(
+    active: message != null && message!.isNotEmpty,
+    child: message == null || message!.isEmpty
+        ? const SizedBox.shrink()
+        : Semantics(
+            liveRegion: true,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(
+                message!,
+                style: const TextStyle(
+                  color: UnavoColors.onDanger,
+                  fontSize: 16,
+                  height: 1.4,
+                ),
               ),
             ),
           ),
-        );
+  );
 }

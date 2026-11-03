@@ -1,168 +1,326 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+// Already supplied by flutter_test; no additional package dependency.
+import 'package:fake_async/fake_async.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:unavo/audio/mic_ranker.dart';
 import 'package:unavo/audio/mic_router.dart';
 import 'package:unavo/auth/session_store.dart';
 import 'package:unavo/call/call_service.dart';
 import 'package:unavo/call/call_state.dart';
 import 'package:unavo/call/media_engine.dart';
 import 'package:unavo/call/mesh_coordinator.dart';
-import 'package:unavo/core/app_services.dart';
-import 'package:unavo/core/device_mode.dart';
 import 'package:unavo/net/api_client.dart';
 import 'package:unavo/net/models.dart';
 import 'package:unavo/room/room_session.dart';
-import 'package:unavo/screens/phone/room.dart';
-import 'package:unavo/ui/widgets/panel_button.dart';
-import 'package:unavo/ui/widgets/status_chip.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  Future<SessionStore> storeFor(String handle) async {
-    SharedPreferences.setMockInitialValues({'token': 'test', 'handle': handle});
-    return SessionStore(await SharedPreferences.getInstance());
-  }
-
-  test('hello 멤버를 보존하고 preview → native call → media 순서로 시작·역순 종료한다', () async {
-    final store = await storeFor('alice');
-    final order = <String>[];
-    final api = _Api(store);
-    final mic = _Mic(store, order);
-    final calls = _Calls(order);
-    final media = _Media(order);
-    final session = RoomSession(
-      api: api,
-      mediaEngine: media,
-      store: store,
-      callService: calls,
-      micRouter: mic,
-    );
-    addTearDown(() async {
-      session.dispose();
-      await api.close();
-      calls.dispose();
-      mic.dispose();
-      store.dispose();
-    });
-
-    await session.open('ABC123');
-    api.members = const [Member('alice', '앨리스', '1'), Member('bob', '보비', '2')];
-    api.events.add(Hello('alice', api.members));
-    await Future<void>.delayed(Duration.zero);
-    expect(media.members, ['alice', 'bob']);
-    expect(session.callJoinBlockedReason, isNull);
-    await session.joinCall();
-    expect(order, [
+  test('open 성공 → hello 후 통화 자동 시작, 음소거·나가기 순서', () async {
+    final f = await _Fixture.create();
+    await f.open();
+    expect(f.media.members, ['alice', 'bob']);
+    expect(f.order, [
       'preview-stop',
       'native-start',
       'media-start',
-      'speaker:false',
+      'speaker:true',
     ]);
-    expect(session.mediaConnection, MediaConnectionState.connected);
-    media.remoteSpeaking?.call('bob', true);
-    expect(session.speaking, {'bob'});
-    session.setMuted(true);
-    expect(media.muted, isTrue);
-
-    api.members = const [Member('alice', '앨리스', '1')];
-    api.events.add(const MemberLeft('bob'));
+    expect(f.session.mediaConnection, MediaConnectionState.connected);
+    await f.session.joinCall();
+    expect(f.media.joins, 1);
+    f.media.remoteSpeaking?.call('bob', true);
+    expect(f.session.speaking, {'bob'});
+    f.session.setMuted(true);
+    expect(f.media.muted, isTrue);
+    expect(f.calls.muted, isTrue);
+    f.api.members = const [Member('alice', 'Alice', '1')];
+    f.api.events.add(const MemberLeft('bob'));
     await Future<void>.delayed(Duration.zero);
-    expect(media.members, ['alice']);
-    expect(session.speaking, isEmpty);
-    await session.leaveCall();
-    expect(order.sublist(order.length - 2), ['media-stop', 'native-stop']);
-    expect(session.call.isActive, isFalse);
-    expect(session.mediaConnection, MediaConnectionState.idle);
+    expect(f.media.members, ['alice']);
+    expect(f.session.speaking, isEmpty);
+    await f.calls.onLeaveCall!();
+    expect(f.order.sublist(f.order.length - 3), [
+      'media-stop',
+      'native-stop',
+      'room-leave',
+    ]);
+    expect(f.session.state.code, isNull);
+    await f.dispose();
   });
 
-  test('미디어 초기화 실패는 네이티브 통화를 종료하고 실패 상태를 남긴다', () async {
-    final store = await storeFor('alice');
-    final order = <String>[];
-    final api = _Api(store);
-    final mic = _Mic(store, order);
-    final calls = _Calls(order);
-    final media = _Media(order)..failJoin = true;
-    final session = RoomSession(
+  test('5명째는 joinCall 안 함, 자리가 나면 자동 입장', () async {
+    final f = await _Fixture.create(handle: 'aaron');
+    f.api.members = [
+      for (final name in ['alice', 'bob', 'charlie', 'david', 'aaron'])
+        Member(name, name, ''),
+    ];
+    await f.open();
+    expect(f.session.callJoinBlockedReason, meshCapacityReason);
+    expect(f.media.joins, 0);
+    expect(f.calls.starts, 0);
+    f.api.members.removeAt(0);
+    f.api.events.add(const MemberLeft('alice'));
+    await Future<void>.delayed(Duration.zero);
+    expect(f.media.joins, 1);
+    expect(f.calls.starts, 1);
+    await f.dispose();
+  });
+
+  test('실패 → 1s·2s·4s 재시도 3회 후 중단, FGS는 나갈 때 종료', () {
+    fakeAsync((clock) {
+      final f = _microtasksOnly(clock, _Fixture.create());
+      f.media.failJoin = true;
+      _microtasksOnly(clock, f.session.open('ABC123'));
+      f.api.events.add(Hello('alice', f.api.members));
+      clock.flushMicrotasks();
+      expect(f.media.joins, 1);
+      clock.elapse(const Duration(milliseconds: 999));
+      expect(f.media.joins, 1);
+      clock.elapse(const Duration(milliseconds: 1));
+      expect(f.media.joins, 2);
+      clock.elapse(const Duration(seconds: 2));
+      expect(f.media.joins, 3);
+      clock.elapse(const Duration(seconds: 4));
+      expect(f.media.joins, 4);
+      expect(f.session.retryAttempts, 3);
+      expect(f.session.canReconnect, isTrue);
+      expect(f.session.mediaError, 'capture unavailable');
+      clock.elapse(const Duration(seconds: 30));
+      expect(f.media.joins, 4);
+      expect(f.calls.starts, 1);
+      expect(f.calls.stops, 0);
+      f.media.failJoin = false;
+      _microtasksOnly(clock, f.session.reconnect());
+      expect(f.session.mediaConnection, MediaConnectionState.connected);
+      _microtasksOnly(clock, f.session.leave());
+      expect(f.calls.stops, 1);
+      expect(f.order.sublist(f.order.length - 3), [
+        'media-stop',
+        'native-stop',
+        'room-leave',
+      ]);
+      expect(f.session.state.code, isNull);
+      expect(clock.pendingTimers, isEmpty);
+      _microtasksOnly(clock, f.dispose());
+    });
+  });
+
+  test('방 나가기는 예약된 자동 재시도를 취소한다', () {
+    fakeAsync((clock) {
+      final f = _microtasksOnly(clock, _Fixture.create());
+      f.media.failJoin = true;
+      _microtasksOnly(clock, f.session.open('ABC123'));
+      f.api.events.add(Hello('alice', f.api.members));
+      clock.flushMicrotasks();
+      expect(clock.nonPeriodicTimerCount, 1);
+      _microtasksOnly(clock, f.session.leave());
+      expect(f.calls.stops, 1);
+      expect(clock.pendingTimers, isEmpty);
+      clock.elapse(const Duration(seconds: 8));
+      expect(f.media.joins, 1);
+      expect(f.session.state.code, isNull);
+      _microtasksOnly(clock, f.dispose());
+    });
+  });
+
+  test('SSE open(force)와 hello 반복은 기존 미디어·음소거를 보존한다', () async {
+    final f = await _Fixture.create();
+    await f.open();
+    f.session.setMuted(true);
+    await f.session.open('ABC123', force: true);
+    f.api.events.add(Hello('alice', f.api.members));
+    await Future<void>.delayed(Duration.zero);
+    expect(f.media.joins, 1);
+    expect(f.media.leaves, 0);
+    expect(f.session.muted, isTrue);
+    expect(f.session.state.isConnected, isTrue);
+    await f.dispose();
+  });
+
+  test('피어 실패 상태는 전달하되 정상 통화와 FGS를 다시 시작하지 않는다', () {
+    fakeAsync((clock) {
+      final f = _microtasksOnly(clock, _Fixture.create());
+      _microtasksOnly(clock, f.session.open('ABC123'));
+      f.api.events.add(Hello('alice', f.api.members));
+      clock.flushMicrotasks();
+      var notifications = 0;
+      f.session.addListener(() => notifications++);
+      f.media.changePeers({
+        'bob': MeshPeerState.connected,
+        'charlie': MeshPeerState.failed,
+      });
+      expect(f.session.peerStates['charlie'], MeshPeerState.failed);
+      expect(f.session.mediaConnection, MediaConnectionState.connected);
+      expect(notifications, greaterThan(0));
+      clock.elapse(const Duration(seconds: 30));
+      expect(f.media.joins, 1);
+      expect(f.media.leaves, 0);
+      expect(f.calls.starts, 1);
+      expect(f.session.retryAttempts, 0);
+      expect(clock.pendingTimers, isEmpty);
+      _microtasksOnly(clock, f.session.leave());
+      expect(f.session.peerStates, isEmpty);
+      _microtasksOnly(clock, f.dispose());
+    });
+  });
+
+  test('권한 거부는 재요청 루프 없이 iOS 설정 경로를 알린다', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final f = await _Fixture.create();
+    f.mic.permissions = const AudioPermissions();
+    await f.open();
+    expect(f.session.permissionDenied, isTrue);
+    expect(f.session.mediaError, contains('설정 > 우나보 > 마이크'));
+    expect(f.session.retryAttempts, 0);
+    expect(f.media.joins, 0);
+    expect(f.calls.starts, 0);
+    await f.dispose();
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  test('저장된 음량 적용, 음량 변경 저장, 인터럽션 후 음소거 보존', () async {
+    final f = await _Fixture.create(volume: 35);
+    await f.open();
+    expect(f.media.volume, .35);
+    await f.session.setCallVolume(62);
+    expect(f.media.volume, .62);
+    expect(f.store.preferences.getInt('callVolume'), 62);
+    f.session.setMuted(true);
+    f.mic.audioInterrupted = true;
+    f.mic.changed();
+    expect(f.media.interrupted, isTrue);
+    f.mic.audioInterrupted = false;
+    f.mic.changed();
+    expect(f.media.interrupted, isFalse);
+    expect(f.media.muted, isTrue);
+    expect(f.media.joins, 1);
+    await f.dispose();
+  });
+
+  test('차량 음량 UI가 꺼져 있으면 시스템 음량은 수신 이득·저장값과 분리된다', () async {
+    final f = await _Fixture.create(volume: 100);
+    f.mic.state = const MicState(mode: MicMode.car);
+    f.mic.systemCallVolume = 60;
+    await f.open();
+    expect(f.session.callVolume, 100);
+    f.mic.systemCallVolume = 40;
+    f.mic.changed();
+    await Future<void>.delayed(Duration.zero);
+    expect(f.session.callVolume, 100);
+    expect(f.media.volume, 1);
+    f.mic.systemVolumeWritable = false;
+    await f.session.setCallVolume(25);
+    expect(f.session.callVolume, 25);
+    expect(f.media.volume, .25);
+    expect(f.store.callVolume, 25);
+    expect(f.mic.systemVolumeWrites, 0);
+    await f.dispose();
+  });
+}
+
+/// A timer-dependent or incomplete Future fails an assertion instead of
+/// suspending the test body. In particular, leave must finish at the same time.
+T _microtasksOnly<T>(FakeAsync clock, Future<T> future) {
+  final elapsed = clock.elapsed;
+  var completed = false;
+  late T value;
+  unawaited(
+    future.then((result) {
+      value = result;
+      completed = true;
+    }),
+  );
+  clock.flushMicrotasks();
+  expect(completed, isTrue, reason: 'Future must finish using only microtasks');
+  expect(clock.elapsed, elapsed);
+  return value;
+}
+
+class _Fixture {
+  _Fixture(this.store) {
+    api = _Api(store, order);
+    mic = _Mic(store, order);
+    calls = _Calls(order);
+    media = _Media(order);
+    session = RoomSession(
       api: api,
       mediaEngine: media,
       store: store,
       callService: calls,
       micRouter: mic,
     );
-    addTearDown(() async {
-      session.dispose();
-      await api.close();
-      calls.dispose();
-      mic.dispose();
-      store.dispose();
+  }
+  static Future<_Fixture> create({
+    String handle = 'alice',
+    int volume = 100,
+  }) async {
+    SharedPreferences.setMockInitialValues({
+      'token': 'test',
+      'handle': handle,
+      'callVolume': volume,
     });
-    await session.open('ABC123');
-    api.events.add(Hello('alice', api.members));
-    await Future<void>.delayed(Duration.zero);
-    await expectLater(session.joinCall(), throwsStateError);
-    expect(calls.state.isActive, isFalse);
-    expect(session.mediaConnection, MediaConnectionState.failed);
-    expect(session.mediaError, 'capture unavailable');
-    expect(order.sublist(order.length - 2), ['media-stop', 'native-stop']);
-  });
+    return _Fixture(SessionStore(await SharedPreferences.getInstance()));
+  }
 
-  testWidgets('5번째 참여자는 버튼 비활성·사유 칩, 기존 4번째는 참여 가능', (tester) async {
-    final members = [
-      for (final name in ['alice', 'bob', 'charlie', 'david', 'aaron'])
-        Member(name, name, ''),
-    ];
-    for (final handle in ['aaron', 'david']) {
-      final store = await storeFor(handle);
-      final services = AppServices(store, mediaEngine: NoopMediaEngine());
-      services.rooms.state = RoomState(
-        code: 'ABC123',
-        members: members,
-        isConnected: true,
-      );
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: RoomScreen(
-              services: services,
-              mode: DeviceMode.phone,
-              embedded: true,
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final join = tester.widget<PanelButton>(
-        find.byWidgetPredicate(
-          (widget) => widget is PanelButton && widget.label == '통화 참여',
-        ),
-      );
-      expect(join.onPressed == null, handle == 'aaron');
-      if (handle == 'aaron') {
-        final chip = tester.widget<StatusChip>(find.byType(StatusChip));
-        expect(chip.label, meshCapacityReason);
-        expect(chip.showLabel, isTrue);
-        expect(find.text(meshCapacityReason), findsOneWidget);
-      }
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox.shrink());
-      services.dispose();
-    }
-  });
+  final SessionStore store;
+  final order = <String>[];
+  late final _Api api;
+  late final _Mic mic;
+  late final _Calls calls;
+  late final _Media media;
+  late final RoomSession session;
+  Future<void> open() async {
+    await session.open('ABC123');
+    api.events.add(Hello(store.handle!, api.members));
+    await Future<void>.delayed(Duration.zero);
+  }
+
+  Future<void> dispose() async {
+    session.dispose();
+    await api.close();
+    calls.dispose();
+    mic.dispose();
+    store.dispose();
+  }
 }
 
 class _Api extends ApiClient {
-  _Api(SessionStore store) : super(tokenStore: store);
-  final events = StreamController<RoomEvent>();
-  Future<void> close() => events.close();
-  List<Member> members = const [Member('alice', '앨리스', '1')];
+  _Api(SessionStore store, this.order) : super(tokenStore: store);
+  final List<String> order;
+  final _eventStreams = <StreamController<RoomEvent>>[];
+  StreamController<RoomEvent> get events => _eventStreams.last;
+  Future<void> close() async {
+    for (final stream in _eventStreams) {
+      await stream.close();
+    }
+  }
+
+  List<Member> members = const [
+    Member('alice', 'Alice', '1'),
+    Member('bob', 'Bob', '2'),
+  ];
   @override
   Future<RoomDetails> getRoom(String code) async =>
       RoomDetails(const Room('ABC123', null), members);
   @override
-  Stream<RoomEvent> subscribeEvents(String code) => events.stream;
+  Stream<RoomEvent> subscribeEvents(String code) {
+    // SSE has one subscription per request. A broadcast controller's cancel
+    // returns Dart's cached root-zone nullFuture; awaiting it escapes FakeAsync
+    // and strands the next media.leave continuation in the fake microtask queue.
+    _eventStreams.add(StreamController<RoomEvent>(onCancel: () async {}));
+    // Allocate done in this zone before cancellation, for deterministic cleanup.
+    unawaited(events.done);
+    return events.stream;
+  }
+
+  @override
+  Future<void> leaveRoom(String code) async {
+    order.add('room-leave');
+  }
 }
 
 class _Mic extends MicRouter {
@@ -170,25 +328,38 @@ class _Mic extends MicRouter {
     permissions = const AudioPermissions(microphone: true);
   }
   final List<String> order;
+  int systemVolumeWrites = 0;
+  void changed() => notifyListeners();
   @override
   Future<void> refreshPermissions() async {}
+  @override
+  Future<AudioPermissions> requestPermissions() async => permissions;
   @override
   Future<void> stopPreview() async {
     order.add('preview-stop');
   }
 
   @override
-  Future<bool> setSpeakerphone(bool enabled) async {
-    order.add('speaker:$enabled');
-    return enabled;
+  Future<void> refreshOutputRoute() async {}
+  @override
+  Future<void> applyOutputRoute() async {
+    order.add('speaker:true');
+  }
+
+  @override
+  Future<void> setSystemCallVolume(int percent) async {
+    systemVolumeWrites++;
   }
 }
 
 class _Calls extends CallService {
   _Calls(this.order);
   final List<String> order;
+  int starts = 0, stops = 0;
+  bool muted = false;
   @override
   Future<void> start(String roomCode, String handle) async {
+    starts++;
     order.add('native-start');
     state = CallState(roomCode: roomCode, selfHandle: handle, isActive: true);
     notifyListeners();
@@ -196,9 +367,15 @@ class _Calls extends CallService {
 
   @override
   Future<void> stop() async {
+    stops++;
     order.add('native-stop');
     state = const CallState();
     notifyListeners();
+  }
+
+  @override
+  Future<void> setMuted(bool value) async {
+    muted = value;
   }
 }
 
@@ -206,8 +383,17 @@ class _Media extends NoopMediaEngine {
   _Media(this.order);
   final List<String> order;
   List<String> members = [];
-  bool failJoin = false;
-  bool muted = false;
+  bool failJoin = false, muted = false, interrupted = false;
+  int joins = 0, leaves = 0;
+  double volume = 1;
+  void changePeers(Map<String, MeshPeerState> states) {
+    publishPeerStates(states);
+    connectionChanged?.call(
+      receiveConnectionState(MediaConnectionState.connected, states.values),
+      null,
+    );
+  }
+
   @override
   Future<void> setMembers(List<String> handles) async {
     members = handles;
@@ -215,6 +401,7 @@ class _Media extends NoopMediaEngine {
 
   @override
   Future<void> join(String roomCode, String selfHandle) async {
+    joins++;
     order.add('media-start');
     if (failJoin) throw StateError('capture unavailable');
     connectionChanged?.call(MediaConnectionState.connected, null);
@@ -222,13 +409,25 @@ class _Media extends NoopMediaEngine {
 
   @override
   Future<void> leave() async {
+    leaves++;
     order.add('media-stop');
+    publishPeerStates({});
     connectionChanged?.call(MediaConnectionState.idle, null);
   }
 
   @override
   void setMuted(bool value) {
     muted = value;
+  }
+
+  @override
+  Future<void> setVolume(double value) async {
+    volume = value;
+  }
+
+  @override
+  void setInterrupted(bool value) {
+    interrupted = value;
   }
 
   @override

@@ -13,10 +13,12 @@ class ApiClient {
   ApiClient({
     required this.tokenStore,
     this.allowPrivateCleartext = kDebugMode,
+    this.retryDelay = const Duration(milliseconds: 400),
     HttpClient Function()? clientFactory,
   }) : _clientFactory = clientFactory ?? HttpClient.new;
   final TokenStore tokenStore;
   final bool allowPrivateCleartext;
+  final Duration retryDelay;
   final HttpClient Function() _clientFactory;
   static const _timeout = Duration(seconds: 15);
 
@@ -216,6 +218,29 @@ class ApiClient {
       (throw const ApiException(0, 'empty_response', '서버 응답이 비어 있습니다.'));
 
   Future<JsonMap?> _request(String method, String path, [JsonMap? body]) async {
+    // GET and membership join are idempotent. Do not replay room creation,
+    // authentication, or signaling when a response is lost.
+    final retryable =
+        method == 'GET' || method == 'POST' && path.endsWith('/join');
+    for (var attempt = 0; ; attempt++) {
+      try {
+        return await _requestOnce(method, path, body);
+      } catch (error) {
+        final transient =
+            error is SocketException ||
+            error is TimeoutException ||
+            error is HttpException;
+        if (!retryable || attempt >= 1 || !transient) rethrow;
+        await Future<void>.delayed(retryDelay);
+      }
+    }
+  }
+
+  Future<JsonMap?> _requestOnce(
+    String method,
+    String path,
+    JsonMap? body,
+  ) async {
     final client = _clientFactory()..connectionTimeout = _timeout;
     try {
       final request = await _open(client, method, path);
