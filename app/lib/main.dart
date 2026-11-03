@@ -8,7 +8,7 @@ import 'auth/session_store.dart';
 import 'core/app_services.dart';
 import 'core/device_mode.dart';
 import 'net/models.dart';
-import 'screens/car/car_shell.dart';
+import 'screens/car/car_dashboard.dart';
 import 'screens/phone/auth.dart';
 import 'screens/phone/cover.dart';
 import 'screens/phone/friends.dart';
@@ -88,9 +88,11 @@ class _UnavoAppState extends State<UnavoApp> {
     setState(() {});
   }
 
-  Widget _shell(Widget child) =>
-      widget.mode == DeviceMode.car ? CarShell(child: child) : child;
   void _openRoom(String code) {
+    if (widget.mode == DeviceMode.car) {
+      widget.services.calls.pendingOpenRoom = null;
+      return;
+    }
     if (_cover ||
         widget.services.store.session == null ||
         _roomVisible ||
@@ -103,9 +105,8 @@ class _UnavoAppState extends State<UnavoApp> {
       _navigator.currentState!
           .push<void>(
             MaterialPageRoute(
-              builder: (_) => _shell(
-                RoomScreen(services: widget.services, mode: widget.mode),
-              ),
+              builder: (_) =>
+                  RoomScreen(services: widget.services, mode: widget.mode),
             ),
           )
           .whenComplete(() {
@@ -145,21 +146,21 @@ class _UnavoAppState extends State<UnavoApp> {
         theme: unavoTheme(Brightness.light),
         darkTheme: unavoTheme(Brightness.dark),
         themeMode: _appearance.themeMode,
-        home: _shell(
-          _cover
-              ? CoverScreen(mode: widget.mode, onContinue: _continue)
-              : widget.services.store.session == null
-              ? AuthScreen(
-                  api: widget.services.api,
-                  store: widget.services.store,
-                  mode: widget.mode,
-                )
-              : _PhoneTabs(
-                  services: widget.services,
-                  mode: widget.mode,
-                  onRoom: _openRoom,
-                ),
-        ),
+        home: _cover
+            ? CoverScreen(mode: widget.mode, onContinue: _continue)
+            : widget.services.store.session == null
+            ? AuthScreen(
+                api: widget.services.api,
+                store: widget.services.store,
+                mode: widget.mode,
+              )
+            : widget.mode == DeviceMode.car
+            ? CarDashboard(services: widget.services)
+            : _PhoneTabs(
+                services: widget.services,
+                mode: widget.mode,
+                onRoom: _openRoom,
+              ),
       ),
     ),
   );

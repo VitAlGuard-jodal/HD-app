@@ -153,9 +153,9 @@ class _FriendsScreenState extends State<FriendsScreen> {
                       ),
                     ),
                   if (_contacts.isEmpty)
-                    Text(
+                    StatusChip(
                       _busy ? '친구를 불러오는 중' : '추가한 친구 없음',
-                      style: UnavoType.body,
+                      icon: _busy ? 'refresh' : 'friends',
                     ),
                   for (final (index, contact) in _contacts.indexed)
                     Padding(
@@ -201,6 +201,12 @@ class _FriendsScreenState extends State<FriendsScreen> {
                                         )
                                         ? '같은 방'
                                         : '친구',
+                                    icon:
+                                        current.members.any(
+                                          (m) => m.handle == contact.handle,
+                                        )
+                                        ? 'rooms'
+                                        : 'friends',
                                     active: current.members.any(
                                       (m) => m.handle == contact.handle,
                                     ),
@@ -211,7 +217,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
                             const SizedBox(width: 12),
                             PanelButton(
                               label: '${contact.displayName} 통화방 이동',
-                              icon: 'arrow',
+                              icon: 'phone',
                               iconOnly: true,
                               onPressed: _busy || current.code != null
                                   ? null

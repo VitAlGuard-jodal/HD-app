@@ -8,6 +8,7 @@ import '../../core/errors.dart';
 import '../../core/server_address.dart';
 import '../../net/api_client.dart';
 import '../../ui/icons.dart';
+import '../../ui/control_scale.dart';
 import '../../ui/theme.dart';
 import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/panel_scroll.dart';
@@ -144,6 +145,7 @@ class _AuthScreenState extends State<AuthScreen> {
               Expanded(
                 child: PanelButton(
                   label: i == 0 ? '로그인' : '가입',
+                  icon: i == 0 ? 'login' : 'userplus',
                   selected: _signup == (i == 1),
                   style: _signup == (i == 1)
                       ? PanelButtonStyle.gold
@@ -206,7 +208,8 @@ class _AuthScreenState extends State<AuthScreen> {
                   ],
                   const SizedBox(height: 12),
                   PanelButton(
-                    label: '서버 주소',
+                    label: _serverExpanded ? '서버 주소 접기' : '서버 주소 설정',
+                    selected: _serverExpanded,
                     onPressed: _busy
                         ? null
                         : () => setState(() {
@@ -214,19 +217,15 @@ class _AuthScreenState extends State<AuthScreen> {
                           }),
                     child: Row(
                       children: [
-                        const UnavoIcon('server'),
-                        const SizedBox(width: 12),
-                        const Text('서버 주소', style: UnavoType.body),
+                        UnavoIcon('server', size: ControlScale.icon(context)),
                         const Spacer(),
-                        Text(
-                          _serverExpanded ? '접기' : '설정',
-                          style: const TextStyle(
-                            fontSize: 16,
-                            color: UnavoColors.muted,
+                        RotatedBox(
+                          quarterTurns: _serverExpanded ? 2 : 0,
+                          child: UnavoIcon(
+                            'chevron',
+                            size: ControlScale.icon(context),
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        const UnavoIcon('chevron', size: 20),
                       ],
                     ),
                   ),

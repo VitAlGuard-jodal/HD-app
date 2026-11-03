@@ -5,7 +5,8 @@ import 'package:flutter/material.dart';
 import '../../core/device_mode.dart';
 import '../../ui/appearance.dart';
 import '../../ui/backdrop.dart';
-import '../../ui/icons.dart';
+import '../../ui/control_scale.dart';
+import '../../ui/widgets/panel_button.dart';
 import '../../ui/theme.dart';
 
 class CoverScreen extends StatefulWidget {
@@ -18,7 +19,6 @@ class CoverScreen extends StatefulWidget {
 
 class _CoverScreenState extends State<CoverScreen> {
   Timer? _timer;
-  Future<void>? _iconsReady;
   bool _continued = false;
   @override
   void initState() {
@@ -26,19 +26,11 @@ class _CoverScreenState extends State<CoverScreen> {
     _timer = Timer(const Duration(milliseconds: 1200), _continue);
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _iconsReady ??= UnavoIcon.precache(context);
-  }
-
-  Future<void> _continue() async {
+  void _continue() {
     if (!mounted || _continued) return;
     _continued = true;
     _timer?.cancel();
-    // 자동 전환의 1.2초 동안 예열한다. 이른 탭도 예열이 끝난 뒤 진행한다.
-    await _iconsReady;
-    if (mounted) widget.onContinue();
+    widget.onContinue();
   }
 
   @override
@@ -48,94 +40,68 @@ class _CoverScreenState extends State<CoverScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    body: Semantics(
-      button: true,
-      label: '우나보 시작',
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: _continue,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Backdrop(
-              mode: widget.mode,
-              brightness: UnavoAppearance.of(context).resolve(context),
-              cover: true,
-            ),
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              height: 300,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      Colors.transparent,
-                      UnavoColors.ink.withValues(alpha: .75),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(28, 12, 26, 20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    Text(
-                      '우나보',
-                      style: UnavoType.display.copyWith(fontSize: 46),
-                    ),
-                    const SizedBox(height: 14),
-                    const Text(
-                      '낯선 길도, 함께라면 우리의 길.',
-                      style: TextStyle(
-                        fontSize: 21,
-                        height: 1.5,
-                        fontWeight: FontWeight.w600,
-                        color: UnavoColors.text,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    const Text(
-                      '같이 길을 개척한다.',
-                      style: TextStyle(fontSize: 16, color: UnavoColors.text),
-                    ),
-                    const Align(
-                      alignment: Alignment.centerRight,
-                      child: HyundaiPlaceholder(),
-                    ),
+  Widget build(BuildContext context) => ControlScale(
+    car: widget.mode == DeviceMode.car,
+    child: Scaffold(
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          Backdrop(
+            mode: widget.mode,
+            brightness: UnavoAppearance.of(context).resolve(context),
+            cover: true,
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: 300,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.transparent,
+                    UnavoColors.ink.withValues(alpha: .75),
                   ],
                 ),
               ),
             ),
-          ],
-        ),
-      ),
-    ),
-  );
-}
-
-class HyundaiPlaceholder extends StatelessWidget {
-  const HyundaiPlaceholder({super.key});
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.all(20),
-    child: Container(
-      width: 80,
-      height: 40,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(border: Border.all(color: UnavoColors.muted)),
-      child: const Text(
-        '현대 엠블럼\n자리표시',
-        textAlign: TextAlign.center,
-        style: TextStyle(fontSize: 12, height: 1.2, color: UnavoColors.muted),
+          ),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(28, 12, 26, 20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Text('우나보', style: UnavoType.display.copyWith(fontSize: 46)),
+                  const SizedBox(height: 14),
+                  const Text(
+                    '낯선 길도, 함께라면 우리의 길.',
+                    style: TextStyle(
+                      fontSize: 21,
+                      height: 1.5,
+                      fontWeight: FontWeight.w600,
+                      color: UnavoColors.text,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: PanelButton(
+                      label: '우나보 시작',
+                      icon: 'arrow',
+                      style: PanelButtonStyle.gold,
+                      onPressed: _continue,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     ),
   );

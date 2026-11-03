@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/device_mode.dart';
+import '../../screens/car/car_shell.dart';
 import '../appearance.dart';
 import '../backdrop.dart';
 import '../phone_frame_layout.dart';
@@ -23,6 +24,7 @@ class PhoneFrame extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (mode == DeviceMode.car) return CarShell(primary: child);
     final appearance = UnavoAppearance.of(context);
     final brightness = appearance.resolve(context);
     final media = MediaQuery.of(context);

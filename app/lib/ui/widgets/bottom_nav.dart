@@ -1,6 +1,5 @@
 import 'package:flutter/widgets.dart';
 
-import '../icons.dart';
 import '../theme.dart';
 import 'panel_button.dart';
 
@@ -20,29 +19,12 @@ class BottomNav extends StatelessWidget {
           Expanded(
             child: PanelButton(
               label: const ['방', '친구', '마이크'][i],
+              icon: const ['rooms', 'friends', 'mic'][i],
               selected: i == index,
               style: i == index
                   ? PanelButtonStyle.gold
                   : PanelButtonStyle.neutral,
               onPressed: () => onChanged(i),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  UnavoIcon(
-                    const ['rooms', 'friends', 'mic'][i],
-                    color: i == index ? UnavoColors.ink : UnavoColors.text,
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    const ['방', '친구', '마이크'][i],
-                    style: TextStyle(
-                      fontSize: 16,
-                      height: 1.1,
-                      color: i == index ? UnavoColors.ink : UnavoColors.text,
-                    ),
-                  ),
-                ],
-              ),
             ),
           ),
         ],

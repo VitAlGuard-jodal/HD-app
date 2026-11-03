@@ -32,7 +32,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('시작'));
+    await tester.tap(find.byTooltip('시작'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text(HandleRules.help).first);
     await tester.pumpAndSettle();

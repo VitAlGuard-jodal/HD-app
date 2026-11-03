@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -70,7 +69,10 @@ class MicRouter extends ChangeNotifier {
   StreamSubscription<dynamic>? _subscription;
   MicState state = const MicState();
   AudioPermissions permissions = const AudioPermissions();
-  bool get supported => Platform.isAndroid;
+  bool get supported =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
 
   Future<void> initialize() async {
     if (!supported) return;

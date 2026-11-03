@@ -3,7 +3,7 @@ import 'dart:math' as math;
 bool isNarrowPhone(double width, double height) =>
     width <= 380 || height <= 820;
 
-// 1080×2400 PNG를 중앙 정렬 cover로 그렸을 때의 폰 레터링 경계.
+// 1080×2400 배경를 중앙 정렬 cover로 그렸을 때의 폰 레터링 경계.
 // 원본 y=232는 Una Vox의 보이는 획보다 위로 잡은 경계다.
 // 밑변은 기존처럼 획뿐 아니라 UNAVO의 SVG 경계(y=1108)까지 보호한다.
 ({double top, double bottom}) phoneLetteringBounds({

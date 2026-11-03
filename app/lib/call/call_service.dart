@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -15,8 +14,13 @@ class CallService extends ChangeNotifier {
   void Function(String code)? onOpenRoom;
   String? pendingOpenRoom;
 
+  bool get supported =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
   Future<void> initialize() async {
-    if (!Platform.isAndroid) return;
+    if (!supported) return;
     _subscription = events.receiveBroadcastStream().listen(
       (dynamic value) {
         final event = Map<Object?, Object?>.from(value as Map);
@@ -47,7 +51,7 @@ class CallService extends ChangeNotifier {
   }
 
   Future<void> start(String roomCode, String handle) async {
-    if (!Platform.isAndroid)
+    if (!supported)
       throw PlatformException(
         code: 'unavailable',
         message: '이 기기의 오디오 연결은 아직 지원하지 않습니다.',
@@ -61,7 +65,7 @@ class CallService extends ChangeNotifier {
   }
 
   Future<void> stop() async {
-    if (Platform.isAndroid) await channel.invokeMethod<void>('stop');
+    if (supported) await channel.invokeMethod<void>('stop');
     state = const CallState();
     notifyListeners();
   }

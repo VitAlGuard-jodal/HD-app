@@ -20,7 +20,7 @@ class DeviceCapabilities {
         hasMicrophone: microphone,
       );
     } on MissingPluginException {
-      // F2에서 iOS 장치·오디오 구현을 연결한다. 화면은 폰 모드로 동작한다.
+      // 네이티브 채널이 없는 데스크톱 등에서는 폰 레이아웃으로 표시한다.
       return const DeviceCapabilities(
         mode: DeviceMode.phone,
         hasMicrophone: false,

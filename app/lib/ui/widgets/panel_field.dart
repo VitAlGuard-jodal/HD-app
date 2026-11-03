@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../control_scale.dart';
 import '../icons.dart';
 import '../theme.dart';
 import 'focus_ring.dart';
@@ -33,7 +34,7 @@ class PanelField extends StatelessWidget {
   @override
   Widget build(BuildContext context) => FocusRing(
     child: SizedBox(
-      height: 56,
+      height: ControlScale.target(context),
       child: TextField(
         controller: controller,
         focusNode: focusNode,
@@ -56,11 +57,15 @@ class PanelField extends StatelessWidget {
           contentPadding: const EdgeInsets.symmetric(horizontal: 14),
           prefixIcon: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14),
-            child: UnavoIcon(icon, color: UnavoColors.muted),
+            child: UnavoIcon(
+              icon,
+              color: UnavoColors.muted,
+              size: ControlScale.icon(context),
+            ),
           ),
-          prefixIconConstraints: const BoxConstraints(
-            minWidth: 52,
-            maxWidth: 52,
+          prefixIconConstraints: BoxConstraints(
+            minWidth: ControlScale.isCar(context) ? 64 : 52,
+            maxWidth: ControlScale.isCar(context) ? 64 : 52,
           ),
           border: const OutlineInputBorder(
             borderRadius: BorderRadius.all(Radius.circular(4)),

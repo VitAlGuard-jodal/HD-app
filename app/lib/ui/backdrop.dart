@@ -33,7 +33,7 @@ class Backdrop extends StatelessWidget {
             child: Transform.translate(
               offset: Offset(0, verticalOffset),
               child: Image.asset(
-                'assets/backdrop/${mode == DeviceMode.car ? 'car' : 'phone'}_${brightness == Brightness.dark ? 'night' : 'day'}$suffix.png',
+                'assets/backdrop/${mode == DeviceMode.car ? 'car' : 'phone'}_${brightness == Brightness.dark ? 'night' : 'day'}$suffix.webp',
                 fit: BoxFit.cover,
                 alignment: Alignment.center,
                 width: double.infinity,

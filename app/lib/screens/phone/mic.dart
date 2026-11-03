@@ -5,15 +5,16 @@ import 'package:flutter/material.dart';
 import '../../audio/mic_ranker.dart';
 import '../../audio/mic_router.dart';
 import '../../core/errors.dart';
-import '../../ui/icons.dart';
+import '../../ui/widgets/mic_level.dart';
 import '../../ui/theme.dart';
 import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/panel_scroll.dart';
 import '../../ui/widgets/status_chip.dart';
 
 class MicScreen extends StatefulWidget {
-  const MicScreen({super.key, required this.router});
+  const MicScreen({super.key, required this.router, this.showLevel = true});
   final MicRouter router;
+  final bool showLevel;
   @override
   State<MicScreen> createState() => _MicScreenState();
 }
@@ -114,91 +115,33 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
             for (final device in devices)
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
-                child: PanelButton(
-                  label: device.name,
-                  selected: state.selected?.id == device.id,
-                  height: 72,
-                  onPressed: _busy
-                      ? null
-                      : () => _run(() => widget.router.choose(device.id)),
-                  child: Row(
-                    children: [
-                      UnavoIcon(
-                        _icon(device.type),
-                        color: state.selected?.id == device.id
-                            ? UnavoColors.gold
-                            : UnavoColors.text,
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          device.name,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 16,
-                            color: state.selected?.id == device.id
-                                ? UnavoColors.gold
-                                : UnavoColors.text,
-                          ),
-                        ),
-                      ),
-                      if (state.selected?.id == device.id) ...[
-                        const SizedBox(width: 12),
-                        const UnavoIcon('check', color: UnavoColors.gold),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                const Text(
-                  '입력 레벨',
-                  style: TextStyle(fontSize: 16, color: UnavoColors.muted),
-                ),
-                const Spacer(),
-                Text('${(state.level * 100).round()}%', style: UnavoType.body),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Semantics(
-              label: '마이크 입력 레벨',
-              value: '${(state.level * 100).round()}%',
-              child: SizedBox(
-                height: 12,
                 child: Row(
                   children: [
-                    for (var i = 0; i < 20; i++) ...[
-                      if (i > 0) const SizedBox(width: 4),
-                      Expanded(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: i < (state.level * 20).round()
-                                ? UnavoColors.gold
-                                : UnavoColors.input,
-                            border: Border.all(
-                              color: i < (state.level * 20).round()
-                                  ? UnavoColors.gold
-                                  : UnavoColors.line,
-                            ),
-                          ),
-                          child: const SizedBox.expand(),
-                        ),
-                      ),
-                    ],
+                    Expanded(child: Text(device.name, style: UnavoType.body)),
+                    const SizedBox(width: 12),
+                    PanelButton(
+                      label: '${device.name} 선택',
+                      icon: _icon(device.type),
+                      selected: state.selected?.id == device.id,
+                      style: state.selected?.id == device.id
+                          ? PanelButtonStyle.gold
+                          : PanelButtonStyle.neutral,
+                      onPressed: _busy
+                          ? null
+                          : () => _run(() => widget.router.choose(device.id)),
+                    ),
                   ],
                 ),
               ),
-            ),
+            const SizedBox(height: 4),
+            if (widget.showLevel) MicLevel(router: widget.router),
             const SizedBox(height: 12),
             Row(
               children: [
                 Expanded(
                   child: PanelButton(
                     label: '자동 선택',
-                    icon: 'refresh',
+                    icon: 'wave',
                     selected: state.manualId == null,
                     style: state.manualId == null
                         ? PanelButtonStyle.gold
@@ -212,8 +155,11 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
                 Expanded(
                   child: PanelButton(
                     label: state.isPreviewing ? '시험 종료' : '입력 시험',
-                    icon: 'wave',
+                    icon: state.isPreviewing ? 'micoff' : 'mic',
                     selected: state.isPreviewing,
+                    style: state.isPreviewing
+                        ? PanelButtonStyle.gold
+                        : PanelButtonStyle.neutral,
                     onPressed:
                         _busy || !widget.router.supported || callOwnsCapture
                         ? null
@@ -225,7 +171,7 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
             if (callOwnsCapture)
               const Padding(
                 padding: EdgeInsets.only(top: 12),
-                child: Text('통화 입력 사용 중', style: UnavoType.body),
+                child: StatusChip('통화 입력 사용 중', icon: 'phone', active: true),
               ),
             if (widget.router.supported &&
                 (!widget.router.permissions.microphone ||
@@ -240,7 +186,7 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
               const SizedBox(height: 12),
               PanelButton(
                 label: '마이크·알림 권한 요청',
-                icon: 'mic',
+                icon: 'lock',
                 onPressed: _busy
                     ? null
                     : () => _run(() async {
@@ -250,7 +196,7 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
               const SizedBox(height: 12),
               PanelButton(
                 label: '앱 권한 설정 열기',
-                icon: 'arrow',
+                icon: 'server',
                 onPressed: _busy
                     ? null
                     : () => _run(widget.router.openSettings),

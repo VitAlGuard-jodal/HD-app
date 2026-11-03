@@ -46,11 +46,10 @@ class _RoomsScreenState extends State<RoomsScreen> {
           ? await widget.services.api.createRoom(name: _name.text.trim())
           : await widget.services.api.joinRoom(_code.text.trim());
       if (create && mounted) _name.clear();
+      // 차량 대시보드는 open의 첫 상태 변경에서 이 화면을 교체한다.
+      if (mounted) FocusScope.of(context).unfocus();
       await widget.services.rooms.open(room.code);
-      if (mounted) {
-        FocusScope.of(context).unfocus();
-        widget.onRoom(room.code);
-      }
+      if (mounted) widget.onRoom(room.code);
     } catch (error) {
       if (mounted)
         setState(() {
@@ -152,16 +151,8 @@ class _RoomsScreenState extends State<RoomsScreen> {
             ],
             ErrorText(_error),
             const SizedBox(height: 18),
-            const Text(
-              '내 방',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 12),
             if (current.code == null)
-              const Text(
-                '참여 중인 방이 없습니다.',
-                style: TextStyle(fontSize: 16, color: UnavoColors.muted),
-              )
+              const StatusChip('참여 중인 방이 없습니다.', icon: 'rooms')
             else
               FocusRing(
                 child: Semantics(
@@ -225,6 +216,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
               const SizedBox(height: 12),
               StatusChip(
                 widget.services.rooms.call.isActive ? '통화 중' : '참여 중',
+                icon: widget.services.rooms.call.isActive ? 'phone' : 'rooms',
                 active: true,
               ),
             ],

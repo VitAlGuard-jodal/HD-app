@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../control_scale.dart';
 import '../icons.dart';
 import '../theme.dart';
 import 'focus_ring.dart';
@@ -14,11 +15,11 @@ class PanelButton extends StatelessWidget {
     this.icon,
     this.style = PanelButtonStyle.neutral,
     this.height = 56,
-    this.iconOnly = false,
+    this.iconOnly = true,
     this.selected = false,
     this.child,
     this.fontSize = 16,
-  });
+  }) : assert(!iconOnly || icon != null || child != null);
   final String label;
   final VoidCallback? onPressed;
   final String? icon;
@@ -30,6 +31,9 @@ class PanelButton extends StatelessWidget {
   final double fontSize;
   @override
   Widget build(BuildContext context) {
+    final car = ControlScale.isCar(context);
+    final target = ControlScale.target(context);
+    final effectiveHeight = height < target ? target : height;
     final (background, foreground, border) = switch (style) {
       PanelButtonStyle.neutral => (
         UnavoColors.input,
@@ -59,7 +63,11 @@ class PanelButton extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             if (icon != null)
-              UnavoIcon(icon!, color: foreground, size: height == 72 ? 28 : 24),
+              UnavoIcon(
+                icon!,
+                color: foreground,
+                size: car ? 36 : (height >= 72 ? 28 : 24),
+              ),
             if (icon != null && !iconOnly) const SizedBox(width: 10),
             if (!iconOnly)
               Flexible(
@@ -82,30 +90,34 @@ class PanelButton extends StatelessWidget {
       onTap: onPressed,
       selected: selected,
       label: label,
-      child: ExcludeSemantics(
-        child: FocusRing(
-          child: SizedBox(
-            height: height,
-            width: iconOnly ? 56 : null,
-            child: OutlinedButton(
-              onPressed: onPressed,
-              style: ButtonStyle(
-                minimumSize: const WidgetStatePropertyAll(Size(56, 56)),
-                padding: WidgetStatePropertyAll(
-                  EdgeInsets.symmetric(horizontal: iconOnly ? 0 : 14),
-                ),
-                backgroundColor: WidgetStatePropertyAll(background),
-                foregroundColor: WidgetStatePropertyAll(foreground),
-                side: WidgetStatePropertyAll(BorderSide(color: border)),
-                shape: const WidgetStatePropertyAll(
-                  RoundedRectangleBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(4)),
+      child: Tooltip(
+        message: label,
+        excludeFromSemantics: true,
+        child: ExcludeSemantics(
+          child: FocusRing(
+            child: SizedBox(
+              height: effectiveHeight,
+              width: iconOnly ? target : null,
+              child: OutlinedButton(
+                onPressed: onPressed,
+                style: ButtonStyle(
+                  minimumSize: WidgetStatePropertyAll(Size(target, target)),
+                  padding: WidgetStatePropertyAll(
+                    EdgeInsets.symmetric(horizontal: iconOnly ? 0 : 14),
                   ),
+                  backgroundColor: WidgetStatePropertyAll(background),
+                  foregroundColor: WidgetStatePropertyAll(foreground),
+                  side: WidgetStatePropertyAll(BorderSide(color: border)),
+                  shape: const WidgetStatePropertyAll(
+                    RoundedRectangleBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(4)),
+                    ),
+                  ),
+                  animationDuration: const Duration(milliseconds: 150),
+                  overlayColor: const WidgetStatePropertyAll(Color(0x16F3EDDF)),
                 ),
-                animationDuration: const Duration(milliseconds: 150),
-                overlayColor: const WidgetStatePropertyAll(Color(0x16F3EDDF)),
+                child: content,
               ),
-              child: content,
             ),
           ),
         ),
