@@ -1,6 +1,6 @@
 package kr.modumoa.hdapp.audio
 
-data class MicDevice(val id: Int, val type: Int, val name: String)
+data class MicDevice(val id: Int, val type: Int, val name: String, val webrtcDeviceId: String = id.toString())
 enum class MicMode { CAR, PHONE }
 
 object MicRanker {

@@ -121,10 +121,12 @@ class AudioChannel(private val activity: Activity, private val app: UnavoApplica
     private companion object { const val PERMISSION_REQUEST = 6201 }
 }
 
-private fun MicDevice.toMap(): Map<String, Any> = mapOf("id" to id, "type" to type, "name" to name)
+private fun MicDevice.toMap(): Map<String, Any> = mapOf(
+    "id" to id, "type" to type, "name" to name, "webrtcDeviceId" to webrtcDeviceId,
+)
 private fun MicState.toMap(): Map<String, Any?> = mapOf(
     "mode" to if (mode == MicMode.CAR) "car" else "phone",
     "devices" to devices.map { it.toMap() }, "selected" to selected?.toMap(), "manualId" to manualId,
     "level" to level.toDouble(), "rms" to rms, "dbfs" to dbfs,
-    "isRecording" to isRecording, "isPreviewing" to isPreviewing, "error" to error,
+    "isRecording" to isRecording, "isPreviewing" to isPreviewing, "isCallActive" to isCallActive, "error" to error,
 )

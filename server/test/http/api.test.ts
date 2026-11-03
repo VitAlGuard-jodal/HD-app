@@ -125,6 +125,22 @@ function assertError(result: { status: number; body: unknown }, status: number):
   assert.ok(body.error.message.length > 0);
 }
 
+test("TURN 자격 발급은 로그인 필수이고 응답을 캐시하지 않는다", async (t) => {
+  const { api, signup, base } = await fixture(t);
+  assertError(await api("GET", "/v1/turn"), 401);
+  const token = await signup("turn_user", "통화 사용자");
+  const response = await fetch(`${base}/v1/turn`, {
+    headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const body = await response.json() as { iceServers: unknown[]; ttlSeconds: number };
+  assert.ok(Array.isArray(body.iceServers));
+  assert.ok(Number.isSafeInteger(body.ttlSeconds) && body.ttlSeconds > 0);
+  await api("POST", "/v1/auth/logout", token);
+  assertError(await api("GET", "/v1/turn", token), 401);
+});
+
 test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가기·로그아웃까지", { timeout: 30_000 }, async (t) => {
   const { api, signup, events, hub } = await fixture(t);
   const signupToken = await signup("alice", "  앨리스  ");

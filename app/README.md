@@ -1,8 +1,12 @@
-# 우나보 Flutter 앱 — F1
+# 우나보 Flutter 앱
 
 Flutter 3.47.4 stable 기반의 단일 Android/iOS 프로젝트다. Android 패키지와 iOS 앱 bundle ID는 `kr.modumoa.hdapp`이다. Android는 minSdk 28, targetSdk 34, compileSdk 37을 사용한다.
 
-`lib/main.dart`에서 세션을 복원하고 표지 → 로그인/가입 → 방·친구·마이크 탭으로 이동한다. `unavo/device`의 automotive 기능 플래그가 true이면 같은 화면을 `CarShell`로 감싼다. 차량 전용 화면과 iOS 네이티브 오디오는 F2, WebRTC는 F3 범위다. 현재 `NoopMediaEngine`은 음성을 전송하지 않는다.
+`lib/main.dart`에서 세션을 복원하고 표지 → 로그인/가입 → 방·친구·마이크 탭으로 이동한다. `unavo/device`의 automotive 기능 플래그가 true이면 같은 화면을 `CarShell`로 감싼다. Android/iOS의 기본 음성 엔진은 `flutter_webrtc 1.6.3`을 사용하는 `WebRtcMediaEngine`이다. `NoopMediaEngine`은 테스트 주입과 미지원 플랫폼에 남겨 둔다.
+
+음성은 방에 먼저 입장한 4명까지 풀 메시로 연결한다. `hello.members`의 서버 정렬(`joinedAt`, 동률이면 handle)을 유지하며, 새 통화 참여자가 기존 참여자에게 offer를 보낸다. 동시 offer는 사전순으로 작은 handle이 유지한다. `GET /v1/turn`은 로그인된 사용자의 STUN/TURN 설정을 반환하고, 통화 중 TTL의 80% 시점에 재발급·ICE restart를 수행한다. 서버에는 `TURN_SECRET`, `TURN_REALM`, `TURN_URIS`, `TURN_TTL_SECONDS`를 설정한다. secret이 없으면 STUN만 반환한다.
+
+통화 시작 전에 입력 시험을 종료한다. 네이티브 채널은 포커스·세션·장치 선택·스피커 출력을 관리하고, 통화 녹음은 WebRTC가 담당한다. 네이티브 레벨 미터는 입력 시험에서만 동작하며, 참여자 발화 표시는 WebRTC 수신 통계에서 500ms마다 계산한다. F3 테스트는 작성만 했으며, 실제 송수신·오디오 경로는 메인이 기기로 검증해야 한다.
 
 메인이 실행할 순서:
 
@@ -24,4 +28,4 @@ F1 작성 중에는 위 네 명령과 Gradle/Xcode 빌드를 실행하지 않았
 
 폰트 라이선스는 저장소의 [Rye OFL](../licenses/fonts/rye/OFL.txt)과 [Black Han Sans OFL](../licenses/fonts/blackhansans/OFL.txt)을 참조한다. Pirata One은 PNG에 구워져 있으며 폰트 파일을 번들하지 않는다.
 
-채널은 `unavo/device`, `unavo/audio`, `unavo/call` 세 종류다. 오디오는 `unavo/audio/levels`, 통화는 `unavo/call/events` EventChannel을 함께 사용한다. Android 알림의 끊기는 비공개 브로드캐스트로 네이티브 캡처를 먼저 종료하고 Dart `RoomSession.leaveCall`에 전달한다. 방 멤버십/SSE는 유지된다.
+채널은 `unavo/device`, `unavo/audio`, `unavo/call` 세 종류다. 오디오는 `unavo/audio/levels`, 통화는 `unavo/call/events` EventChannel을 함께 사용한다. Android 알림의 끊기는 비공개 브로드캐스트로 네이티브 통화 상태를 종료하고 Dart `RoomSession.leaveCall`에 전달하여 WebRTC 트랙·피어를 정리한다. 방 멤버십/SSE는 유지된다.

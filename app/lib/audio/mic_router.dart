@@ -28,6 +28,7 @@ class MicState {
     this.dbfs = double.negativeInfinity,
     this.isRecording = false,
     this.isPreviewing = false,
+    this.isCallActive = false,
     this.error,
   });
   factory MicState.fromMap(Map<Object?, Object?> map) {
@@ -46,6 +47,7 @@ class MicState {
       dbfs: (map['dbfs'] as num?)?.toDouble() ?? double.negativeInfinity,
       isRecording: map['isRecording'] as bool? ?? false,
       isPreviewing: map['isPreviewing'] as bool? ?? false,
+      isCallActive: map['isCallActive'] as bool? ?? false,
       error: map['error'] as String?,
     );
   }
@@ -58,6 +60,7 @@ class MicState {
   final double dbfs;
   final bool isRecording;
   final bool isPreviewing;
+  final bool isCallActive;
   final String? error;
 }
 

@@ -1,0 +1,324 @@
+import 'dart:async';
+
+const meshMemberLimit = 4;
+const meshCapacityReason = '음성 통화는 먼저 입장한 4명까지 참여할 수 있습니다.';
+
+enum MeshPeerState { connecting, connected, failed, closed }
+
+typedef MeshSignalSender =
+    Future<void> Function(String to, String kind, Map<String, Object?> payload);
+typedef MeshPeerFactory =
+    Future<MeshPeer> Function(
+      String handle,
+      void Function(Map<String, Object?> candidate) onCandidate,
+      void Function(MeshPeerState state) onState,
+    );
+
+// No Flutter or WebRTC dependency: the coordinator owns ordering and glare;
+// the adapter owns SDP application and the platform connection.
+abstract interface class MeshPeer {
+  Future<Map<String, Object?>> createOffer({bool iceRestart = false});
+  Future<Map<String, Object?>> answerOffer(Map<String, Object?> offer);
+  Future<void> acceptAnswer(Map<String, Object?> answer);
+  Future<void> addCandidate(Map<String, Object?> candidate);
+  Future<void> close();
+}
+
+class MeshCoordinator {
+  MeshCoordinator({
+    required this.selfHandle,
+    required this.createPeer,
+    required this.sendSignal,
+    required this.sessionId,
+    this.onPeerState,
+    this.onError,
+  });
+
+  final String selfHandle;
+  final String sessionId;
+  final MeshPeerFactory createPeer;
+  final MeshSignalSender sendSignal;
+  final void Function(String handle, MeshPeerState state)? onPeerState;
+  final void Function(Object error)? onError;
+  final Map<String, _PeerSlot> _peers = {};
+  final Map<String, List<Map<String, Object?>>> _pendingIce = {};
+  final Set<String> _ignored = {};
+  List<String> _members = [];
+  Future<void> _tail = Future<void>.value();
+  bool _closed = false;
+  bool _joined = false;
+  int _offerNumber = 0;
+
+  Set<String> get peers => Set.unmodifiable(_peers.keys);
+  Future<void> get idle => _tail;
+
+  // The server orders hello.members by joinedAt, then handle for ties.
+  static List<String> admitted(Iterable<String> members) =>
+      members.toSet().take(meshMemberLimit).toList();
+  static bool canJoin(String self, Iterable<String> members) =>
+      admitted(members).contains(self);
+
+  Future<void> join(Iterable<String> members) {
+    if (_joined || _closed) throw StateError('이미 사용한 메시 세션입니다.');
+    _members = members.toSet().toList();
+    if (!canJoin(selfHandle, _members)) throw StateError(meshCapacityReason);
+    _joined = true;
+    return _enqueue(() async {
+      // Only the newcomer offers to the hello snapshot. member-joined merely
+      // updates admission; incumbents wait for the newcomer's offer.
+      for (final handle in admitted(_members)) {
+        if (_closed) return;
+        if (handle != selfHandle) await _offer(handle);
+      }
+    });
+  }
+
+  Future<void> updateMembers(Iterable<String> members) {
+    _members = members.toSet().toList();
+    return _enqueue(() async {
+      for (final handle in _peers.keys.toList()) {
+        if (!_allows(handle)) await _drop(handle);
+      }
+      _pendingIce.removeWhere(
+        (key, _) => !_members.contains(key.split('/').first),
+      );
+    });
+  }
+
+  Future<void> onSignal(String from, String kind, Object? payload) =>
+      _enqueue(() async {
+        if (!_allows(from) || payload is! Map) return;
+        final data = Map<String, Object?>.from(payload);
+        final id = data['negotiationId'];
+        if (id is! String || id.isEmpty || id.length > 200) return;
+        final key = '$from/$id';
+        if (_ignored.contains(key)) return;
+        switch (kind) {
+          case 'offer':
+            if (data['type'] != 'offer' || data['sdp'] is! String) return;
+            var slot = _peers[from];
+            if (slot?.id == id && slot!.remoteDescription) return;
+            if (slot != null && slot.offerPending) {
+              if (selfHandle.compareTo(from) < 0) {
+                // Lexicographically smaller handle keeps its local offer.
+                _ignore(key);
+                // The first offer may have arrived before this member pressed
+                // Join call (or before its SSE connected). Replay it and ICE.
+                final offer = slot.localOffer;
+                if (offer != null) {
+                  await sendSignal(from, 'offer', {
+                    ...offer,
+                    'negotiationId': slot.id,
+                  });
+                  for (final ice in slot.localIce) {
+                    await sendSignal(from, 'ice', {
+                      ...ice,
+                      'negotiationId': slot.id,
+                    });
+                  }
+                }
+                return;
+              }
+              // Recreate instead of relying on native SDP rollback support.
+              await _drop(from);
+              slot = null;
+            }
+            if (slot == null) slot = await _newPeer(from);
+            if (slot == null || !_current(from, slot)) return;
+            if (slot.id != null && slot.id != id) _ignore('$from/${slot.id}');
+            slot.id = id;
+            slot.remoteDescription = false;
+            slot.offerPending = false;
+            slot.localOffer = null;
+            slot.localIce.clear();
+            final answer = await slot.peer!.answerOffer(data);
+            if (!_current(from, slot)) return;
+            slot.remoteDescription = true;
+            await _flushIce(from, slot);
+            await sendSignal(from, 'answer', {...answer, 'negotiationId': id});
+          case 'answer':
+            final slot = _peers[from];
+            if (slot == null ||
+                !slot.offerPending ||
+                slot.id != id ||
+                data['type'] != 'answer' ||
+                data['sdp'] is! String)
+              return;
+            await slot.peer!.acceptAnswer(data);
+            if (!_current(from, slot)) return;
+            slot.offerPending = false;
+            slot.remoteDescription = true;
+            await _flushIce(from, slot);
+          case 'ice':
+            if (data['candidate'] is! String) return;
+            final slot = _peers[from];
+            if (slot != null && slot.id == id && slot.remoteDescription) {
+              await slot.peer!.addCandidate(data);
+            } else {
+              if (_pendingIce.length >= 32 && !_pendingIce.containsKey(key)) {
+                _pendingIce.remove(_pendingIce.keys.first);
+              }
+              final pending = _pendingIce.putIfAbsent(key, () => []);
+              if (pending.length < 128) pending.add(data);
+            }
+          case 'custom':
+            if (data['type'] == 'mesh-left' && _peers[from]?.id == id) {
+              await _drop(from);
+            }
+        }
+      });
+
+  // After credentials change, only one side initiates each ICE restart.
+  Future<void> restartIce() => _enqueue(() async {
+    for (final handle in _peers.keys.toList()) {
+      if (_closed) return;
+      if (_peers[handle]!.offerPending) {
+        // An unanswered offer may contain an allocation using old TURN
+        // credentials. Rebuild it so a late join never replays expired ICE.
+        await _drop(handle);
+        await _offer(handle);
+      } else if (selfHandle.compareTo(handle) < 0) {
+        await _offer(handle, iceRestart: true);
+      }
+    }
+  });
+
+  Future<void> _offer(String handle, {bool iceRestart = false}) async {
+    if (!_allows(handle)) return;
+    final slot = _peers[handle] ?? await _newPeer(handle);
+    if (slot == null || !_current(handle, slot)) return;
+    if (slot.id != null) _ignore('$handle/${slot.id}');
+    final id = '$selfHandle:$sessionId:${++_offerNumber}';
+    slot.id = id;
+    slot.offerPending = true;
+    slot.remoteDescription = false;
+    slot.localIce.clear();
+    final offer = await slot.peer!.createOffer(iceRestart: iceRestart);
+    if (_current(handle, slot)) {
+      slot.localOffer = offer;
+      await sendSignal(handle, 'offer', {...offer, 'negotiationId': id});
+    }
+  }
+
+  Future<_PeerSlot?> _newPeer(String handle) async {
+    final slot = _PeerSlot();
+    _peers[handle] = slot;
+    onPeerState?.call(handle, MeshPeerState.connecting);
+    try {
+      slot.peer = await createPeer(
+        handle,
+        (candidate) {
+          final id = slot.id;
+          if (id == null || !_current(handle, slot)) return;
+          if (slot.localIce.length < 128) slot.localIce.add(candidate);
+          unawaited(
+            _enqueue(() async {
+              if (_current(handle, slot) && slot.id == id) {
+                await sendSignal(handle, 'ice', {
+                  ...candidate,
+                  'negotiationId': id,
+                });
+              }
+            }).catchError((Object _) {}),
+          );
+        },
+        (state) {
+          if (_current(handle, slot)) onPeerState?.call(handle, state);
+        },
+      );
+      if (!_current(handle, slot)) {
+        if (identical(_peers[handle], slot)) _peers.remove(handle);
+        await slot.peer!.close();
+        onPeerState?.call(handle, MeshPeerState.closed);
+        return null;
+      }
+      return slot;
+    } catch (_) {
+      _peers.remove(handle);
+      onPeerState?.call(handle, MeshPeerState.failed);
+      rethrow;
+    }
+  }
+
+  Future<void> _flushIce(String handle, _PeerSlot slot) async {
+    for (final candidate
+        in _pendingIce.remove('$handle/${slot.id}') ??
+            <Map<String, Object?>>[]) {
+      if (!_current(handle, slot)) return;
+      await slot.peer!.addCandidate(candidate);
+    }
+  }
+
+  bool _allows(String handle) =>
+      !_closed &&
+      _joined &&
+      handle != selfHandle &&
+      canJoin(selfHandle, _members) &&
+      admitted(_members).contains(handle);
+  bool _current(String handle, _PeerSlot slot) =>
+      _allows(handle) && identical(_peers[handle], slot);
+
+  void _ignore(String key) {
+    _pendingIce.remove(key);
+    _ignored.add(key);
+    if (_ignored.length > 128) _ignored.remove(_ignored.first);
+  }
+
+  Future<void> _drop(String handle) async {
+    final slot = _peers.remove(handle);
+    if (slot == null) return;
+    if (slot.id != null) _ignore('$handle/${slot.id}');
+    try {
+      await slot.peer?.close();
+    } finally {
+      onPeerState?.call(handle, MeshPeerState.closed);
+    }
+  }
+
+  Future<void> close() {
+    _closed = true; // Invalidate in-flight factory/SDP work immediately.
+    return _enqueue(() async {
+      Object? firstError;
+      StackTrace? firstStack;
+      for (final handle in _peers.keys.toList()) {
+        final id = _peers[handle]?.id;
+        if (id != null) {
+          // A disconnected signaling server must not delay local teardown.
+          unawaited(
+            sendSignal(handle, 'custom', {
+              'type': 'mesh-left',
+              'negotiationId': id,
+            }).catchError((Object _) {}),
+          );
+        }
+        try {
+          await _drop(handle);
+        } catch (error, stack) {
+          firstError ??= error;
+          firstStack ??= stack;
+        }
+      }
+      _pendingIce.clear();
+      _ignored.clear();
+      if (firstError != null)
+        Error.throwWithStackTrace(firstError, firstStack!);
+    });
+  }
+
+  Future<void> _enqueue(Future<void> Function() operation) {
+    final result = _tail.then((_) => operation());
+    _tail = result.catchError((Object error) {
+      if (!_closed) onError?.call(error);
+    });
+    return result;
+  }
+}
+
+class _PeerSlot {
+  MeshPeer? peer;
+  String? id;
+  bool offerPending = false;
+  bool remoteDescription = false;
+  Map<String, Object?>? localOffer;
+  final List<Map<String, Object?>> localIce = [];
+}

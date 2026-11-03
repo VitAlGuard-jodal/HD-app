@@ -4,6 +4,7 @@ import { hashPassword, issueToken, lookupToken, revokeToken, tokenHash, verifyPa
 import { isValidDisplayName, isValidHandle, isValidPassword } from "./handles.ts";
 import { generateRoomCode, RoomEventHub } from "./rooms.ts";
 import { openEventStream } from "./sse.ts";
+import { issueIceServers } from "./turn.ts";
 import {
   addContact, createRoom, createUser, deleteContact, findRoomByCode, findUserByHandle,
   isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicUser,
@@ -163,6 +164,12 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
     }
 
     const { user, token } = authenticate(db, request);
+
+    if (method === "GET" && path === "/v1/turn") {
+      response.setHeader("cache-control", "no-store");
+      json(response, 200, issueIceServers(user.handle));
+      return;
+    }
 
     if (method === "POST" && path === "/v1/auth/logout") {
       await readJson(request, true);

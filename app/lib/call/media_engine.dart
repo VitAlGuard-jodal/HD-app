@@ -1,27 +1,33 @@
 import 'package:flutter/foundation.dart';
 
+enum MediaConnectionState { idle, connecting, connected, failed }
+
 abstract class MediaEngine {
-  void join(String roomCode, String selfHandle);
-  void leave();
+  Future<void> join(String roomCode, String selfHandle);
+  Future<void> leave();
+  Future<void> setMembers(List<String> handles);
   void setMuted(bool muted);
-  void onSignal(String from, String kind, Object? payload);
+  Future<void> onSignal(String from, String kind, Object? payload);
   void onRemoteSpeaking(String handle);
 
   // F3 엔진은 수신 발화와 로컬 시그널을 이 콜백으로 전달한다.
   void Function(String handle, bool speaking)? remoteSpeaking;
   Future<void> Function(String to, String kind, Object? payload)? sendSignal;
+  void Function(MediaConnectionState state, String? message)? connectionChanged;
 }
 
 class NoopMediaEngine extends MediaEngine {
   @override
-  void join(String roomCode, String selfHandle) =>
+  Future<void> join(String roomCode, String selfHandle) async =>
       debugPrint('HDMEDIA join room=$roomCode self=$selfHandle (미디어 엔진 미연결)');
   @override
-  void leave() => debugPrint('HDMEDIA leave');
+  Future<void> leave() async => debugPrint('HDMEDIA leave');
+  @override
+  Future<void> setMembers(List<String> handles) async {}
   @override
   void setMuted(bool muted) => debugPrint('HDMEDIA muted=$muted');
   @override
-  void onSignal(String from, String kind, Object? payload) =>
+  Future<void> onSignal(String from, String kind, Object? payload) async =>
       debugPrint('HDMEDIA signal from=$from kind=$kind');
   @override
   void onRemoteSpeaking(String handle) =>

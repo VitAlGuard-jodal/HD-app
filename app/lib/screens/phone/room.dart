@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../call/media_engine.dart';
 import '../../core/app_services.dart';
 import '../../core/device_mode.dart';
 import '../../core/errors.dart';
@@ -69,6 +70,16 @@ class _RoomScreenState extends State<RoomScreen> {
           session.call.isStarting ||
           session.joiningCall;
       final car = widget.mode == DeviceMode.car;
+      final blocked = inCall ? null : session.callJoinBlockedReason;
+      final (statusLabel, statusIcon) = switch (session.mediaConnection) {
+        MediaConnectionState.connecting => ('음성 연결 중', 'refresh'),
+        MediaConnectionState.connected => ('음성 연결됨', 'check'),
+        MediaConnectionState.failed => ('음성 연결 실패', 'hangup'),
+        MediaConnectionState.idle => (
+          inCall ? '음성 연결 중' : '통화 대기',
+          inCall ? 'refresh' : 'phone',
+        ),
+      };
       final details = Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -97,11 +108,19 @@ class _RoomScreenState extends State<RoomScreen> {
               UnavoIcon('friends', size: ControlScale.icon(context)),
               const SizedBox(width: 12),
               Text('${state.members.length}', style: UnavoType.body),
-              const Spacer(),
-              StatusChip(
-                inCall ? '통화 중' : '통화 대기',
-                icon: 'phone',
-                active: inCall,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: StatusChip(
+                    blocked ?? statusLabel,
+                    icon: blocked == null ? statusIcon : 'hangup',
+                    active:
+                        session.mediaConnection ==
+                        MediaConnectionState.connected,
+                    showLabel: blocked != null,
+                  ),
+                ),
               ),
             ],
           ),
@@ -115,7 +134,9 @@ class _RoomScreenState extends State<RoomScreen> {
                 speaking: session.speaking.contains(member.handle),
               ),
             ),
-          ErrorText(_error ?? state.error ?? session.call.error),
+          ErrorText(
+            _error ?? session.mediaError ?? state.error ?? session.call.error,
+          ),
           if (!state.isConnected && state.error != null) ...[
             const SizedBox(height: 12),
             PanelButton(
@@ -133,7 +154,10 @@ class _RoomScreenState extends State<RoomScreen> {
         icon: inCall ? 'hangup' : 'phone',
         height: car ? 80 : 72,
         style: inCall ? PanelButtonStyle.danger : PanelButtonStyle.call,
-        onPressed: state.isLeaving || session.call.isStopping
+        onPressed:
+            state.isLeaving ||
+                session.call.isStopping ||
+                (!inCall && (blocked != null || _busy))
             ? null
             : () {
                 if (inCall) {

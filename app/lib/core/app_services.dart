@@ -2,17 +2,22 @@ import '../audio/mic_router.dart';
 import '../auth/session_store.dart';
 import '../call/call_service.dart';
 import '../call/media_engine.dart';
+import '../call/webrtc_media_engine.dart';
 import '../net/api_client.dart';
 import '../room/room_session.dart';
 
 class AppServices {
-  AppServices(this.store) {
+  AppServices(this.store, {MediaEngine? mediaEngine}) {
     api = ApiClient(tokenStore: store);
     mic = MicRouter(store);
     calls = CallService();
     rooms = RoomSession(
       api: api,
-      mediaEngine: NoopMediaEngine(),
+      mediaEngine:
+          mediaEngine ??
+          (calls.supported
+              ? WebRtcMediaEngine(api: api, micRouter: mic)
+              : NoopMediaEngine()),
       store: store,
       callService: calls,
       micRouter: mic,

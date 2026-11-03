@@ -45,6 +45,23 @@ class RoomDetails {
   final List<Member> members;
 }
 
+class IceServerCredentials {
+  const IceServerCredentials(this.iceServers, this.ttlSeconds);
+  factory IceServerCredentials.fromJson(JsonMap json) {
+    final ttl = json['ttlSeconds'];
+    final servers = json['iceServers'];
+    if (ttl is! int || ttl <= 0 || servers is! List) {
+      throw const FormatException('ICE 서버 응답이 올바르지 않습니다.');
+    }
+    return IceServerCredentials(
+      servers.map((value) => Map<String, dynamic>.from(value as Map)).toList(),
+      ttl,
+    );
+  }
+  final List<JsonMap> iceServers;
+  final int ttlSeconds;
+}
+
 class ApiException implements Exception {
   const ApiException(this.status, this.code, this.message);
   final int status;
@@ -59,8 +76,9 @@ sealed class RoomEvent {
 }
 
 final class Hello extends RoomEvent {
-  const Hello(this.self);
+  const Hello(this.self, [this.members = const []]);
   final String self;
+  final List<Member> members;
 }
 
 final class MemberJoined extends RoomEvent {

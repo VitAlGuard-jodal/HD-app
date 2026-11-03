@@ -37,6 +37,8 @@ class ApiClient {
 
   Future<User> me() async =>
       User.fromJson((await _response('GET', '/v1/me'))['user'] as JsonMap);
+  Future<IceServerCredentials> fetchIceServers() async =>
+      IceServerCredentials.fromJson(await _response('GET', '/v1/turn'));
   Future<User> getUser(String handle) async => User.fromJson(
     (await _response('GET', '/v1/users/${_segment(handle)}'))['user']
         as JsonMap,
@@ -309,6 +311,9 @@ class ApiClient {
           self is JsonMap
               ? self['handle'] as String? ?? ''
               : self as String? ?? '',
+          (data['members'] as List<dynamic>? ?? [])
+              .map((value) => Member.fromJson(value as JsonMap))
+              .toList(),
         );
       case 'member-joined':
         return MemberJoined(data['handle'] as String);

@@ -46,6 +46,7 @@ data class MicState(
     val dbfs: Double = Double.NEGATIVE_INFINITY,
     val isRecording: Boolean = false,
     val isPreviewing: Boolean = false,
+    val isCallActive: Boolean = false,
     val error: String? = null,
 )
 
@@ -82,7 +83,15 @@ class MicRouter(context: Context) {
     }
 
     fun listInputs(): List<MicDevice> = manager.getDevices(AudioManager.GET_DEVICES_INPUTS).map {
-        MicDevice(it.id, it.type, MicDeviceNames.format(it.productName.toString(), it.address, it.id))
+        // Match flutter_webrtc 1.6.3 AudioUtils.getAudioDeviceId, not the
+        // persisted numeric AudioDeviceInfo ID used by the picker.
+        val rtcId = when (it.type) {
+            AudioDeviceInfo.TYPE_BUILTIN_MIC -> "microphone-${it.address}"
+            AudioDeviceInfo.TYPE_WIRED_HEADSET -> "wired-headset"
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "bluetooth"
+            else -> it.id.toString()
+        }
+        MicDevice(it.id, it.type, MicDeviceNames.format(it.productName.toString(), it.address, it.id), rtcId)
     }
 
     // 장치 선택은 통화와 화면에서 실행하는 마이크 시험에 공통으로 적용한다.
@@ -95,7 +104,7 @@ class MicRouter(context: Context) {
     suspend fun apply(chosen: MicDevice) = withContext(Dispatchers.IO) {
         routeLock.withLock {
             try {
-                // 시험 입력을 닫은 뒤 통화 모드·포커스를 적용하여 같은 캡처 경로로 전환한다.
+                // Preview owns AudioRecord; calls reserve focus for WebRTC.
                 if (captureMode == CaptureMode.PREVIEW) stopCaptureLocked()
                 captureMode = CaptureMode.CALL
                 applyLocked(chosen)
@@ -203,6 +212,10 @@ class MicRouter(context: Context) {
                     "통화 오디오 포커스를 얻지 못했습니다. 다시 참여해 주세요."
                 }
             }
+            // WebRTC is the sole microphone capturer during a call. Keep the
+            // CALL reservation so opening the preview screen cannot start it.
+            mutableState.update { it.copy(isRecording = false, isPreviewing = false, isCallActive = true, error = null) }
+            return@withContext
         }
         val minimum = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         check(minimum > 0) { "이 기기는 16 kHz 마이크 입력을 지원하지 않습니다." }
@@ -268,7 +281,8 @@ class MicRouter(context: Context) {
         meterJob = null
         if (record != null) runCatching { record.release() }
         recordingDeviceId = null
-        mutableState.update { it.copy(isRecording = false, isPreviewing = false, rms = 0, level = 0f, dbfs = Double.NEGATIVE_INFINITY) }
+        mutableState.update { it.copy(isRecording = false, isPreviewing = false,
+            isCallActive = captureMode == CaptureMode.CALL, rms = 0, level = 0f, dbfs = Double.NEGATIVE_INFINITY) }
     }
 
     private suspend fun releaseLocked() = withContext(NonCancellable + Dispatchers.IO) {

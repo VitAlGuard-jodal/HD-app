@@ -101,7 +101,8 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
     builder: (context, _) {
       final state = widget.router.state;
       final devices = MicRanker.rank(state.mode, state.devices);
-      final callOwnsCapture = state.isRecording && !state.isPreviewing;
+      final callOwnsCapture =
+          state.isCallActive || (state.isRecording && !state.isPreviewing);
       return PanelScroll(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,

@@ -81,6 +81,14 @@ Dart는 인증·서버 주소·HTTP/SSE·방 세션·미디어 엔진 인터페�
 
 플랫폼 채널은 세 종류다. `unavo/device`는 automotive/마이크 기능을 조회한다. `unavo/audio`는 기존 Kotlin MicRouter의 장치 선택·자동 복귀·권한·입력 시험·스피커 출력을 연결하고 `unavo/audio/levels`에서 100ms 레벨 상태를 받는다. `unavo/call`은 microphone foreground service를 시작/종료하며 `unavo/call/events`에서 상태·알림 끊기·방 열기 이벤트를 받는다.
 
-Android 캡처는 앱 소유 MicRouter 한 개가 관리한다. 시험 입력은 화면 이탈 시 중지하고, 통화 캡처는 FGS가 소유한다. 통화 끊기는 미디어·마이크·FGS만 정리하고 방 멤버십/SSE를 유지한다. 방 나가기는 서버 leave까지 수행한다. 알림의 비공개 브로드캐스트는 Dart 엔진이 없어도 네이티브 캡처를 종료한다.
+Android 입력 시험은 앱 소유 MicRouter가 관리하고 화면 이탈·통화 시작 전에 중지한다. F3 통화 캡처는 WebRTC가 소유하며 FGS는 포커스와 microphone 서비스 수명을 관리한다. iOS도 AVAudioSession을 네이티브 채널이 관리하고 통화 중 AVAudioEngine 미터를 중지한다. 통화 끊기는 미디어·마이크·FGS만 정리하고 방 멤버십/SSE를 유지한다. 방 나가기는 서버 leave까지 수행한다. 알림의 비공개 브로드캐스트는 네이티브 통화 상태를 종료하고 Dart에 WebRTC 정리를 전달한다.
 
-Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 같은 서버 API와 같은 계정을 사용한다. iOS 네이티브 오디오는 F2, WebRTC는 F3이며 현재 MediaEngine은 Noop이다. 기존 `android/` Compose 차량 앱은 F2 완료 뒤 archive할 예정이다.
+Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 같은 서버 API와 같은 계정을 사용한다. Android/iOS의 기본 MediaEngine은 F3의 WebRtcMediaEngine이며, Noop은 테스트·미지원 플랫폼용이다. 기존 `android/` Compose 차량 앱의 캡처 구현은 이 변경에 포함하지 않는다.
+
+## 8. 4인 음성 풀 메시와 TURN (Flutter F3, 2026-11-03)
+
+`MeshCoordinator`는 Flutter에 의존하지 않고 피어 생성·SDP 순서·ICE 대기열·정원을 관리한다. 새 통화 참여자가 `hello.members` 및 이후 멤버 갱신의 기존 참여자에게 offer를 보낸다. 기존 참여자는 member-joined에서 offer를 만들지 않는다. 동시 offer는 handle 사전순으로 작은 쪽이 유지하고, 큰 쪽은 피어를 교체해 answer한다. 협상 ID로 늦은 answer·ICE·끊기 이벤트를 구분하며, SDP 이전 ICE는 보관한다. 입장 순서상 첫 4명만 통화할 수 있고 나머지는 기존 통화를 방해하지 않고 대기한다.
+
+`GET /v1/turn`은 인증 후 만료 Unix 초와 handle로 username을 만들고 HMAC-SHA1(secret, username)의 base64 credential을 발급한다. STUN은 자격 없이, TURN은 secret이 있을 때만 제공하며 응답은 no-store다. WebRtcMediaEngine은 TTL의 80% 시점에 설정을 갱신한다. 안정된 피어의 ICE restart는 작은 handle이 제안하고, 응답이 없는 오퍼는 새 피어로 교체해 오래된 TURN 후보가 재전송되지 않게 한다.
+
+로컬은 오디오 트랙 하나를 각 피어에 공유하고, 음소거는 enabled만 바꾼다. 원격 음성은 네이티브 WebRTC 재생을 사용하며 500ms마다 수신 audioLevel > 0.02를 발화로 표시한다. 실제 통신·라우팅과 알림/백그라운드 동작은 실기기 검증 대상이다.

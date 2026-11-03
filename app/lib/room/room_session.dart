@@ -7,6 +7,7 @@ import '../auth/session_store.dart';
 import '../call/call_service.dart';
 import '../call/call_state.dart';
 import '../call/media_engine.dart';
+import '../call/mesh_coordinator.dart';
 import '../core/errors.dart';
 import '../net/api_client.dart';
 import '../net/models.dart';
@@ -68,6 +69,11 @@ class RoomSession extends ChangeNotifier {
       final code = state.code;
       if (code != null) await api.sendSignal(code, to, kind, payload);
     };
+    mediaEngine.connectionChanged = (connection, message) {
+      mediaConnection = connection;
+      mediaError = message;
+      _notify();
+    };
   }
   final ApiClient api;
   final MediaEngine mediaEngine;
@@ -79,6 +85,23 @@ class RoomSession extends ChangeNotifier {
   bool muted = false;
   bool speakerphone = false;
   bool joiningCall = false;
+  MediaConnectionState mediaConnection = MediaConnectionState.idle;
+  String? mediaError;
+  String? get callJoinBlockedReason {
+    final handle = store.handle;
+    if (handle == null || !state.isConnected) return '방 연결을 기다려 주세요.';
+    if (!state.members.any((member) => member.handle == handle)) {
+      return '방 참여 정보를 기다려 주세요.';
+    }
+    if (!MeshCoordinator.canJoin(
+      handle,
+      state.members.map((member) => member.handle),
+    )) {
+      return meshCapacityReason;
+    }
+    return null;
+  }
+
   bool _disposed = false;
   bool _mediaJoined = false;
   final Set<String> _speaking = {};
@@ -104,17 +127,7 @@ class RoomSession extends ChangeNotifier {
     _notify();
     await _refresh(code, generation);
     if (!_current(generation)) return;
-    if (call.isActive &&
-        !_mediaJoined &&
-        call.roomCode == code &&
-        call.selfHandle == store.handle) {
-      final self = call.selfHandle;
-      if (self != null) {
-        mediaEngine.join(code, self);
-        mediaEngine.setMuted(muted);
-        _mediaJoined = true;
-      }
-    }
+    // Wait for hello.members before restoring the media session.
     _eventQueue = Future<void>.value();
     _subscription = api
         .subscribeEvents(code)
@@ -154,7 +167,7 @@ class RoomSession extends ChangeNotifier {
   Future<void> _onEvent(String code, RoomEvent event, int generation) async {
     switch (event) {
       case Signal():
-        mediaEngine.onSignal(event.from, event.kind, event.payload);
+        await mediaEngine.onSignal(event.from, event.kind, event.payload);
       case Disconnected():
         state = state.copyWith(
           isConnected: false,
@@ -164,17 +177,27 @@ class RoomSession extends ChangeNotifier {
         try {
           await api.joinRoom(code);
           if (!_current(generation)) return;
-          if (call.isActive &&
-              call.roomCode == code &&
-              call.selfHandle != null) {
-            mediaEngine.join(code, call.selfHandle!);
-          }
           await _refresh(code, generation);
         } catch (error) {
           if (_current(generation))
             _setError(exceptionMessage(error, '방에 다시 참여하지 못했습니다.'));
         }
-      case Hello() || MemberJoined() || MemberLeft():
+      case Hello():
+        await _setMembers(event.members);
+        if (!_current(generation)) return;
+        if (call.isActive &&
+            !joiningCall &&
+            call.roomCode == code &&
+            call.selfHandle == event.self) {
+          await _startMedia(code, event.self);
+        }
+      case MemberJoined():
+        await _refresh(code, generation);
+      case MemberLeft():
+        // Close immediately, even if the subsequent HTTP refresh fails.
+        await _setMembers(
+          state.members.where((m) => m.handle != event.handle).toList(),
+        );
         await _refresh(code, generation);
     }
     if (!_current(generation)) return;
@@ -186,19 +209,43 @@ class RoomSession extends ChangeNotifier {
     try {
       final details = await api.getRoom(code);
       if (_current(generation) && state.code == code) {
-        state = state.copyWith(
-          room: details.room,
-          members: details.members,
-          error: null,
-        );
-        _speaking.removeWhere(
-          (h) => !details.members.any((m) => m.handle == h),
-        );
+        state = state.copyWith(room: details.room, error: null);
+        await _setMembers(details.members);
         _notify();
       }
     } catch (error) {
       if (_current(generation))
         _setError(exceptionMessage(error, '참여자를 불러오지 못했습니다.'));
+    }
+  }
+
+  Future<void> _setMembers(List<Member> members) async {
+    state = state.copyWith(members: members);
+    _speaking.removeWhere((handle) => !members.any((m) => m.handle == handle));
+    await mediaEngine.setMembers(members.map((m) => m.handle).toList());
+    if (_mediaJoined &&
+        !MeshCoordinator.canJoin(
+          store.handle ?? '',
+          members.map((m) => m.handle),
+        )) {
+      await leaveCall();
+      mediaError = meshCapacityReason;
+    }
+  }
+
+  Future<void> _startMedia(String code, String handle) async {
+    _mediaJoined = true;
+    mediaEngine.setMuted(muted);
+    try {
+      await mediaEngine.join(code, handle);
+      if (!_mediaJoined || !call.isActive) return;
+      // Reapply the existing native output choice after WebRTC configures audio.
+      speakerphone = await micRouter.setSpeakerphone(speakerphone);
+    } catch (error) {
+      await leaveCall();
+      mediaConnection = MediaConnectionState.failed;
+      mediaError = exceptionMessage(error, '음성 연결을 시작하지 못했습니다.');
+      rethrow;
     }
   }
 
@@ -212,17 +259,27 @@ class RoomSession extends ChangeNotifier {
         _stopFuture != null)
       return;
     if (call.isActive && call.roomCode == code) return;
+    final blocked = callJoinBlockedReason;
+    if (blocked != null) throw StateError(blocked);
     if (call.roomCode != null && call.roomCode != code)
       throw StateError('현재 통화에서 나간 뒤 다른 방에 참여해 주세요.');
     final generation = ++_callGeneration;
     joiningCall = true;
     _notify();
     try {
+      // Recheck capacity against server order just before allocating audio.
+      final details = await api.getRoom(code);
+      if (_disposed || generation != _callGeneration) return;
+      await _setMembers(details.members);
+      final blocked = callJoinBlockedReason;
+      if (blocked != null) throw StateError(blocked);
       await micRouter.refreshPermissions();
       if (!micRouter.permissions.microphone)
         await micRouter.requestPermissions();
       if (!micRouter.permissions.microphone)
         throw StateError('마이크 권한을 먼저 허용해 주세요.');
+      if (_disposed || generation != _callGeneration) return;
+      await micRouter.stopPreview();
       if (_disposed || generation != _callGeneration) return;
       await callService.start(code, handle);
       if (_disposed || generation != _callGeneration || state.code != code) {
@@ -230,9 +287,7 @@ class RoomSession extends ChangeNotifier {
         return;
       }
       if (call.isActive) {
-        mediaEngine.join(code, handle);
-        mediaEngine.setMuted(muted);
-        _mediaJoined = true;
+        await _startMedia(code, handle);
       }
     } catch (error) {
       _setError(errorMessage(error));
@@ -252,12 +307,15 @@ class RoomSession extends ChangeNotifier {
   Future<void> _stopCall() async {
     ++_callGeneration;
     _mediaJoined = false;
-    mediaEngine.leave();
     _speaking.clear();
     muted = false;
     speakerphone = false;
     try {
-      await callService.stop();
+      try {
+        await mediaEngine.leave();
+      } finally {
+        await callService.stop();
+      }
     } catch (error) {
       _setError(errorMessage(error));
     }
@@ -279,7 +337,11 @@ class RoomSession extends ChangeNotifier {
   void _nativeCallChanged() {
     if (!call.isActive && !call.isStarting) {
       if (_mediaJoined) {
-        mediaEngine.leave();
+        unawaited(
+          mediaEngine.leave().catchError((Object error) {
+            _setError(errorMessage(error));
+          }),
+        );
         _mediaJoined = false;
       }
       _speaking.clear();
@@ -346,7 +408,8 @@ class RoomSession extends ChangeNotifier {
     callService.onLeaveCall = null;
     mediaEngine.remoteSpeaking = null;
     mediaEngine.sendSignal = null;
-    mediaEngine.leave();
+    mediaEngine.connectionChanged = null;
+    unawaited(mediaEngine.leave().catchError((Object _) {}));
     super.dispose();
   }
 }

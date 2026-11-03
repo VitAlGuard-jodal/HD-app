@@ -150,7 +150,8 @@ final class UnavoAudioBridge {
   }
 
   private func deviceMap(_ port: AVAudioSessionPortDescription) -> [String: Any] {
-    return ["id": inputID(port), "type": inputType(port), "name": port.portName]
+    return ["id": inputID(port), "type": inputType(port), "name": port.portName,
+            "webrtcDeviceId": port.uid]
   }
 
   private func refreshDevices() {
@@ -175,6 +176,7 @@ final class UnavoAudioBridge {
             "manualId": manualID as Any? ?? NSNull(), "level": level, "rms": rms, "dbfs": dbfs,
             "isRecording": capture != .none && engine?.isRunning == true,
             "isPreviewing": capture == .preview && engine?.isRunning == true,
+            "isCallActive": capture == .call,
             "error": audioError as Any? ?? NSNull()]
   }
 
@@ -329,10 +331,12 @@ final class UnavoAudioBridge {
 
   private func startMeter() throws {
     stopMeter()
+    // WebRTC owns the voice-processing input during calls. The native bridge
+    // keeps AVAudioSession and routing active, and meters previews only.
+    guard capture == .preview else { return }
     let audioEngine = AVAudioEngine()
     engine = audioEngine
     let input = audioEngine.inputNode
-    if capture == .call { try input.setVoiceProcessingEnabled(true) }
     let format = input.outputFormat(forBus: 0)
     guard format.sampleRate > 0, format.channelCount > 0,
           format.commonFormat == .pcmFormatFloat32, !format.isInterleaved else { throw failure("선택한 마이크를 시작하지 못했습니다.") }
@@ -411,7 +415,7 @@ final class UnavoAudioBridge {
       if self.capture != .none {
         do {
           try self.applyPreferredInput()
-          if self.engine?.isRunning != true || self.routeSignature != self.currentSignature() {
+          if self.capture == .preview && (self.engine?.isRunning != true || self.routeSignature != self.currentSignature()) {
             try self.startMeter()
           }
           self.refreshDevices()

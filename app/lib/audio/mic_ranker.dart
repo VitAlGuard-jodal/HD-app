@@ -1,12 +1,17 @@
 enum MicMode { car, phone }
 
 class MicDevice {
-  const MicDevice(this.id, this.type, this.name);
-  factory MicDevice.fromMap(Map<Object?, Object?> map) =>
-      MicDevice(map['id'] as int, map['type'] as int, map['name'] as String);
+  const MicDevice(this.id, this.type, this.name, {this.webrtcDeviceId});
+  factory MicDevice.fromMap(Map<Object?, Object?> map) => MicDevice(
+    map['id'] as int,
+    map['type'] as int,
+    map['name'] as String,
+    webrtcDeviceId: map['webrtcDeviceId'] as String?,
+  );
   final int id;
   final int type;
   final String name;
+  final String? webrtcDeviceId;
 }
 
 class MicRanker {
