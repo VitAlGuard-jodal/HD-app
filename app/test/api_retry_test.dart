@@ -8,6 +8,47 @@ import 'package:unavo/net/api_client.dart';
 import 'package:unavo/net/models.dart';
 
 void main() {
+  test('me는 사용자와 선택적인 방을 읽고 기존 가입·로그인 모델은 유지한다', () async {
+    const user = {'handle': 'alice', 'displayName': 'Alice'};
+    for (final body in <JsonMap>[
+      {'user': user, 'room': null},
+      {'user': user}, // A server deployed before room restoration.
+      {
+        'user': user,
+        'room': {
+          'code': 'ABC123',
+          'name': '이전 방',
+          'createdBy': 'alice',
+          'createdAt': '2026-11-04T00:00:00.000Z',
+          'members': [
+            {...user, 'joinedAt': '2026-11-04T00:00:00.000Z'},
+          ],
+        },
+      },
+    ]) {
+      final api = ApiClient(
+        tokenStore: _Store(),
+        clientFactory: () => _Client(body: body),
+      );
+      final me = await api.me();
+      expect(me.user.handle, 'alice');
+      expect(me.user.displayName, 'Alice');
+      expect(me.room?.code, body['room'] == null ? null : 'ABC123');
+      expect(me.room?.name, body['room'] == null ? null : '이전 방');
+    }
+    final authApi = ApiClient(
+      tokenStore: _Store(),
+      clientFactory: () => _Client(body: {'user': user, 'token': 'auth-token'}),
+    );
+    for (final result in [
+      await authApi.login('alice', 'password'),
+      await authApi.signup('alice', 'password', 'Alice'),
+    ]) {
+      expect(result.user.handle, 'alice');
+      expect(result.token, 'auth-token');
+    }
+  });
+
   test('첫 GET 전송 실패는 새 클라이언트로 1회 재시도한다', () async {
     var attempts = 0;
     final clients = <_Client>[];
@@ -69,16 +110,17 @@ class _Store implements TokenStore {
 }
 
 class _Client implements HttpClient {
-  _Client({this.failOpen = false, this.status = 200});
+  _Client({this.failOpen = false, this.status = 200, this.body});
   final bool failOpen;
   final int status;
+  final JsonMap? body;
   bool closed = false;
   @override
   set connectionTimeout(Duration? value) {}
   @override
   Future<HttpClientRequest> openUrl(String method, Uri url) async {
     if (failOpen) throw const SocketException('cold connection');
-    return _Request(status);
+    return _Request(status, body);
   }
 
   @override
@@ -98,8 +140,9 @@ class _Headers implements HttpHeaders {
 }
 
 class _Request implements HttpClientRequest {
-  _Request(this.status);
+  _Request(this.status, this.body);
   final int status;
+  final JsonMap? body;
   @override
   HttpHeaders get headers => _Headers();
   @override
@@ -107,13 +150,14 @@ class _Request implements HttpClientRequest {
   @override
   void add(List<int> data) {}
   @override
-  Future<HttpClientResponse> close() async => _Response(status);
+  Future<HttpClientResponse> close() async => _Response(status, body);
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _Response extends Stream<List<int>> implements HttpClientResponse {
-  _Response(this.statusCode);
+  _Response(this.statusCode, this.body);
+  final JsonMap? body;
   @override
   final int statusCode;
   @override
@@ -126,17 +170,18 @@ class _Response extends Stream<List<int>> implements HttpClientResponse {
       Stream.value(
         utf8.encode(
           jsonEncode(
-            statusCode == 200
-                ? {
-                    'room': {'code': 'ABC123'},
-                    'members': <Object>[],
-                  }
-                : {
-                    'error': {
-                      'code': 'unauthorized',
-                      'message': 'Unauthorized',
-                    },
-                  },
+            body ??
+                (statusCode == 200
+                    ? {
+                        'room': {'code': 'ABC123'},
+                        'members': <Object>[],
+                      }
+                    : {
+                        'error': {
+                          'code': 'unauthorized',
+                          'message': 'Unauthorized',
+                        },
+                      }),
           ),
         ),
       ).listen(

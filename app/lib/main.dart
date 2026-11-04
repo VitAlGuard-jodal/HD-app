@@ -4,10 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'auth/session_restore.dart';
 import 'auth/session_store.dart';
 import 'core/app_services.dart';
 import 'core/device_mode.dart';
-import 'net/models.dart';
 import 'screens/car/car_dashboard.dart';
 import 'screens/phone/auth.dart';
 import 'screens/phone/cover.dart';
@@ -54,52 +54,77 @@ class _UnavoAppState extends State<UnavoApp> {
   final _navigator = GlobalKey<NavigatorState>();
   bool _cover = true;
   bool _roomVisible = false;
+  bool _carRoomVisible = false;
+  bool _startupUntouched = true;
+  String? _restoredRoom;
   @override
   void initState() {
     super.initState();
+    _carRoomVisible = widget.services.rooms.state.code != null;
     widget.services.store.addListener(_sessionChanged);
     widget.services.calls.onOpenRoom = _openRoom;
     unawaited(_restore());
   }
 
-  Future<void> _restore() async {
-    if (widget.services.store.session == null) return;
-    final token = widget.services.store.token;
-    try {
-      final user = await widget.services.api.me();
-      if (mounted && token != null && token == widget.services.store.token)
-        await widget.services.store.save(AuthResult(user, token));
-    } on ApiException catch (error) {
-      if (mounted &&
-          error.status == 401 &&
-          token == widget.services.store.token) {
-        await widget.services.rooms.forget();
-        await widget.services.store.clear();
-      }
-    } catch (_) {
-      /* 오프라인에서는 저장된 세션을 유지하고 화면별 재시도를 제공한다. */
-    }
+  Future<void> _restore() => restoreSession(
+    api: widget.services.api,
+    store: widget.services.store,
+    rooms: widget.services.rooms,
+    isCurrent: () => mounted,
+    onRoomRestored: (code) {
+      _restoredRoom = code;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _openRestoredRoom());
+    },
+  );
+
+  void _homeInteracted() {
+    // Once the user acts, startup restoration must not take over their screen.
+    _startupUntouched = false;
+    _restoredRoom = null;
+  }
+
+  void _openRestoredRoom() {
+    if (!mounted || _cover) return;
+    final code = _restoredRoom;
+    _restoredRoom = null;
+    final focusContext = FocusManager.instance.primaryFocus?.context;
+    final editing =
+        focusContext?.widget is EditableText ||
+        focusContext?.findAncestorWidgetOfExactType<EditableText>() != null;
+    if (code == null ||
+        !_startupUntouched ||
+        editing ||
+        _roomVisible ||
+        _navigator.currentState == null ||
+        _navigator.currentState!.canPop() ||
+        !widget.services.rooms.state.isConnected)
+      return;
+    _openRoom(code);
   }
 
   void _sessionChanged() {
     if (!mounted) return;
-    if (widget.services.store.session == null)
+    if (widget.services.store.session == null) {
+      _restoredRoom = null;
+      _carRoomVisible = false;
       _navigator.currentState?.popUntil((route) => route.isFirst);
+    }
     setState(() {});
   }
 
   void _openRoom(String code) {
-    if (widget.mode == DeviceMode.car) {
-      widget.services.calls.pendingOpenRoom = null;
-      return;
-    }
     if (_cover ||
         widget.services.store.session == null ||
         _roomVisible ||
         !mounted)
       return;
     if (widget.services.rooms.state.code != code) return;
+    _homeInteracted();
     widget.services.calls.pendingOpenRoom = null;
+    if (widget.mode == DeviceMode.car) {
+      setState(() => _carRoomVisible = true);
+      return;
+    }
     _roomVisible = true;
     unawaited(
       _navigator.currentState!
@@ -121,7 +146,11 @@ class _UnavoAppState extends State<UnavoApp> {
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final pending = widget.services.calls.pendingOpenRoom;
-      if (mounted && pending != null) _openRoom(pending);
+      if (mounted && pending != null) {
+        _openRoom(pending);
+      } else {
+        _openRestoredRoom();
+      }
     });
   }
 
@@ -154,12 +183,28 @@ class _UnavoAppState extends State<UnavoApp> {
                 store: widget.services.store,
                 mode: widget.mode,
               )
-            : widget.mode == DeviceMode.car
-            ? CarDashboard(services: widget.services)
-            : _PhoneTabs(
-                services: widget.services,
-                mode: widget.mode,
-                onRoom: _openRoom,
+            : Focus(
+                onKeyEvent: (_, _) {
+                  _homeInteracted();
+                  return KeyEventResult.ignored;
+                },
+                child: Listener(
+                  onPointerDown: (_) => _homeInteracted(),
+                  onPointerSignal: (_) => _homeInteracted(),
+                  child: widget.mode == DeviceMode.car
+                      ? CarDashboard(
+                          services: widget.services,
+                          showRoom: _carRoomVisible,
+                          onRoom: _openRoom,
+                          onInteraction: _homeInteracted,
+                        )
+                      : _PhoneTabs(
+                          services: widget.services,
+                          mode: widget.mode,
+                          onRoom: _openRoom,
+                          onInteraction: _homeInteracted,
+                        ),
+                ),
               ),
       ),
     ),
@@ -171,10 +216,12 @@ class _PhoneTabs extends StatefulWidget {
     required this.services,
     required this.mode,
     required this.onRoom,
+    required this.onInteraction,
   });
   final AppServices services;
   final DeviceMode mode;
   final ValueChanged<String> onRoom;
+  final VoidCallback onInteraction;
   @override
   State<_PhoneTabs> createState() => _PhoneTabsState();
 }
@@ -187,6 +234,7 @@ class _PhoneTabsState extends State<_PhoneTabs> {
     bottomNav: BottomNav(
       index: _index,
       onChanged: (index) {
+        widget.onInteraction();
         FocusScope.of(context).unfocus();
         setState(() {
           _index = index;

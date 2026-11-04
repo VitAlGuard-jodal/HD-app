@@ -240,8 +240,8 @@ class _RoomScreenState extends State<RoomScreen> {
                         key: const ValueKey('call-volume-slider'),
                         value: session.callVolume.toDouble(),
                         min: 0,
-                        max: 100,
-                        divisions: 100,
+                        max: 200,
+                        divisions: 200,
                         activeColor: UnavoColors.gold,
                         label: '${session.callVolume}',
                         onChangeStart: (_) {

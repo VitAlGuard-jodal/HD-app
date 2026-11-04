@@ -6,8 +6,8 @@ import { generateRoomCode, RoomEventHub } from "./rooms.ts";
 import { openEventStream } from "./sse.ts";
 import { issueIceServers } from "./turn.ts";
 import {
-  addContact, createRoom, createUser, deleteContact, findRoomByCode, findUserByHandle,
-  isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicUser,
+  addContact, createRoom, createUser, deleteContact, findCurrentRoom, findRoomByCode, findUserByHandle,
+  isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicRoomDetails, publicUser,
   updateDisplayName,
 } from "./store.ts";
 import type { StoredRoom, StoredUser } from "./store.ts";
@@ -184,7 +184,8 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
     }
 
     if (method === "GET" && path === "/v1/me") {
-      json(response, 200, { user: publicUser(user) });
+      const room = findCurrentRoom(db, user.id);
+      json(response, 200, { user: publicUser(user), room: room ? publicRoomDetails(db, room) : null });
       return;
     }
 
@@ -272,7 +273,8 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
       if (!room) throw new HttpError(404, "ROOM_NOT_FOUND", "방을 찾을 수 없습니다.");
 
       if (method === "GET" && !action) {
-        json(response, 200, { room: publicRoom(room), members: listRoomMembers(db, room.id) });
+        const { members, ...summary } = publicRoomDetails(db, room);
+        json(response, 200, { room: summary, members });
         return;
       }
       if (method === "POST" && action === "join") {

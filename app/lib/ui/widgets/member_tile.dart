@@ -87,7 +87,7 @@ class MemberTile extends StatelessWidget {
             if (self) ...[
               const SizedBox(width: 12),
               UnavoIcon(
-                'mobile',
+                ControlScale.isCar(context) ? 'car' : 'mobile',
                 size: ControlScale.icon(context),
                 color: UnavoColors.muted,
               ),

@@ -254,8 +254,9 @@ class WebRtcMediaEngine extends MediaEngine {
   @override
   Future<void> setVolume(double volume) {
     // Both native RTCAudioSource.volume and org.webrtc.AudioTrack.setVolume
-    // accept gain 0..10. A user volume of 100% is unity (1), not 10x gain.
-    _playbackVolume = volume.clamp(0, 1);
+    // accept gain 0..10. 100% is unity (1); the phone slider allows up to
+    // 200% (+6 dB) because the iPhone call-mode speaker is quiet.
+    _playbackVolume = volume.clamp(0, 2);
     final operation = _volumeWrites.then((_) async {
       for (final peer in _peers.values.toList()) {
         for (final track in peer.audioTracks.toList()) {

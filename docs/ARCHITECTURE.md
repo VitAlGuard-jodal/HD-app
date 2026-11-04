@@ -15,7 +15,7 @@
 | `POST /v1/auth/signup` | `{handle, password, displayName}` | `201 {user, token}` | 중복 아이디 `409` |
 | `POST /v1/auth/login` | `{handle, password}` | `200 {user, token}` | 실패 `401` |
 | `POST /v1/auth/logout` | — | `204` | 토큰 폐기. 그 토큰으로 열린 SSE 연결도 즉시 닫는다(다른 기기의 토큰은 유지) |
-| `GET /v1/me` | — | `{user}` | |
+| `GET /v1/me` | — | `{user, room: null 또는 {code, name, createdBy, createdAt, members}}` | `left_at IS NULL`인 방 중 `joined_at`이 가장 최근인 하나(동률은 방 ID 내림차순) |
 | `GET /v1/users/{handle}` | — | `{user}` 공개 정보(handle, displayName) | 없으면 `404`, 아이디 형식이 틀리면 `400` |
 | `PATCH /v1/me` | `{displayName}` | `200 {user}` | 표시 이름 변경 |
 | `GET /v1/contacts` | — | `{contacts:[user]}` | |

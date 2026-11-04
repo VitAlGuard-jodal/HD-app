@@ -14,6 +14,19 @@ class AuthResult {
   final String token;
 }
 
+class MeResult {
+  const MeResult(this.user, this.room);
+  factory MeResult.fromJson(JsonMap json) {
+    final room = json['room'] as JsonMap?;
+    return MeResult(
+      User.fromJson(json['user'] as JsonMap),
+      room == null ? null : Room.fromJson(room),
+    );
+  }
+  final User user;
+  final Room? room;
+}
+
 class Room {
   const Room(this.code, this.name);
   factory Room.fromJson(JsonMap json) {

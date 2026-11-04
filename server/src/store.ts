@@ -83,6 +83,10 @@ export function publicRoom(room: PublicRoom): PublicRoom {
   };
 }
 
+export function publicRoomDetails(db: DatabaseSync, room: StoredRoom): PublicRoom & { members: RoomMember[] } {
+  return { ...publicRoom(room), members: listRoomMembers(db, room.id) };
+}
+
 export function findUserByHandle(db: DatabaseSync, handle: string): StoredUser | undefined {
   const row = db.prepare(`
     SELECT id, handle, display_name AS displayName,
@@ -176,6 +180,18 @@ export function findRoomByCode(db: DatabaseSync, code: string): StoredRoom | und
     SELECT r.id, r.code, r.name, u.handle AS createdBy, r.created_at AS createdAt
     FROM rooms r JOIN users u ON u.id = r.created_by WHERE r.code = ?
   `).get(code) as StoredRoom | undefined;
+  return row ? { ...row } : undefined;
+}
+
+export function findCurrentRoom(db: DatabaseSync, userId: number): StoredRoom | undefined {
+  const row = db.prepare(`
+    SELECT r.id, r.code, r.name, u.handle AS createdBy, r.created_at AS createdAt
+    FROM room_members m
+    JOIN rooms r ON r.id = m.room_id
+    JOIN users u ON u.id = r.created_by
+    WHERE m.user_id = ? AND m.left_at IS NULL
+    ORDER BY m.joined_at DESC, r.id DESC LIMIT 1
+  `).get(userId) as StoredRoom | undefined;
   return row ? { ...row } : undefined;
 }
 

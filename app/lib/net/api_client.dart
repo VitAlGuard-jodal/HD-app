@@ -37,8 +37,8 @@ class ApiClient {
     await _request('POST', '/v1/auth/logout');
   }
 
-  Future<User> me() async =>
-      User.fromJson((await _response('GET', '/v1/me'))['user'] as JsonMap);
+  Future<MeResult> me() async =>
+      MeResult.fromJson(await _response('GET', '/v1/me'));
   Future<IceServerCredentials> fetchIceServers() async =>
       IceServerCredentials.fromJson(await _response('GET', '/v1/turn'));
   Future<User> getUser(String handle) async => User.fromJson(

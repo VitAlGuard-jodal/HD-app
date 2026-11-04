@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unavo/audio/mic_ranker.dart';
 import 'package:unavo/audio/mic_router.dart';
+import 'package:unavo/auth/session_restore.dart';
 import 'package:unavo/auth/session_store.dart';
 import 'package:unavo/call/call_service.dart';
 import 'package:unavo/call/call_state.dart';
@@ -18,6 +19,201 @@ import 'package:unavo/room/room_session.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('기동 복귀: me의 방을 join 없이 열고 hello 뒤 통화와 화면 이동을 요청한다', () {
+    fakeAsync((clock) {
+      final f = _microtasksOnly(clock, _Fixture.create());
+      f.api.currentRoom = const Room('ABC123', '이전 방');
+      _microtasksOnly(clock, f.restore());
+      expect(f.store.displayName, '새 이름');
+      expect(f.session.state.code, 'ABC123');
+      expect(f.session.state.members.length, 2);
+      expect(f.api.joins, 0);
+      expect(f.calls.starts, 0);
+      expect(f.restoredRooms, isEmpty);
+      f.api.events.add(Hello('alice', f.api.members));
+      clock.flushMicrotasks();
+      expect(f.session.state.isConnected, isTrue);
+      expect(f.calls.starts, 1);
+      expect(f.media.joins, 1);
+      expect(f.restoredRooms, ['ABC123']);
+      f.api.events.add(Hello('alice', f.api.members));
+      clock.flushMicrotasks();
+      expect(f.restoredRooms, ['ABC123']);
+      expect(f.media.joins, 1);
+      _microtasksOnly(clock, f.session.leave());
+      expect(clock.pendingTimers, isEmpty);
+      _microtasksOnly(clock, f.dispose());
+    });
+  });
+
+  test('기동 복귀: me의 방이 없으면 세션·통화·화면을 열지 않는다', () {
+    fakeAsync((clock) {
+      final f = _microtasksOnly(clock, _Fixture.create());
+      _microtasksOnly(clock, f.restore());
+      expect(f.session.state.code, isNull);
+      expect(f.api.roomReads, 0);
+      expect(f.api.subscriptions, 0);
+      expect(f.calls.starts, 0);
+      expect(f.media.joins, 0);
+      expect(f.restoredRooms, isEmpty);
+      _microtasksOnly(clock, f.dispose());
+    });
+  });
+
+  for (final status in [403, 404]) {
+    test('기동 복귀: 방 조회 $status는 상태를 비우고 목록 화면을 유지한다', () {
+      fakeAsync((clock) {
+        final f = _microtasksOnly(clock, _Fixture.create());
+        f.api.currentRoom = const Room('ABC123', null);
+        f.api.roomError = ApiException(status, 'gone', '접근할 수 없음');
+        _microtasksOnly(clock, f.restore());
+        expect(f.session.state.code, isNull);
+        expect(f.session.state.error, isNull);
+        expect(f.api.subscriptions, 0);
+        expect(f.api.joins, 0);
+        expect(f.calls.starts, 0);
+        expect(f.restoredRooms, isEmpty);
+        expect(f.store.token, 'test');
+        expect(clock.pendingTimers, isEmpty);
+        _microtasksOnly(clock, f.dispose());
+      });
+    });
+
+    test('기동 복귀: 조회 뒤 SSE $status도 조용히 정리하고 화면을 열지 않는다', () {
+      fakeAsync((clock) {
+        final f = _microtasksOnly(clock, _Fixture.create());
+        f.api.currentRoom = const Room('ABC123', null);
+        _microtasksOnly(clock, f.restore());
+        f.api.events.addError(ApiException(status, 'gone', '접근할 수 없음'));
+        clock.flushMicrotasks();
+        expect(f.session.state.code, isNull);
+        expect(f.session.state.error, isNull);
+        expect(f.calls.starts, 0);
+        expect(f.restoredRooms, isEmpty);
+        expect(f.store.token, 'test');
+        expect(clock.pendingTimers, isEmpty);
+        _microtasksOnly(clock, f.dispose());
+      });
+    });
+  }
+
+  test('기동 복귀: 방 연결 네트워크 오류는 세션을 유지하고 hello 후 복귀한다', () {
+    fakeAsync((clock) {
+      final f = _microtasksOnly(clock, _Fixture.create());
+      f.api.currentRoom = const Room('ABC123', null);
+      f.api.roomError = TimeoutException('offline');
+      _microtasksOnly(clock, f.restore());
+      f.api.events.add(const Disconnected('연결을 다시 시도합니다.', 2000));
+      clock.flushMicrotasks();
+      expect(f.store.token, 'test');
+      expect(f.session.state.code, 'ABC123');
+      expect(f.session.state.error, isNotNull);
+      expect(f.restoredRooms, isEmpty);
+      expect(f.calls.starts, 0);
+      f.api.roomError = null;
+      f.api.events.add(Hello('alice', f.api.members));
+      clock.flushMicrotasks();
+      expect(f.restoredRooms, ['ABC123']);
+      expect(f.calls.starts, 1);
+      _microtasksOnly(clock, f.session.leave());
+      _microtasksOnly(clock, f.dispose());
+    });
+  });
+
+  test('기동 복귀: me 네트워크 오류는 저장된 로그인 정보를 유지한다', () {
+    fakeAsync((clock) {
+      final f = _microtasksOnly(clock, _Fixture.create());
+      f.api.meError = TimeoutException('offline');
+      _microtasksOnly(clock, f.restore());
+      expect(f.store.token, 'test');
+      expect(f.session.state.code, isNull);
+      expect(f.restoredRooms, isEmpty);
+      _microtasksOnly(clock, f.dispose());
+    });
+  });
+
+  for (final stage in ['me', 'room', 'events']) {
+    test('기동 복귀: $stage 401은 기존 로그아웃 경로를 유지한다', () {
+      fakeAsync((clock) {
+        final f = _microtasksOnly(clock, _Fixture.create());
+        f.api.currentRoom = const Room('ABC123', null);
+        const error = ApiException(401, 'expired', '토큰 만료');
+        if (stage == 'me') f.api.meError = error;
+        if (stage == 'room') f.api.roomError = error;
+        _microtasksOnly(clock, f.restore());
+        if (stage == 'events') {
+          f.api.events.addError(error);
+          clock.flushMicrotasks();
+        }
+        expect(f.store.token, isNull);
+        expect(f.session.state.code, isNull);
+        expect(f.restoredRooms, isEmpty);
+        expect(clock.pendingTimers, isEmpty);
+        _microtasksOnly(clock, f.dispose());
+      });
+    });
+  }
+
+  test('기동 복귀: me 응답 전 다른 방이 열렸으면 그 세션을 덮어쓰지 않는다', () {
+    fakeAsync((clock) {
+      final f = _microtasksOnly(clock, _Fixture.create());
+      f.api.pendingMe = Completer<MeResult>();
+      final restoring = f.restore();
+      _microtasksOnly(clock, f.session.open('OTHER1'));
+      final reads = f.api.roomReads;
+      f.api.pendingMe!.complete(
+        const MeResult(User('alice', '새 이름'), Room('ABC123', null)),
+      );
+      _microtasksOnly(clock, restoring);
+      expect(f.session.state.code, 'OTHER1');
+      expect(f.api.roomReads, reads);
+      expect(f.api.subscriptions, 1);
+      expect(f.restoredRooms, isEmpty);
+      _microtasksOnly(clock, f.session.leave());
+      _microtasksOnly(clock, f.dispose());
+    });
+  });
+
+  for (final status in [401, 403, 404]) {
+    test('기동 복귀: hello 뒤 통화 직전 조회 $status도 방과 재시도를 정리한다', () {
+      fakeAsync((clock) {
+        final f = _microtasksOnly(clock, _Fixture.create());
+        f.api.currentRoom = const Room('ABC123', null);
+        _microtasksOnly(clock, f.restore());
+        f.api.roomError = ApiException(status, 'gone', '접근할 수 없음');
+        f.api.events.add(Hello('alice', f.api.members));
+        clock.flushMicrotasks();
+        expect(f.session.state.code, isNull);
+        expect(f.session.state.error, isNull);
+        expect(f.calls.starts, 0);
+        expect(f.media.joins, 0);
+        // 준비 콜백은 hello 시점에 보고된다. 화면 전환은 main.dart 가 state 로 막는다.
+        expect(f.restoredRooms, ['ABC123']);
+        expect(f.store.token, status == 401 ? null : 'test');
+        expect(clock.pendingTimers, isEmpty);
+        _microtasksOnly(clock, f.dispose());
+      });
+    });
+  }
+
+  test('기동 복귀: me 응답 전 로그아웃하면 오래된 응답을 버린다', () {
+    fakeAsync((clock) {
+      final f = _microtasksOnly(clock, _Fixture.create());
+      f.api.pendingMe = Completer<MeResult>();
+      final restoring = f.restore();
+      _microtasksOnly(clock, f.store.clear());
+      f.api.pendingMe!.complete(
+        const MeResult(User('alice', '새 이름'), Room('ABC123', null)),
+      );
+      _microtasksOnly(clock, restoring);
+      expect(f.store.token, isNull);
+      expect(f.session.state.code, isNull);
+      expect(f.api.subscriptions, 0);
+      expect(f.restoredRooms, isEmpty);
+      _microtasksOnly(clock, f.dispose());
+    });
+  });
 
   test('open 성공 → hello 후 통화 자동 시작, 음소거·나가기 순서', () async {
     final f = await _Fixture.create();
@@ -268,11 +464,19 @@ class _Fixture {
 
   final SessionStore store;
   final order = <String>[];
+  final restoredRooms = <String>[];
   late final _Api api;
   late final _Mic mic;
   late final _Calls calls;
   late final _Media media;
   late final RoomSession session;
+  Future<void> restore() => restoreSession(
+    api: api,
+    store: store,
+    rooms: session,
+    isCurrent: () => true,
+    onRoomRestored: restoredRooms.add,
+  );
   Future<void> open() async {
     await session.open('ABC123');
     api.events.add(Hello(store.handle!, api.members));
@@ -303,11 +507,33 @@ class _Api extends ApiClient {
     Member('alice', 'Alice', '1'),
     Member('bob', 'Bob', '2'),
   ];
+  Room? currentRoom;
+  Object? meError, roomError;
+  Completer<MeResult>? pendingMe;
+  int roomReads = 0, subscriptions = 0, joins = 0;
   @override
-  Future<RoomDetails> getRoom(String code) async =>
-      RoomDetails(const Room('ABC123', null), members);
+  Future<MeResult> me() async {
+    if (meError != null) throw meError!;
+    if (pendingMe != null) return pendingMe!.future;
+    return MeResult(const User('alice', '새 이름'), currentRoom);
+  }
+
+  @override
+  Future<Room> joinRoom(String code) async {
+    joins++;
+    return Room(code, null);
+  }
+
+  @override
+  Future<RoomDetails> getRoom(String code) async {
+    roomReads++;
+    if (roomError != null) throw roomError!;
+    return RoomDetails(Room(code, null), members);
+  }
+
   @override
   Stream<RoomEvent> subscribeEvents(String code) {
+    subscriptions++;
     // SSE has one subscription per request. A broadcast controller's cancel
     // returns Dart's cached root-zone nullFuture; awaiting it escapes FakeAsync
     // and strands the next media.leave continuation in the fake microtask queue.

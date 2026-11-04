@@ -145,7 +145,11 @@ class RoomSession extends ChangeNotifier {
   int _generation = 0;
   int _callGeneration = 0;
 
-  Future<void> open(String code, {bool force = false}) async {
+  Future<void> open(
+    String code, {
+    bool force = false,
+    VoidCallback? onReady,
+  }) async {
     if (state.isLeaving) return;
     if (!force && state.code == code && _subscription != null) return;
     if (state.code != null && state.code != code)
@@ -168,6 +172,7 @@ class RoomSession extends ChangeNotifier {
     if (!_current(generation)) return;
     // Wait for hello.members before restoring the media session.
     _eventQueue = Future<void>.value();
+    var reportedReady = false;
     _subscription = api
         .subscribeEvents(code)
         .listen(
@@ -175,8 +180,15 @@ class RoomSession extends ChangeNotifier {
             // hello / 재연결 / 멤버 갱신은 Kotlin collect처럼 순서대로 처리한다.
             _eventQueue = _eventQueue
                 .then((_) async {
-                  if (_current(generation))
-                    await _onEvent(code, event, generation);
+                  if (!_current(generation)) return;
+                  await _onEvent(code, event, generation);
+                  if (_current(generation) &&
+                      event is Hello &&
+                      state.isConnected &&
+                      !reportedReady) {
+                    reportedReady = true;
+                    onReady?.call();
+                  }
                 })
                 .catchError((Object error) {
                   if (_current(generation))
@@ -185,6 +197,10 @@ class RoomSession extends ChangeNotifier {
           },
           onError: (Object error) {
             if (!_current(generation)) return;
+            if (_isAccessError(error)) {
+              unawaited(_forgetInaccessibleRoom(error as ApiException));
+              return;
+            }
             ++_generation;
             _subscription = null;
             state = state.copyWith(
@@ -192,8 +208,6 @@ class RoomSession extends ChangeNotifier {
               error: exceptionMessage(error, '방 연결을 확인해 주세요.'),
             );
             _notify();
-            if (error is ApiException && error.status == 401)
-              unawaited(_expireSession());
           },
           onDone: () {
             if (_current(generation)) {
@@ -218,8 +232,12 @@ class RoomSession extends ChangeNotifier {
           if (!_current(generation)) return;
           await _refresh(code, generation);
         } catch (error) {
-          if (_current(generation))
+          if (!_current(generation)) return;
+          if (_isAccessError(error)) {
+            await _forgetInaccessibleRoom(error as ApiException);
+          } else {
             _setError(exceptionMessage(error, '방에 다시 참여하지 못했습니다.'));
+          }
         }
       case Hello():
         await _setMembers(event.members);
@@ -251,8 +269,12 @@ class RoomSession extends ChangeNotifier {
         _notify();
       }
     } catch (error) {
-      if (_current(generation))
+      if (!_current(generation)) return;
+      if (_isAccessError(error)) {
+        await _forgetInaccessibleRoom(error as ApiException);
+      } else {
         _setError(exceptionMessage(error, '참여자를 불러오지 못했습니다.'));
+      }
     }
   }
 
@@ -415,6 +437,10 @@ class RoomSession extends ChangeNotifier {
       if (mediaConnection == MediaConnectionState.connected) retryAttempts = 0;
       speakerphone = outputRoute == OutputRoute.speaker;
     } catch (error) {
+      if (current() && _isAccessError(error)) {
+        await _forgetInaccessibleRoom(error as ApiException);
+        return;
+      }
       if (current()) {
         _mediaJoined = false;
         try {
@@ -488,7 +514,7 @@ class RoomSession extends ChangeNotifier {
   }
 
   Future<void> setCallVolume(int value) {
-    callVolume = value.clamp(0, 100);
+    callVolume = value.clamp(0, 200);
     _notify();
     final volume = callVolume;
     final operation = _volumeQueue.then((_) async {
@@ -592,9 +618,13 @@ class RoomSession extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> _expireSession() async {
+  bool _isAccessError(Object error) =>
+      error is ApiException && {401, 403, 404}.contains(error.status);
+
+  Future<void> _forgetInaccessibleRoom(ApiException error) async {
+    final token = store.token;
     await forget();
-    await store.clear();
+    if (error.status == 401 && token == store.token) await store.clear();
   }
 
   bool _current(int generation) => !_disposed && generation == _generation;
