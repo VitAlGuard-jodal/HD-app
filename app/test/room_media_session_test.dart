@@ -248,6 +248,76 @@ void main() {
     await f.dispose();
   });
 
+  test('로컬 발화는 바뀔 때만 알리고 음소거 중 콜백을 무시한다', () async {
+    final f = await _Fixture.create();
+    addTearDown(f.dispose);
+    await f.open();
+    var notifications = 0;
+    f.session.addListener(() => notifications++);
+    expect(f.session.localSpeaking, isFalse);
+    f.media.speakLocally(false);
+    expect(notifications, 0);
+    f.media.speakLocally(true);
+    expect(f.session.localSpeaking, isTrue);
+    expect(notifications, 1);
+    f.media.speakLocally(true);
+    expect(notifications, 1);
+    f.media.speakLocally(false);
+    expect(f.session.localSpeaking, isFalse);
+    expect(notifications, 2);
+    f.media.speakLocally(true);
+    f.session.setMuted(true);
+    expect(f.session.localSpeaking, isFalse);
+    final mutedNotifications = notifications;
+    f.media.speakLocally(true);
+    f.media.speakLocally(false);
+    expect(f.session.localSpeaking, isFalse);
+    expect(notifications, mutedNotifications);
+    f.session.setMuted(false);
+    expect(f.session.localSpeaking, isFalse);
+    f.media.speakLocally(true);
+    expect(f.session.localSpeaking, isTrue);
+  });
+
+  for (final leaveRoom in [false, true]) {
+    test('${leaveRoom ? '방 나가기' : '통화 종료'}는 로컬 발화를 초기화한다', () async {
+      final f = await _Fixture.create();
+      addTearDown(f.dispose);
+      await f.open();
+      f.media.speakLocally(true);
+      expect(f.session.localSpeaking, isTrue);
+      if (leaveRoom) {
+        await f.session.leave();
+        expect(f.session.state.code, isNull);
+      } else {
+        final stopping = f.session.leaveCall();
+        expect(f.session.localSpeaking, isFalse);
+        await stopping;
+        expect(f.session.state.code, 'ABC123');
+      }
+      expect(f.session.localSpeaking, isFalse);
+      f.media.speakLocally(true);
+      expect(f.session.localSpeaking, isFalse);
+    });
+  }
+
+  test('정원 초과로 메시를 해제하면 네이티브 통화가 남아도 로컬 발화는 꺼진다', () async {
+    final f = await _Fixture.create();
+    addTearDown(f.dispose);
+    await f.open();
+    f.media.speakLocally(true);
+    f.api.members = [
+      for (final name in ['bob', 'charlie', 'david', 'eve', 'alice'])
+        Member(name, name, ''),
+    ];
+    f.api.events.add(Hello('alice', f.api.members));
+    await Future<void>.delayed(Duration.zero);
+    expect(f.media.leaves, 1);
+    expect(f.calls.state.isActive, isTrue);
+    expect(f.session.localSpeaking, isFalse);
+    expect(f.session.mediaError, meshCapacityReason);
+  });
+
   test('5명째는 joinCall 안 함, 자리가 나면 자동 입장', () async {
     final f = await _Fixture.create(handle: 'aaron');
     f.api.members = [
@@ -612,6 +682,8 @@ class _Media extends NoopMediaEngine {
   bool failJoin = false, muted = false, interrupted = false;
   int joins = 0, leaves = 0;
   double volume = 1;
+  void speakLocally(bool speaking) => localSpeaking?.call(speaking);
+
   void changePeers(Map<String, MeshPeerState> states) {
     publishPeerStates(states);
     connectionChanged?.call(

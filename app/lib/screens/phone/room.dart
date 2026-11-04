@@ -193,7 +193,9 @@ class _RoomScreenState extends State<RoomScreen> {
                 child: MemberTile(
                   member: member,
                   self: member.handle == widget.services.store.handle,
-                  speaking: session.speaking.contains(member.handle),
+                  speaking: member.handle == widget.services.store.handle
+                      ? session.localSpeaking
+                      : session.speaking.contains(member.handle),
                   connection:
                       !inCall ||
                           member.handle == widget.services.store.handle ||

@@ -62,6 +62,7 @@ class RoomSession extends ChangeNotifier {
     micRouter.addListener(_audioChanged);
     callVolume = store.callVolume;
     callService.addListener(_nativeCallChanged);
+    mediaEngine.localSpeaking = _setLocalSpeaking;
     mediaEngine.remoteSpeaking = (handle, speaking) {
       if (speaking) {
         _speaking.add(handle);
@@ -137,6 +138,8 @@ class RoomSession extends ChangeNotifier {
 
   bool _disposed = false;
   bool _mediaJoined = false;
+  bool _localSpeaking = false;
+  bool get localSpeaking => _localSpeaking;
   final Set<String> _speaking = {};
   Set<String> get speaking => Set.unmodifiable(_speaking);
   StreamSubscription<RoomEvent>? _subscription;
@@ -144,6 +147,13 @@ class RoomSession extends ChangeNotifier {
   Future<void>? _stopFuture;
   int _generation = 0;
   int _callGeneration = 0;
+
+  void _setLocalSpeaking(bool speaking) {
+    final value = speaking && !muted && call.isActive && !state.isLeaving;
+    if (_localSpeaking == value || _disposed) return;
+    _localSpeaking = value;
+    _notify();
+  }
 
   Future<void> open(
     String code, {
@@ -288,6 +298,7 @@ class RoomSession extends ChangeNotifier {
           members.map((m) => m.handle),
         )) {
       _mediaJoined = false;
+      _setLocalSpeaking(false);
       await mediaEngine.leave();
       mediaError = meshCapacityReason;
     }
@@ -413,6 +424,7 @@ class RoomSession extends ChangeNotifier {
       if (!call.isActive) throw StateError(call.error ?? '통화 서비스를 시작하지 못했습니다.');
       if (_mediaJoined) {
         _mediaJoined = false;
+        _setLocalSpeaking(false);
         await mediaEngine.leave();
         if (!current()) return;
       }
@@ -443,6 +455,7 @@ class RoomSession extends ChangeNotifier {
       }
       if (current()) {
         _mediaJoined = false;
+        _setLocalSpeaking(false);
         try {
           await mediaEngine.leave();
         } catch (_) {
@@ -474,6 +487,7 @@ class RoomSession extends ChangeNotifier {
     _retryTimer?.cancel();
     _retryTimer = null;
     _mediaJoined = false;
+    _setLocalSpeaking(false);
     _speaking.clear();
     muted = false;
     speakerphone = true;
@@ -492,6 +506,7 @@ class RoomSession extends ChangeNotifier {
 
   void setMuted(bool value) {
     muted = value;
+    if (value) _localSpeaking = false;
     mediaEngine.setMuted(value);
     unawaited(
       callService.setMuted(value).catchError((Object error) {
@@ -569,6 +584,7 @@ class RoomSession extends ChangeNotifier {
   }
 
   void _nativeCallChanged() {
+    if (!call.isActive) _setLocalSpeaking(false);
     if (!call.isActive && !call.isStarting && _mediaJoined && _wantCall) {
       _mediaJoined = false;
       _speaking.clear();
@@ -589,6 +605,7 @@ class RoomSession extends ChangeNotifier {
     final code = state.code;
     if (code == null || state.isLeaving) return;
     state = state.copyWith(isConnected: false, isLeaving: true);
+    _setLocalSpeaking(false);
     _wantCall = false;
     _retryTimer?.cancel();
     _retryTimer = null;
@@ -650,6 +667,8 @@ class RoomSession extends ChangeNotifier {
     callService.onToggleMute = null;
     micRouter.removeListener(_audioChanged);
     _retryTimer?.cancel();
+    _localSpeaking = false;
+    mediaEngine.localSpeaking = null;
     mediaEngine.remoteSpeaking = null;
     mediaEngine.sendSignal = null;
     mediaEngine.connectionChanged = null;

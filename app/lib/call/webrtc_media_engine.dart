@@ -10,9 +10,11 @@ import '../net/api_client.dart';
 import '../net/models.dart';
 import 'media_engine.dart';
 import 'mesh_coordinator.dart';
+import 'sdp_munge.dart';
 
 const remoteSpeakingThreshold = 0.02;
 const remoteSpeakingInterval = Duration(milliseconds: 500);
+const _icePolicy = String.fromEnvironment('UNAVO_ICE_POLICY');
 
 class WebRtcMediaEngine extends MediaEngine {
   WebRtcMediaEngine({required this.api, required this.micRouter});
@@ -34,6 +36,7 @@ class WebRtcMediaEngine extends MediaEngine {
   DateTime? _credentialsExpireAt;
   bool _muted = false;
   bool _interrupted = false;
+  bool _localSpeaking = false;
   double _playbackVolume = 1;
   Future<void> _volumeWrites = Future<void>.value();
   bool _pollingStats = false;
@@ -167,10 +170,12 @@ class WebRtcMediaEngine extends MediaEngine {
     final pc = await createPeerConnection({
       'iceServers': _iceServers,
       'sdpSemantics': 'unified-plan',
+      if (_icePolicy == 'relay') 'iceTransportPolicy': 'relay',
     });
     late final _WebRtcPeer peer;
     peer = _WebRtcPeer(pc, () {
       if (identical(_peers[handle], peer)) _peers.remove(handle);
+      if (_peers.isEmpty) _setLocalSpeaking(false);
     });
     try {
       if (!_current(generation) || _local == null) {
@@ -239,6 +244,7 @@ class WebRtcMediaEngine extends MediaEngine {
   @override
   void setMuted(bool muted) {
     _muted = muted;
+    if (_muted || _interrupted) _setLocalSpeaking(false);
     for (final track in _local?.getAudioTracks() ?? <MediaStreamTrack>[]) {
       track.enabled = !muted && !_interrupted;
     }
@@ -363,8 +369,10 @@ class WebRtcMediaEngine extends MediaEngine {
     if (_pollingStats || !_current(generation)) return;
     _pollingStats = true;
     try {
+      final localLevels = <_WebRtcPeer, double>{};
       for (final entry in _peers.entries.toList()) {
         var level = 0.0;
+        var localLevel = 0.0;
         try {
           for (final report in await entry.value.pc.getStats()) {
             final values = report.values;
@@ -372,21 +380,24 @@ class WebRtcMediaEngine extends MediaEngine {
             final remote =
                 report.type == 'inbound-rtp' ||
                 (report.type == 'track' && values['remoteSource'] == true);
-            if (audio && remote) {
+            if (audio && (remote || report.type == 'media-source')) {
               final value = values['audioLevel'];
-              level = max(
-                level,
-                value is num
-                    ? value.toDouble()
-                    : double.tryParse(value?.toString() ?? '') ?? 0,
-              );
+              final audioLevel = value is num
+                  ? value.toDouble()
+                  : double.tryParse(value?.toString() ?? '') ?? 0.0;
+              if (remote) {
+                level = max(level, audioLevel);
+              } else {
+                localLevel = max(localLevel, audioLevel);
+              }
             }
           }
         } catch (_) {
           // A peer can close while a stats request is outstanding.
         }
         if (!_current(generation)) return;
-        if (identical(_peers[entry.key], entry.value)) {
+        if (identical(_peers[entry.key], entry.value) && !entry.value.closed) {
+          localLevels[entry.value] = localLevel;
           _setSpeaking(
             entry.key,
             _states[entry.key] == MeshPeerState.connected &&
@@ -394,6 +405,15 @@ class WebRtcMediaEngine extends MediaEngine {
           );
         }
       }
+      if (!_current(generation)) return;
+      // All peers send the same source; discard peers closed during this poll.
+      var localLevel = 0.0;
+      for (final peer in _peers.values) {
+        if (!peer.closed) localLevel = max(localLevel, localLevels[peer] ?? 0);
+      }
+      _setLocalSpeaking(
+        !_muted && !_interrupted && localLevel > remoteSpeakingThreshold,
+      );
     } finally {
       _pollingStats = false;
     }
@@ -402,6 +422,12 @@ class WebRtcMediaEngine extends MediaEngine {
   void _setSpeaking(String handle, bool speaking) {
     final changed = speaking ? _speaking.add(handle) : _speaking.remove(handle);
     if (changed) remoteSpeaking?.call(handle, speaking);
+  }
+
+  void _setLocalSpeaking(bool speaking) {
+    if (_localSpeaking == speaking) return;
+    _localSpeaking = speaking;
+    localSpeaking?.call(speaking);
   }
 
   void _publishState() {
@@ -436,6 +462,7 @@ class WebRtcMediaEngine extends MediaEngine {
   }
 
   void _stopTimers() {
+    _setLocalSpeaking(false);
     _statsTimer?.cancel();
     _statsTimer = null;
     _credentialTimer?.cancel();
@@ -501,6 +528,7 @@ class _WebRtcPeer implements MeshPeer {
       'offerToReceiveVideo': false,
       if (iceRestart) 'iceRestart': true,
     });
+    offer.sdp = stripTransportCc(offer.sdp!);
     await pc.setLocalDescription(offer);
     return Map<String, Object?>.from(offer.toMap() as Map);
   }
@@ -508,9 +536,10 @@ class _WebRtcPeer implements MeshPeer {
   @override
   Future<Map<String, Object?>> answerOffer(Map<String, Object?> offer) async {
     await pc.setRemoteDescription(
-      RTCSessionDescription(offer['sdp'] as String, 'offer'),
+      RTCSessionDescription(stripTransportCc(offer['sdp'] as String), 'offer'),
     );
     final answer = await pc.createAnswer();
+    answer.sdp = stripTransportCc(answer.sdp!);
     await pc.setLocalDescription(answer);
     return Map<String, Object?>.from(answer.toMap() as Map);
   }
@@ -518,7 +547,10 @@ class _WebRtcPeer implements MeshPeer {
   @override
   Future<void> acceptAnswer(Map<String, Object?> answer) =>
       pc.setRemoteDescription(
-        RTCSessionDescription(answer['sdp'] as String, 'answer'),
+        RTCSessionDescription(
+          stripTransportCc(answer['sdp'] as String),
+          'answer',
+        ),
       );
 
   @override

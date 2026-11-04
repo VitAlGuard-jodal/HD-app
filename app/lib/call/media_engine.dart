@@ -53,7 +53,8 @@ abstract class MediaEngine {
   Future<void> onSignal(String from, String kind, Object? payload);
   void onRemoteSpeaking(String handle);
 
-  // F3 엔진은 수신 발화와 로컬 시그널을 이 콜백으로 전달한다.
+  // 엔진은 로컬·수신 발화와 로컬 시그널을 이 콜백으로 전달한다.
+  void Function(bool speaking)? localSpeaking;
   void Function(String handle, bool speaking)? remoteSpeaking;
   Future<void> Function(String to, String kind, Object? payload)? sendSignal;
   void Function(MediaConnectionState state, String? message)? connectionChanged;
