@@ -16,6 +16,16 @@ const remoteSpeakingThreshold = 0.02;
 const remoteSpeakingInterval = Duration(milliseconds: 500);
 const _icePolicy = String.fromEnvironment('UNAVO_ICE_POLICY');
 
+/// flutter_webrtc 네이티브는 mandatory/optional 만 읽는다(WebRTC 제약 키 이름 사용).
+Map<String, Object?> offerConstraints({required bool iceRestart}) => {
+  'mandatory': <String, Object?>{
+    'OfferToReceiveAudio': true,
+    'OfferToReceiveVideo': false,
+    if (iceRestart) 'IceRestart': true,
+  },
+  'optional': <Map<String, Object?>>[],
+};
+
 class WebRtcMediaEngine extends MediaEngine {
   WebRtcMediaEngine({required this.api, required this.micRouter});
 
@@ -523,11 +533,7 @@ class _WebRtcPeer implements MeshPeer {
 
   @override
   Future<Map<String, Object?>> createOffer({bool iceRestart = false}) async {
-    final offer = await pc.createOffer({
-      'offerToReceiveAudio': true,
-      'offerToReceiveVideo': false,
-      if (iceRestart) 'iceRestart': true,
-    });
+    final offer = await pc.createOffer(offerConstraints(iceRestart: iceRestart));
     offer.sdp = stripTransportCc(offer.sdp!);
     await pc.setLocalDescription(offer);
     return Map<String, Object?>.from(offer.toMap() as Map);

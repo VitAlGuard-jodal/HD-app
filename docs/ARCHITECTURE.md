@@ -94,3 +94,5 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 로컬은 오디오 트랙 하나를 각 피어에 공유하고, 음소거는 enabled만 바꾼다. 원격 음성은 네이티브 WebRTC 재생을 사용하며 500ms마다 수신 audioLevel > 0.02를 발화로 표시한다. 실제 통신·라우팅과 알림/백그라운드 동작은 실기기 검증 대상이다.
 
 테스트용 ICE 정책 스위치(F5a, 2026-11-04): `--dart-define=UNAVO_ICE_POLICY=relay` 를 주면 PeerConnection 에 `iceTransportPolicy: relay` 를 넣어 TURN 경로를 강제한다. 기본은 `all` 이며 설정 키를 생략한다. 같은 커밋에서 오디오 SDP 의 transport-cc(rtcp-fb 줄과 transport-wide-cc extmap 줄)를 양쪽 SDP 에서 제거한다 — 음성 전용이라 TWCC 대역폭 추정이 필요 없고, 차가 보낸 꼬인 수신 보고가 폰 WebRTC 를 초당 10만 줄 로그로 질식시켜 40초 만에 죽던 문제(iPhone 12 ↔ Pleos, TURN 경로 실측) 를 막는다. iOS 는 WebRTC 로그 수준을 error 로 내린다.
+
+**createOffer 제약 맵(F5c, 2026-11-05).** flutter_webrtc 네이티브의 `createOffer` 제약은 `mandatory` 맵과 `optional` 리스트 아래에 WebRTC 키 이름(`IceRestart`, `OfferToReceiveAudio`, `OfferToReceiveVideo`)으로만 전달되며, 최상위의 `iceRestart`·`offerToReceiveAudio` 같은 키는 iOS·Android 모두 무시한다. `app/lib/call/webrtc_media_engine.dart`의 `offerConstraints`가 이 제약 맵의 단일 출처이며, ICE 재시작을 요청할 때만 `mandatory`에 `IceRestart: true`를 포함한다. 11/5 아이폰 와이파이→LTE 전환 실측에서 최상위 키로는 재시작이 일어나지 않아(로컬 ufrag 불변) 통화가 영구 끊김으로 남았던 결함의 수정이다.
