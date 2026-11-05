@@ -264,6 +264,10 @@ test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가�
 
   const reconnected = await events(code, bob);
   assert.equal((await reconnected.next("hello")).members.length, 2);
+  for (const signal of signals) {
+    assert.deepEqual(await reconnected.next("signal"), { from: "alice", ...signal });
+  }
+  assert.deepEqual(await reconnected.next("signal"), { from: "alice", kind: "custom", payload: null });
   const left = await api("POST", `/v1/rooms/${code}/leave`, bob);
   assert.equal(left.status, 204);
   assert.equal(left.body, undefined);
@@ -278,12 +282,38 @@ test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가�
   assert.equal((await api("POST", `/v1/rooms/${code}/join`, bob)).status, 200);
   assert.deepEqual(await aliceEvents.next("member-joined"), { handle: "bob" });
   assert.equal((await api("GET", `/v1/rooms/${code}`, alice)).body.members.length, 2);
+  const rejoined = await events(code, bob);
+  assert.equal((await rejoined.next("hello")).members.length, 2);
+  const afterLeave = { to: "bob", kind: "offer", payload: { sdp: "새 참여의 offer" } };
+  const sentAfterLeave = await api("POST", `/v1/rooms/${code}/signal`, alice, afterLeave);
+  assert.equal(sentAfterLeave.status, 202);
+  assert.deepEqual(sentAfterLeave.body, { delivered: true });
+  assert.deepEqual(await rejoined.next("signal"), { from: "alice", kind: afterLeave.kind, payload: afterLeave.payload });
 
   assert.equal((await api("DELETE", "/v1/contacts/bob", alice)).status, 204);
   assert.deepEqual((await api("GET", "/v1/contacts", alice)).body.contacts, []);
   assert.equal((await api("POST", "/v1/auth/logout", alice)).status, 204);
   assertError(await api("GET", "/v1/me", alice), 401);
   assert.equal((await api("GET", "/v1/me", signupToken)).status, 200);
+});
+
+test("SSE가 없는 수신자의 시그널을 보관하고 연결 시 hello 다음에 재전송한다", { timeout: 15_000 }, async (t) => {
+  const { api, signup, events, hub } = await fixture(t);
+  const alice = await signup("alice", "앨리스");
+  const bob = await signup("bob", "보비");
+  const created = await api("POST", "/v1/rooms", alice, {});
+  assert.equal(created.status, 201);
+  const code = created.body.room.code as string;
+  assert.equal((await api("POST", `/v1/rooms/${code}/join`, bob)).status, 200);
+  assert.equal(hub.subscriberCount(code), 0);
+  const signal = { kind: "offer", payload: { negotiationId: "offline-offer", sdp: "offer-sdp" } };
+  const sent = await api("POST", `/v1/rooms/${code}/signal`, alice, { to: "bob", ...signal });
+  assert.equal(sent.status, 202);
+  assert.deepEqual(sent.body, { delivered: false });
+
+  const stream = await events(code, bob);
+  assert.deepEqual((await stream.next("hello")).self, { handle: "bob", displayName: "보비" });
+  assert.deepEqual(await stream.next("signal"), { from: "alice", ...signal });
 });
 
 test("로그아웃은 해당 토큰의 기존 SSE를 end로 끝내고 다른 기기와 방 참여는 유지한다", { timeout: 15_000 }, async (t) => {

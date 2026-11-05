@@ -287,6 +287,7 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
         await readJson(request, true);
         if (leaveRoom(db, room.id, user.id)) hub.broadcast(code, "member-left", { handle: user.handle });
         hub.disconnectUser(code, user.handle);
+        hub.clearSignals(code, user.handle);
         json(response, 204);
         return;
       }
@@ -297,6 +298,9 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
         unsubscribe = hub.subscribe(code, user.handle, tokenHash(token), stream.send, stream.close);
         if (!stream.send("hello", { self: publicUser(user), members: listRoomMembers(db, room.id) })) {
           unsubscribe();
+        } else {
+          // 재전송 중 전송에 실패해도 스트림의 onClose에서 구독을 해제한다.
+          hub.replaySignals(code, user.handle, stream.send);
         }
         return;
       }
@@ -313,9 +317,11 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
         if (!recipient || !isRoomMember(db, room.id, recipient.id)) {
           throw new HttpError(403, "NOT_ROOM_MEMBER", "수신자가 방 참여자가 아닙니다.");
         }
-        const delivered = hub.sendTo(code, recipient.handle, "signal", {
+        const signal = {
           from: user.handle, kind: body.kind, payload: body.payload,
-        });
+        };
+        hub.queueSignal(code, recipient.handle, "signal", signal);
+        const delivered = hub.sendTo(code, recipient.handle, "signal", signal);
         json(response, 202, { delivered });
         return;
       }

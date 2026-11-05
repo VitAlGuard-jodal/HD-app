@@ -14,13 +14,18 @@ class ApiClient {
     required this.tokenStore,
     this.allowPrivateCleartext = kDebugMode,
     this.retryDelay = const Duration(milliseconds: 400),
+    Duration? sseSilenceTimeout,
     HttpClient Function()? clientFactory,
-  }) : _clientFactory = clientFactory ?? HttpClient.new;
+  }) : _sseSilenceTimeout = sseSilenceTimeout ?? ApiClient.sseSilenceTimeout,
+       _clientFactory = clientFactory ?? HttpClient.new;
   final TokenStore tokenStore;
   final bool allowPrivateCleartext;
   final Duration retryDelay;
+  final Duration _sseSilenceTimeout;
   final HttpClient Function() _clientFactory;
   static const _timeout = Duration(seconds: 15);
+  // 서버 ping 15초 + 여유 5초
+  static const sseSilenceTimeout = Duration(seconds: 20);
 
   Future<AuthResult> signup(
     String handle,
@@ -148,7 +153,7 @@ class ApiClient {
           final parser = SseParser();
           // 타임아웃을 원시 바이트에 적용하여 : ping도 연결 생존으로 센다.
           final lines = response
-              .timeout(const Duration(seconds: 35))
+              .timeout(_sseSilenceTimeout)
               .transform(utf8.decoder)
               .transform(const LineSplitter());
           await for (final line in lines) {
