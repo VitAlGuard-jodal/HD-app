@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:unavo_noise/unavo_noise.dart';
 
 import '../audio/mic_router.dart';
 import '../core/errors.dart';
@@ -15,6 +16,16 @@ import 'sdp_munge.dart';
 const remoteSpeakingThreshold = 0.02;
 const remoteSpeakingInterval = Duration(milliseconds: 500);
 const _icePolicy = String.fromEnvironment('UNAVO_ICE_POLICY');
+const _noiseFilter = String.fromEnvironment('UNAVO_NOISE', defaultValue: 'on');
+const _apm = String.fromEnvironment('UNAVO_APM', defaultValue: 'on');
+const _captureDumpSeconds = int.fromEnvironment(
+  'UNAVO_CAPTURE_DUMP',
+  defaultValue: 0,
+);
+const _captureExportPort = int.fromEnvironment(
+  'UNAVO_CAPTURE_EXPORT_PORT',
+  defaultValue: 0,
+);
 
 /// flutter_webrtc 네이티브는 mandatory/optional 만 읽는다(WebRTC 제약 키 이름 사용).
 Map<String, Object?> offerConstraints({required bool iceRestart}) => {
@@ -85,6 +96,9 @@ class WebRtcMediaEngine extends MediaEngine {
         if (!_current(generation)) return;
         _iceServers = credentials.iceServers;
         if (defaultTargetPlatform == TargetPlatform.android) {
+          // 안드로이드 캡처를 48 kHz 로 고정한다. 기본(16 kHz)이면 RNNoise 가 통과만 한다.
+          // 팩토리 생성 전 첫 flutter_webrtc 호출이어야 반영된다(두 번째부터는 무시).
+          await WebRTC.initialize(options: {'audioSampleRate': 48000});
           await Helper.setAndroidAudioConfiguration(
             AndroidAudioConfiguration(
               manageAudioFocus: false,
@@ -100,12 +114,30 @@ class WebRtcMediaEngine extends MediaEngine {
         if (!_current(generation)) return;
         _local = await navigator.mediaDevices.getUserMedia({
           'audio': {
-            'echoCancellation': true,
-            'noiseSuppression': true,
-            'autoGainControl': true,
+            'echoCancellation': _apm != 'off',
+            'noiseSuppression': _apm != 'off',
+            'autoGainControl': _apm != 'off',
           },
           'video': false,
         });
+        if (!_current(generation)) return;
+        try {
+          debugPrint(
+            '[noise] filter=$_noiseFilter apm=$_apm dump=${_captureDumpSeconds}s export=$_captureExportPort',
+          );
+          await UnavoNoise.configure(
+            enabled: _noiseFilter != 'off',
+            dumpSeconds: _captureDumpSeconds,
+          );
+          if (_captureExportPort > 0) {
+            final result = await UnavoNoise.exportDump(
+              port: _captureExportPort,
+            );
+            debugPrint('[noise] export=$result');
+          }
+        } catch (error) {
+          debugPrint('[noise] $error');
+        }
         if (!_current(generation)) return;
         setMuted(_muted);
         if (defaultTargetPlatform == TargetPlatform.iOS) {

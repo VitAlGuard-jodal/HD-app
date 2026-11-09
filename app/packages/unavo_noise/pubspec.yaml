@@ -1,0 +1,22 @@
+name: unavo_noise
+description: Android WebRTC 캡처 후단의 RNNoise 잡음 제거.
+publish_to: none
+
+environment:
+  sdk: '>=3.8.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_webrtc: ^1.6.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: kr.modumoa.unavonoise
+        pluginClass: UnavoNoisePlugin

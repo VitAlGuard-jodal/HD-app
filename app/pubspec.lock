@@ -485,6 +485,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.4.0"
+  unavo_noise:
+    dependency: "direct main"
+    description:
+      path: "packages/unavo_noise"
+      relative: true
+    source: path
+    version: "0.0.0"
   vector_graphics:
     dependency: transitive
     description:
