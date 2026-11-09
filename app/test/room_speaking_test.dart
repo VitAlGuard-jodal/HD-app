@@ -14,6 +14,7 @@ import 'package:unavo/net/models.dart';
 import 'package:unavo/room/room_session.dart';
 import 'package:unavo/screens/phone/room.dart';
 import 'package:unavo/ui/control_scale.dart';
+import 'package:unavo/ui/icons.dart';
 import 'package:unavo/ui/widgets/member_tile.dart';
 
 void main() {
@@ -95,6 +96,53 @@ void main() {
           find.bySemanticsLabel('Alice, @alice, 나, 말하는 중'),
           findsOneWidget,
         );
+
+        await messenger.handlePlatformMessage(
+          'unavo/audio/routes',
+          const StandardMethodCodec().encodeSuccessEnvelope({
+            'route': 'speaker',
+            'interrupted': true,
+          }),
+          (_) {},
+        );
+        await tester.pump();
+        expect(services.rooms.interrupted, isTrue);
+        expect(tester.widget<MemberTile>(self).interrupted, isTrue);
+        expect(tester.widget<MemberTile>(self).speaking, isFalse);
+        expect(tester.widget<MemberTile>(remote).interrupted, isFalse);
+        expect(
+          find.descendant(of: self, matching: find.text('다른 오디오 때문에 잠시 중단')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: self,
+            matching: find.byWidgetPredicate(
+              (widget) => widget is UnavoIcon && widget.name == 'micoff',
+            ),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.bySemanticsLabel('Alice, @alice, 나, 다른 오디오 때문에 잠시 중단'),
+          findsOneWidget,
+        );
+        media.localSpeaking?.call(true);
+        await tester.pump();
+        expect(tester.widget<MemberTile>(self).speaking, isFalse);
+        await messenger.handlePlatformMessage(
+          'unavo/audio/routes',
+          const StandardMethodCodec().encodeSuccessEnvelope({
+            'route': 'speaker',
+            'interrupted': false,
+          }),
+          (_) {},
+        );
+        await tester.pump();
+        expect(find.text('다른 오디오 때문에 잠시 중단'), findsNothing);
+        expect(tester.widget<MemberTile>(self).interrupted, isFalse);
+        media.localSpeaking?.call(true);
+        await tester.pump();
 
         services.rooms.setMuted(true);
         await tester.pump();

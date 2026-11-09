@@ -24,13 +24,19 @@ void main() {
       ]),
       MediaConnectionState.connecting,
     );
-    // Exhausted remote peers remain failed on their cards, without restarting
-    // a healthy local stream. It is ready for a new arrival.
+    // Mesh failed is terminal: all peer recovery attempts have been exhausted.
     expect(
       receiveConnectionState(MediaConnectionState.connected, [
         MeshPeerState.failed,
       ]),
-      MediaConnectionState.connected,
+      MediaConnectionState.failed,
+    );
+    expect(
+      receiveConnectionState(MediaConnectionState.connected, [
+        MeshPeerState.failed,
+        MeshPeerState.failed,
+      ]),
+      MediaConnectionState.failed,
     );
     for (final local in [
       MediaConnectionState.idle,

@@ -65,6 +65,7 @@ class MicRouter(context: Context) {
     private var focusRequest: AudioFocusRequest? = null
     private var recorder: AudioRecord? = null
     private var meterJob: Job? = null
+    private var recoveryJob: Job? = null
     private var recordingDeviceId: Int? = null
 
     private val callback = object : AudioDeviceCallback() {
@@ -106,6 +107,7 @@ class MicRouter(context: Context) {
         routeLock.withLock {
             try {
                 // Preview owns AudioRecord; calls reserve focus for WebRTC.
+                if (recoveryJob != null) releaseLocked()
                 if (captureMode == CaptureMode.PREVIEW) stopCaptureLocked()
                 captureMode = CaptureMode.CALL
                 applyLocked(chosen)
@@ -163,14 +165,45 @@ class MicRouter(context: Context) {
         refreshSelection()
         scope.launch {
             routeLock.withLock {
-                if (captureMode == CaptureMode.NONE) return@withLock
+                if (captureMode == CaptureMode.NONE || recoveryJob != null) return@withLock
                 try {
                     val chosen = state.value.selected ?: error("사용 가능한 마이크가 없습니다.")
                     applyLocked(chosen)
                 } catch (error: Exception) {
+                    if (error is CancellationException) {
+                        releaseLocked()
+                        throw error
+                    }
+                    if (captureMode == CaptureMode.CALL) scheduleCallRecoveryLocked(error)
+                    else {
+                        releaseLocked()
+                        mutableState.update { it.copy(error = error.message ?: "마이크 경로를 변경하지 못했습니다.") }
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun scheduleCallRecoveryLocked(cause: Exception) {
+        Log.w(TAG, "마이크 경로를 1초 뒤 한 번 복구합니다.", cause)
+        releaseLocked()
+        // 복구 대기 중에도 통화가 캡처 소유권을 유지하고 Dart 트랙은 일시 중단한다.
+        captureMode = CaptureMode.CALL
+        mutableState.update { it.copy(isCallActive = true, isInterrupted = true, error = null) }
+        recoveryJob = scope.launch {
+            delay(1_000)
+            routeLock.withLock {
+                recoveryJob = null
+                if (captureMode != CaptureMode.CALL) return@withLock
+                try {
+                    val chosen = state.value.selected ?: error("사용 가능한 마이크가 없습니다.")
+                    applyLocked(chosen)
+                    mutableState.update { it.copy(isInterrupted = false) }
+                } catch (error: Exception) {
                     releaseLocked()
                     if (error is CancellationException) throw error
-                    mutableState.update { it.copy(error = error.message ?: "마이크 경로를 변경하지 못했습니다.") }
+                    Log.w(TAG, "마이크 경로 복구에 실패하여 통화를 종료합니다.", error)
+                    mutableState.update { it.copy(error = "마이크를 복구하지 못해 통화가 종료되었습니다.") }
                 }
             }
         }
@@ -198,10 +231,13 @@ class MicRouter(context: Context) {
                         scope.launch {
                             routeLock.withLock {
                                 if (captureMode == CaptureMode.CALL && focusRequest === request) {
-                                    // Retain the FGS/session during an interruption; Dart suspends
-                                    // and resumes existing tracks without recreating the mesh.
                                     when (change) {
-                                        AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ->
+                                        AudioManager.AUDIOFOCUS_LOSS -> {
+                                            releaseLocked()
+                                            mutableState.update { it.copy(error = "다른 오디오가 우선되어 통화가 중단되었습니다") }
+                                        }
+                                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK ->
                                             mutableState.update { it.copy(isInterrupted = true) }
                                         AudioManager.AUDIOFOCUS_GAIN ->
                                             mutableState.update { it.copy(isInterrupted = false, error = null) }
@@ -290,6 +326,8 @@ class MicRouter(context: Context) {
     }
 
     private suspend fun releaseLocked() = withContext(NonCancellable + Dispatchers.IO) {
+        recoveryJob?.cancel()
+        recoveryJob = null
         captureMode = CaptureMode.NONE
         mutableState.update { it.copy(isInterrupted = false) }
         stopCaptureLocked()

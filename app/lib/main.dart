@@ -55,8 +55,6 @@ class _UnavoAppState extends State<UnavoApp> {
   bool _cover = true;
   bool _roomVisible = false;
   bool _carRoomVisible = false;
-  bool _startupUntouched = true;
-  String? _restoredRoom;
   @override
   void initState() {
     super.initState();
@@ -71,41 +69,11 @@ class _UnavoAppState extends State<UnavoApp> {
     store: widget.services.store,
     rooms: widget.services.rooms,
     isCurrent: () => mounted,
-    onRoomRestored: (code) {
-      _restoredRoom = code;
-      WidgetsBinding.instance.addPostFrameCallback((_) => _openRestoredRoom());
-    },
   );
-
-  void _homeInteracted() {
-    // Once the user acts, startup restoration must not take over their screen.
-    _startupUntouched = false;
-    _restoredRoom = null;
-  }
-
-  void _openRestoredRoom() {
-    if (!mounted || _cover) return;
-    final code = _restoredRoom;
-    _restoredRoom = null;
-    final focusContext = FocusManager.instance.primaryFocus?.context;
-    final editing =
-        focusContext?.widget is EditableText ||
-        focusContext?.findAncestorWidgetOfExactType<EditableText>() != null;
-    if (code == null ||
-        !_startupUntouched ||
-        editing ||
-        _roomVisible ||
-        _navigator.currentState == null ||
-        _navigator.currentState!.canPop() ||
-        !widget.services.rooms.state.isConnected)
-      return;
-    _openRoom(code);
-  }
 
   void _sessionChanged() {
     if (!mounted) return;
     if (widget.services.store.session == null) {
-      _restoredRoom = null;
       _carRoomVisible = false;
       _navigator.currentState?.popUntil((route) => route.isFirst);
     }
@@ -119,7 +87,6 @@ class _UnavoAppState extends State<UnavoApp> {
         !mounted)
       return;
     if (widget.services.rooms.state.code != code) return;
-    _homeInteracted();
     widget.services.calls.pendingOpenRoom = null;
     if (widget.mode == DeviceMode.car) {
       setState(() => _carRoomVisible = true);
@@ -148,8 +115,6 @@ class _UnavoAppState extends State<UnavoApp> {
       final pending = widget.services.calls.pendingOpenRoom;
       if (mounted && pending != null) {
         _openRoom(pending);
-      } else {
-        _openRestoredRoom();
       }
     });
   }
@@ -183,28 +148,16 @@ class _UnavoAppState extends State<UnavoApp> {
                 store: widget.services.store,
                 mode: widget.mode,
               )
-            : Focus(
-                onKeyEvent: (_, _) {
-                  _homeInteracted();
-                  return KeyEventResult.ignored;
-                },
-                child: Listener(
-                  onPointerDown: (_) => _homeInteracted(),
-                  onPointerSignal: (_) => _homeInteracted(),
-                  child: widget.mode == DeviceMode.car
-                      ? CarDashboard(
-                          services: widget.services,
-                          showRoom: _carRoomVisible,
-                          onRoom: _openRoom,
-                          onInteraction: _homeInteracted,
-                        )
-                      : _PhoneTabs(
-                          services: widget.services,
-                          mode: widget.mode,
-                          onRoom: _openRoom,
-                          onInteraction: _homeInteracted,
-                        ),
-                ),
+            : widget.mode == DeviceMode.car
+            ? CarDashboard(
+                services: widget.services,
+                showRoom: _carRoomVisible,
+                onRoom: _openRoom,
+              )
+            : _PhoneTabs(
+                services: widget.services,
+                mode: widget.mode,
+                onRoom: _openRoom,
               ),
       ),
     ),
@@ -216,12 +169,10 @@ class _PhoneTabs extends StatefulWidget {
     required this.services,
     required this.mode,
     required this.onRoom,
-    required this.onInteraction,
   });
   final AppServices services;
   final DeviceMode mode;
   final ValueChanged<String> onRoom;
-  final VoidCallback onInteraction;
   @override
   State<_PhoneTabs> createState() => _PhoneTabsState();
 }
@@ -234,7 +185,6 @@ class _PhoneTabsState extends State<_PhoneTabs> {
     bottomNav: BottomNav(
       index: _index,
       onChanged: (index) {
-        widget.onInteraction();
         FocusScope.of(context).unfocus();
         setState(() {
           _index = index;

@@ -6,6 +6,103 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:unavo/call/mesh_coordinator.dart';
 
 void main() {
+  test('무응답 offer는 8초에 닫고 8·16·24초 간격으로 3회 새 ID 재오퍼 후 실패한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture();
+      _settle(clock, f.mesh.join(['alice', 'bob']));
+      final first = f.peers['bob']!;
+      clock.elapse(const Duration(milliseconds: 7999));
+      expect(f.offerIds['bob'], hasLength(1));
+      clock.elapse(const Duration(milliseconds: 1));
+      expect(first.closes, 1);
+      expect(f.offerIds['bob'], hasLength(2));
+      expect(identical(first, f.peers['bob']), isFalse);
+      final second = f.peers['bob']!;
+      clock.elapse(const Duration(seconds: 8));
+      expect(second.closes, 1);
+      expect(f.offerIds['bob'], hasLength(2));
+      // Repeated hello must not reset the backoff or negotiation budget.
+      _settle(clock, f.mesh.reconcile(['alice', 'bob']));
+      clock.elapse(const Duration(seconds: 8));
+      expect(f.offerIds['bob'], hasLength(3));
+      clock.elapse(const Duration(seconds: 24));
+      expect(f.offerIds['bob'], hasLength(4));
+      expect(f.offerIds['bob']!.toSet(), hasLength(4));
+      expect(f.mesh.peerStates['bob'], MeshPeerState.connecting);
+      clock.elapse(const Duration(seconds: 8));
+      expect(f.mesh.peerStates['bob'], MeshPeerState.failed);
+      clock.elapse(const Duration(minutes: 1));
+      expect(f.offerIds['bob'], hasLength(4));
+      expect(clock.pendingTimers, isEmpty);
+      _settle(clock, f.mesh.close());
+    });
+  });
+
+  test('answer·멤버 이탈·close는 무응답 offer 타이머를 취소한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture();
+      _settle(clock, f.mesh.join(['alice', 'bob', 'charlie']));
+      _settle(
+        clock,
+        f.mesh.onSignal('bob', 'answer', {
+          'type': 'answer',
+          'sdp': 'answer',
+          'negotiationId': f.offerIds['bob']!.single,
+        }),
+      );
+      _settle(clock, f.mesh.updateMembers(['alice', 'bob']));
+      clock.elapse(const Duration(minutes: 1));
+      expect(f.offerIds['bob'], hasLength(1));
+      expect(f.offerIds['charlie'], hasLength(1));
+      expect(clock.pendingTimers, isEmpty);
+      _settle(clock, f.mesh.reconcile(['alice', 'bob']));
+      expect(clock.pendingTimers, isNotEmpty);
+      _settle(clock, f.mesh.close());
+      expect(clock.pendingTimers, isEmpty);
+    });
+  });
+
+  test('재오퍼 close 도중 멤버가 나가면 피어·발행 상태·타이머를 남기지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture();
+      _settle(clock, f.mesh.join(['alice', 'bob']));
+      final closing = Completer<void>();
+      f.peers['bob']!.closeGate = closing.future;
+      clock.elapse(meshOfferTimeout);
+      final removing = f.mesh.updateMembers(['alice']);
+      closing.complete();
+      _settle(clock, removing);
+      expect(f.mesh.peers, isEmpty);
+      expect(f.published, isEmpty);
+      expect(clock.pendingTimers, isEmpty);
+      _settle(clock, f.mesh.close());
+    });
+  });
+
+  test('무응답 소진 뒤 상대의 새 offer는 종단 피어를 교체하여 수락한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture();
+      _settle(clock, f.mesh.join(['alice', 'bob']));
+      clock.elapse(const Duration(seconds: 56));
+      final failed = f.peers['bob']!;
+      expect(f.mesh.peerStates['bob'], MeshPeerState.failed);
+      _settle(
+        clock,
+        f.mesh.onSignal('bob', 'offer', {
+          'type': 'offer',
+          'sdp': 'returned',
+          'negotiationId': 'bob:returned:1',
+        }),
+      );
+      expect(failed.closes, 1);
+      expect(identical(f.peers['bob'], failed), isFalse);
+      f.peers['bob']!.state(MeshPeerState.connected);
+      expect(f.mesh.peerStates['bob'], MeshPeerState.connected);
+      expect(clock.pendingTimers, isEmpty);
+      _settle(clock, f.mesh.close());
+    });
+  });
+
   test('실패한 피어만 2s·4s·8s ICE restart 후 실패, 정상 피어는 유지', () {
     fakeAsync((clock) {
       final f = _Fixture();
@@ -162,12 +259,20 @@ class _Fixture {
         if (to == failSignalsTo) throw StateError('peer signaling unavailable');
       },
       onError: errors.add,
+      onPeerState: (handle, state) {
+        if (state == MeshPeerState.closed) {
+          published.remove(handle);
+        } else {
+          published[handle] = state;
+        }
+      },
     );
   }
   late final MeshCoordinator mesh;
   final peers = <String, _Peer>{};
   final offerIds = <String, List<String>>{};
   final errors = <Object>[];
+  final published = <String, MeshPeerState>{};
   String? failSignalsTo;
 }
 
@@ -175,6 +280,7 @@ class _Peer implements MeshPeer {
   _Peer(this.state);
   final void Function(MeshPeerState) state;
   int offers = 0, restarts = 0, closes = 0;
+  Future<void>? closeGate;
   @override
   Future<Map<String, Object?>> createOffer({bool iceRestart = false}) async {
     offers++;
@@ -192,5 +298,6 @@ class _Peer implements MeshPeer {
   @override
   Future<void> close() async {
     closes++;
+    await closeGate;
   }
 }

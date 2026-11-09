@@ -5,6 +5,7 @@ const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 export const SIGNAL_BACKLOG_TTL_MS = 60_000;
 export const SIGNAL_BACKLOG_LIMIT = 64;
+const SIGNAL_BACKLOG_SWEEP_INTERVAL_MS = 30_000;
 
 export function generateRoomCode(): string {
   return Array.from({ length: 6 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join("");
@@ -21,6 +22,7 @@ interface Subscriber {
 export class RoomEventHub extends EventEmitter {
   #subscribers = new Map<string, Set<Subscriber>>();
   #backlog = new Map<string, Map<string, { at: number; name: string; data: unknown }[]>>();
+  #sweepTimer = setInterval(() => this.#sweepSignals(), SIGNAL_BACKLOG_SWEEP_INTERVAL_MS).unref();
 
   subscribe(code: string, handle: string, tokenHash: string, send: SendEvent, close: () => void = () => {}): () => void {
     let subscribers = this.#subscribers.get(code);
@@ -101,10 +103,23 @@ export class RoomEventHub extends EventEmitter {
   }
 
   close(): void {
+    clearInterval(this.#sweepTimer);
     for (const [code, subscribers] of [...this.#subscribers]) {
       for (const subscriber of [...subscribers]) this.#disconnect(code, subscriber);
     }
     this.#backlog.clear();
+  }
+
+  #sweepSignals(): void {
+    const now = Date.now();
+    for (const [code, backlog] of this.#backlog) {
+      for (const [handle, queued] of backlog) {
+        const signals = queued.filter((signal) => now - signal.at <= SIGNAL_BACKLOG_TTL_MS);
+        if (signals.length === 0) backlog.delete(handle);
+        else backlog.set(handle, signals);
+      }
+      if (backlog.size === 0) this.#backlog.delete(code);
+    }
   }
 
   #remove(code: string, subscriber: Subscriber): void {

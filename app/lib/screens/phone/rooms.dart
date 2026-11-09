@@ -4,7 +4,6 @@ import '../../core/app_services.dart';
 import '../../core/errors.dart';
 import '../../net/models.dart';
 import '../../room/room_session.dart';
-import '../../ui/icons.dart';
 import '../../ui/theme.dart';
 import '../../ui/widgets/focus_ring.dart';
 import '../../ui/widgets/panel_button.dart';
@@ -34,7 +33,10 @@ class _RoomsScreenState extends State<RoomsScreen> {
   }
 
   Future<void> _enter({required bool create}) async {
-    if (_busy || widget.services.rooms.state.code != null) return;
+    if (_busy ||
+        widget.services.rooms.state.code != null ||
+        widget.services.rooms.restorableRoom != null)
+      return;
     setState(() {
       _busy = true;
       _error = null;
@@ -60,6 +62,28 @@ class _RoomsScreenState extends State<RoomsScreen> {
         setState(() {
           _busy = false;
         });
+    }
+  }
+
+  Future<void> _openRoom(String code) async {
+    if (_busy) return;
+    if (widget.services.rooms.state.code == code) {
+      widget.onRoom(code);
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      FocusScope.of(context).unfocus();
+      await widget.services.rooms.open(code);
+      if (mounted && widget.services.rooms.state.code == code)
+        widget.onRoom(code);
+    } catch (error) {
+      if (mounted) setState(() => _error = errorMessage(error));
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -89,7 +113,10 @@ class _RoomsScreenState extends State<RoomsScreen> {
     listenable: widget.services.rooms,
     builder: (context, _) {
       final current = widget.services.rooms.state;
-      final canEnter = !_busy && current.code == null;
+      final restorable = widget.services.rooms.restorableRoom;
+      final roomCode = current.code ?? restorable?.code;
+      final roomName = current.room?.name ?? restorable?.name;
+      final canEnter = !_busy && roomCode == null;
       return PanelScroll(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -149,7 +176,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
                 ),
               ],
             ),
-            if (current.code != null) ...[
+            if (roomCode != null) ...[
               const SizedBox(height: 12),
               const Text(
                 joinedRoomReason,
@@ -158,20 +185,21 @@ class _RoomsScreenState extends State<RoomsScreen> {
             ],
             ErrorText(_error),
             const SizedBox(height: 18),
-            if (current.code == null)
+            if (roomCode == null)
               const StatusChip('참여 중인 방이 없습니다.', icon: 'rooms')
             else
               FocusRing(
                 child: Semantics(
                   button: true,
-                  label: '현재 방 ${current.code}',
+                  label: '참여 중인 방 $roomCode',
                   child: GestureDetector(
-                    onTap: () => widget.onRoom(current.code!),
+                    onTap: _busy ? null : () => _openRoom(roomCode),
                     child: Material(
                       color: UnavoColors.input,
                       child: InkWell(
-                        onTap: () => widget.onRoom(current.code!),
+                        onTap: _busy ? null : () => _openRoom(roomCode),
                         child: Container(
+                          key: const ValueKey('current-room-card'),
                           constraints: const BoxConstraints(minHeight: 88),
                           padding: const EdgeInsets.symmetric(
                             horizontal: 12,
@@ -187,29 +215,24 @@ class _RoomsScreenState extends State<RoomsScreen> {
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Text(
-                                      current.room?.name ?? '함께 가는 길',
+                                      roomName ?? '함께 가는 길',
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: UnavoType.body,
                                     ),
-                                    RoomCode(current.code!, fontSize: 40),
+                                    RoomCode(roomCode, fontSize: 40),
                                   ],
                                 ),
                               ),
                               const SizedBox(width: 12),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  Text(
-                                    '${current.members.length}',
-                                    style: const TextStyle(
-                                      fontSize: 16,
-                                      color: UnavoColors.muted,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 10),
-                                  const UnavoIcon('arrow'),
-                                ],
+                              PanelButton(
+                                label: '방 입장',
+                                icon: 'login',
+                                iconOnly: true,
+                                style: PanelButtonStyle.gold,
+                                onPressed: _busy
+                                    ? null
+                                    : () => _openRoom(roomCode),
                               ),
                             ],
                           ),

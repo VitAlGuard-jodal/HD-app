@@ -12,11 +12,15 @@ class MemberTile extends StatelessWidget {
     required this.member,
     this.self = false,
     this.speaking = false,
+    this.interrupted = false,
     this.connection,
   });
   final Member member;
   final bool self;
   final bool speaking;
+  final bool interrupted;
+  bool get _interrupted => self && interrupted;
+  bool get _speaking => speaking && !_interrupted;
   final MeshPeerState? connection;
   String get _connectionLabel => self || speaking
       ? ''
@@ -28,7 +32,7 @@ class MemberTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Semantics(
     label:
-        '${member.displayName}, @${member.handle}${self ? ", 나" : ""}${speaking ? ", 말하는 중" : ""}$_connectionLabel',
+        '${member.displayName}, @${member.handle}${self ? ", 나" : ""}${_speaking ? ", 말하는 중" : ""}${_interrupted ? ", 다른 오디오 때문에 잠시 중단" : ""}$_connectionLabel',
     child: ExcludeSemantics(
       child: Container(
         width: double.infinity,
@@ -39,15 +43,19 @@ class MemberTile extends StatelessWidget {
         decoration: BoxDecoration(
           color: UnavoColors.input,
           border: Border.all(
-            color: speaking ? UnavoColors.onCall : UnavoColors.line,
+            color: _speaking ? UnavoColors.onCall : UnavoColors.line,
           ),
         ),
         child: Row(
           children: [
             UnavoIcon(
-              speaking ? 'wave' : 'user',
+              _interrupted
+                  ? 'micoff'
+                  : _speaking
+                  ? 'wave'
+                  : 'user',
               size: ControlScale.icon(context),
-              color: speaking ? UnavoColors.onCall : UnavoColors.gold,
+              color: _speaking ? UnavoColors.onCall : UnavoColors.gold,
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -71,6 +79,12 @@ class MemberTile extends StatelessWidget {
                       color: UnavoColors.muted,
                     ),
                   ),
+                  if (_interrupted)
+                    const Text(
+                      '다른 오디오 때문에 잠시 중단',
+                      softWrap: true,
+                      style: TextStyle(fontSize: 16, color: UnavoColors.muted),
+                    ),
                 ],
               ),
             ),

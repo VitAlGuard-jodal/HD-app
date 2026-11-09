@@ -114,3 +114,21 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 **11/9 실측(찌지직 원인).** 폰에서 "말하기 전부터 LP 표면음 같은 찌지직"이 들리던 문제는 RNNoise 도 48 kHz 도 아니었다(끈 빌드·F7a 이전 커밋 빌드 모두 동일). 캡처 덤프와 맥 마이크 동시 녹음을 비교하니 버스트 포락선이 일치했고(상관 0.70), 맥 마이크만 정지 15초=버스트 0, 타자 15초=초당 10.6 으로, **맥북 키보드·손 충격음이 몸체를 타고 내장 마이크로 들어간 것**이었다. 사슬: 충격음 → 에뮬레이터 호스트 오디오 경로 약 +14 dB(APM 을 꺼도 같음) → WebRTC NS 는 히스만 −13 dB → RNNoise 는 바닥을 −86 dBFS 로 지우되 충격음은 음성으로 판정(VAD p50 0.98, 82% > 0.5)해 통과 → 폰 +6 dB(200%). 무음 위에 툭툭만 남아 LP 질감이 된다. 에뮬레이터 캡처 스레드엔 기기 효과 체인이 0개라 처리는 WebRTC 것뿐이다. 조치(결정 6-A): 시연·녹화 중 맥에 손을 대지 않고 맥 입력 음량을 낮춰 피크(−2 dBFS) 여유를 둔다. RNNoise 의 VAD 로는 충격음과 말소리 시작부를 구별하지 못하므로(둘 다 ≈1.0) VAD 기반 충격음 억제는 쓰지 않는다. 측정 도구는 세션 스크래치(`analysis/analyze.py`·`analyze2.py`·`diag-run.sh`)에 있다.
 
 **소프트 바닥(F7d, 결정 7-A′, 2026-11-09).** RNNoise 가 조용한 바닥을 −95 dBFS 까지 지워 "완전한 무음 위의 충격음"이 LP 표면음처럼 들리는 대비를 줄이려고, `SoftFloor.kt` 가 RNNoise 출력에 2 프레임(960 샘플, RNNoise 지연과 동일) 늦춘 입력을 섞는다. 섞는 이득은 `min(0.5, TARGET_RMS/rIn)`(목표 −63 dBFS) 로 입력이 클수록 자동으로 줄고, 내릴 땐 즉시·올릴 땐 프레임당 20% 로 평활해 충격음·말소리가 들어오는 프레임엔 섞이지 않는다. 어택 제한(무음에서 열릴 때 상승 속도 제한)은 실제 캡처 시뮬레이션에서 충격음 감쇠 0·말소리 음절 사이 최대 −16 dB 손상이라 넣지 않았다. 실기기(Pleos 에뮬레이터, 타자 중) 전후: 조용한 프레임 −95.1 → −64.2 dBFS, 말소리 −0.26 dB, 충격음 출력은 소프트 바닥으로 되살아나지 않음(p50 −60.5), 조용 구간 1 ms 포락선 p99−p50 54 → 21 dB. 끄기: `--dart-define=UNAVO_NOISE_FLOOR=off`.
+
+## 10. 통화 안정성 묶음 (F8a·F8b, 2026-11-09 코드리뷰 결함 수정)
+
+**재참여 정책.** 엔진의 `MediaConnectionState.failed` 는 "모든 피어가 failed 이고 복구(ICE restart·재오퍼)가 소진된" 종단 실패에만 쓴다(`receiveConnectionState()` 한 곳에서 판정). TURN 자격 갱신 실패·수신 음량 적용 실패·마이크 선택 실패는 경고(`mediaError`)로만 올리고 기존 피어를 보존한다. `RoomSession` 은 종단 failed 에서만 1·2·4초 재참여를 건다. 이전에는 자격 갱신 타임아웃 하나로 멀쩡한 메시를 전부 허물었다.
+
+**offer 시한과 돌아온 쪽의 재제안.** `meshOfferTimeout = 8초` 안에 answer 가 없으면 피어를 닫고 새 negotiationId 로 재오퍼(간격 8·16·24초, 최대 3회, 56초에 종단 실패). `MeshCoordinator.reconcile(members)` 는 살아 있는 피어도 진행 중 협상도 없는 상대에게 **새 멤버 규칙과 무관하게** offer 를 보낸다. `RoomSession` 은 SSE 재접속 뒤 `Hello`·`Reconnected` 에서 이미 미디어에 참여한 경우 `mediaEngine.reconcilePeers()` 를 부른다. 11/9 실측(상대 SSE 가 내려간 사이 보낸 offer 유실 → 양쪽 영구 대기)의 수정이다. 글레어는 기존 규칙(사전순으로 작은 handle 이 자기 offer 유지·재전송)대로.
+
+**복귀 정책(태곤 님 결정 11/9).** 프로세스가 살아 있는 채 통신만 끊겼다 돌아오면(터널) 같은 방에 자동 재입장하고 통화를 잇는다(위 reconcile). 앱을 **새로 켠 경우**(사용자가 끈 것이든 시스템이 죽인 것이든)는 메인 화면에 머물고 마이크·통화를 자동으로 켜지 않는다. `restoreSession` 은 `/v1/me` 만 읽어 `RoomSession.restorableRoom` 에 두고, 폰 방 목록·차 대시보드가 "참여 중인 방" 카드(방 이름·코드 + 입장 아이콘) 한 장을 보여 준다. 카드 탭 → 기존 입장 경로(`open` → hello → 자동 통화). `AppServices.initialize()` 의 네이티브 통화 상태 기반 자동 open 도 제거했다.
+
+**수신 이득 상한 100%.** libwebrtc 는 수신 볼륨을 saturated cast 로 곱하므로 ×2.0 이면 −6 dBFS 위 샘플이 전부 잘리고, 차 송신 피크는 0 dBFS 로 실측됐다. `callVolume` 0~100(저장값 200 은 읽을 때 100), 슬라이더 max 100, 엔진 `_playbackVolume ≤ 1.0`. 소리 크기는 출력 경로(스피커/수화부) 결함을 고쳐 확보한다(묶음 2).
+
+**타임아웃 문구.** `api_client.dart` 의 모든 `.timeout` 에 `onTimeout` 을 주어 `ApiException(0,'timeout','서버 응답 없음')` 을 던진다("Future not completed" 제거).
+
+**안드로이드 오디오 포커스·FGS.** 영구 `AUDIOFOCUS_LOSS` 는 캡처 해제 + "다른 오디오가 우선되어 통화가 중단되었습니다" 로 통화 종료(이전 동작 복원), `LOSS_TRANSIENT`/`CAN_DUCK` 은 `isInterrupted` 로 올려 폰·차 내 카드에 마이크 꺼짐 아이콘과 "다른 오디오 때문에 잠시 중단" 을 표시한다. `CallForegroundService` 는 출력 경로 전환 실패를 `outputError` 로만 보고하고 통화를 시작하며, 통화 중 마이크 경로 오류는 1초 뒤 한 번 재적용하고 재실패 시 깨끗이 종료한다(열화 상태 지속 금지).
+
+**서버.** `RoomEventHub` 가 30초 주기(`unref`)로 만료된 시그널 백로그를 전역 스윕한다(이전엔 같은 수신자를 다시 만질 때만 정리돼 복귀 없는 사용자마다 최대 64건이 영구 잔류). `GET /v1/rooms/:code` 는 `publicRoom + listRoomMembers` 로 응답을 직접 구성한다(바이트 동일).
+
+**테스트 주의(F8c).** 위젯 테스트에서 `pumpAndSettle` 은 주기 타이머(SSE·자격 갱신·재오퍼·애니메이션) 때문에 끝나지 않는다 — 고정 `pump` 만 쓴다. 가짜 MethodChannel 핸들러 **안**에서 `expect` 를 호출하면 실패가 호출 쪽 catchError 에 삼켜져 테스트에 드러나지 않는다 — 핸들러는 기록만 하고 본문에서 검증한다. 각 testWidgets 에 30초 timeout.

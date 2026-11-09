@@ -93,6 +93,47 @@ void main() {
     await net.close();
   });
 
+  for (final returning in ['alice', 'zebra']) {
+    test('SSE 복귀 $returning: 유실된 신규 멤버 offer를 reconcile·glare로 복구한다', () async {
+      final net = _Network();
+      final incumbent = net.add(returning);
+      await incumbent.join([returning]);
+      await incumbent.updateMembers([returning, 'bob']);
+      final newcomer = net.add('bob');
+      await newcomer.join([returning, 'bob']);
+      await newcomer.idle;
+      net.pending.clear(); // The incumbent's SSE is down; the offer is lost.
+      await incumbent.reconcile([returning, 'bob']);
+      await net.flush();
+      net.expectMesh([returning, 'bob']);
+      final smaller = returning.compareTo('bob') < 0 ? returning : 'bob';
+      final answer = net.sent.lastWhere((message) => message.kind == 'answer');
+      expect(answer.data['negotiationId'], startsWith('$smaller:'));
+      expect(net.created[smaller], hasLength(1));
+      final sent = net.sent.length;
+      await incumbent.reconcile([returning, 'bob']);
+      await newcomer.reconcile([returning, 'bob']);
+      await net.flush();
+      expect(net.sent.length, sent); // Already connected: no re-offer.
+      expect(net.errors, isEmpty);
+      await net.close();
+    });
+  }
+
+  test('reconcile은 진행 중 offer와 정원 밖 멤버에게 중복 제안하지 않는다', () async {
+    final net = _Network();
+    final alice = net.add('alice');
+    final members = ['alice', 'bob', 'charlie', 'david', 'eve'];
+    await alice.join(members);
+    await net.flush();
+    final offers = net.sent.where((message) => message.kind == 'offer').length;
+    await alice.reconcile(members);
+    await net.flush();
+    expect(net.sent.where((message) => message.kind == 'offer').length, offers);
+    expect(alice.peers, {'bob', 'charlie', 'david'});
+    await net.close();
+  });
+
   test('ICE가 SDP보다 먼저 오면 remote description 뒤에 적용한다', () async {
     final net = _Network();
     final alice = net.add('alice');

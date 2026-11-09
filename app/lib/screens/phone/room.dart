@@ -193,6 +193,10 @@ class _RoomScreenState extends State<RoomScreen> {
                 child: MemberTile(
                   member: member,
                   self: member.handle == widget.services.store.handle,
+                  interrupted:
+                      inCall &&
+                      session.interrupted &&
+                      member.handle == widget.services.store.handle,
                   speaking: member.handle == widget.services.store.handle
                       ? session.localSpeaking
                       : session.speaking.contains(member.handle),
@@ -242,8 +246,8 @@ class _RoomScreenState extends State<RoomScreen> {
                         key: const ValueKey('call-volume-slider'),
                         value: session.callVolume.toDouble(),
                         min: 0,
-                        max: 200,
-                        divisions: 200,
+                        max: 100,
+                        divisions: 100,
                         activeColor: UnavoColors.gold,
                         label: '${session.callVolume}',
                         onChangeStart: (_) {

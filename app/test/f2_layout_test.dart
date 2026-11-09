@@ -271,6 +271,9 @@ void main() {
       await tester.pump();
       final slider = find.byKey(const ValueKey('call-volume-slider'));
       expect(slider, findsOneWidget);
+      expect(tester.widget<Slider>(slider).min, 0);
+      expect(tester.widget<Slider>(slider).max, 100);
+      expect(tester.widget<Slider>(slider).divisions, 100);
       final drag = await tester.startGesture(tester.getCenter(slider));
       await drag.moveBy(const Offset(-40, 0));
       await tester.pump(const Duration(seconds: 4));

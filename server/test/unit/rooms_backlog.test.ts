@@ -45,6 +45,33 @@ test("시그널을 추가할 때도 만료된 항목을 제거한다", () => {
   assert.deepEqual(received, ["유효"]);
 });
 
+test("30초 전역 스윕은 재방문하지 않은 모든 방·수신자의 만료 시그널을 비운다", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  const hub = new RoomEventHub();
+  t.after(() => hub.close());
+  const recipients = [["ABC234", "alice"], ["ABC234", "bob"], ["DEF567", "bob"]];
+  for (const [code, handle] of recipients) hub.queueSignal(code, handle, "signal", "만료 대상");
+  hub.subscribe("ABC234", "alice", "alice-token", () => true);
+  assert.equal(hub.sendTo("ABC234", "alice", "signal", "만료 대상"), true);
+
+  t.mock.timers.tick(SIGNAL_BACKLOG_TTL_MS);
+  // TTL 경계까지는 전달에 성공했던 항목도 재구독을 위해 보관한다.
+  assert.equal(hub.replaySignals("ABC234", "alice", () => true), 1);
+  hub.queueSignal("ABC234", "bob", "signal", "아직 유효");
+  t.mock.timers.tick(29_999);
+  assert.equal(hub.replaySignals("DEF567", "bob", () => true, 0), 1);
+  t.mock.timers.tick(1);
+
+  for (const [code, handle] of recipients) {
+    const received: unknown[] = [];
+    // 조회 시각을 되돌려 TTL 필터링이 아니라 스윕의 실제 삭제를 검증한다.
+    hub.replaySignals(code, handle, (_name, data) => { received.push(data); }, 0);
+    assert.deepEqual(received, code === "ABC234" && handle === "bob" ? ["아직 유효"] : []);
+  }
+  t.mock.timers.tick(60_000);
+  assert.equal(hub.replaySignals("ABC234", "bob", () => assert.fail("스윕된 항목은 되살아나면 안 됩니다."), 0), 0);
+});
+
 test("수신자별 64개를 넘으면 가장 오래된 시그널부터 버린다", () => {
   const hub = new RoomEventHub();
   assert.equal(SIGNAL_BACKLOG_LIMIT, 64);

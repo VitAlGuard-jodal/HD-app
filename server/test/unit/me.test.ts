@@ -8,7 +8,7 @@ import type { TestContext } from "node:test";
 import { createApp } from "../../src/app.ts";
 import { issueToken } from "../../src/auth.ts";
 import { openDb } from "../../src/db.ts";
-import { createRoom, createUser, joinRoom, leaveRoom } from "../../src/store.ts";
+import { createRoom, createUser, joinRoom, leaveRoom, publicRoomDetails } from "../../src/store.ts";
 
 // 실제 라우터·인증·SQLite를 사용하되 TCP listen 없이 JSON 응답을 수집한다.
 class JsonResponse extends Writable {
@@ -33,7 +33,7 @@ function fixture(t: TestContext) {
   const bob = createUser(db, { handle: "bob", displayName: "보비", passwordHash: "unused" })!;
   const token = issueToken(db, bob.id);
   const app = createApp({ db });
-  async function get(path: string, authorization = token) {
+  async function getRaw(path: string, authorization = token) {
     const request = new IncomingMessage(new Socket());
     request.method = "GET";
     request.url = path;
@@ -47,10 +47,34 @@ function fixture(t: TestContext) {
     request.push(null);
     await finished;
     assert.equal(response.headers.get("content-type"), "application/json; charset=utf-8");
-    return { status: response.statusCode, body: JSON.parse(Buffer.concat(response.chunks).toString()) };
+    return { status: response.statusCode, bytes: Buffer.concat(response.chunks) };
   }
-  return { db, alice, bob, get };
+  async function get(path: string, authorization = token) {
+    const { status, bytes } = await getRaw(path, authorization);
+    return { status, body: JSON.parse(bytes.toString()) };
+  }
+  return { db, alice, bob, get, getRaw };
 }
+
+test("방 조회 JSON은 기존 요약 분해 방식과 바이트 단위로 같다", async (t) => {
+  const { db, alice, bob, getRaw } = fixture(t);
+  const room = createRoom(db, {
+    code: "ABC234", name: '한글 "통화방"\n둘째 줄', createdBy: alice.id,
+  }, "2026-01-01T00:00:00.000Z")!;
+  joinRoom(db, room.id, bob.id, "2026-01-01T00:00:00.000Z");
+
+  for (const empty of [false, true]) {
+    if (empty) {
+      leaveRoom(db, room.id, alice.id);
+      leaveRoom(db, room.id, bob.id);
+    }
+    const { members, ...summary } = publicRoomDetails(db, room);
+    const expected = Buffer.from(JSON.stringify({ room: summary, members }));
+    const response = await getRaw(`/v1/rooms/${room.code.toLowerCase()}`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.bytes, expected);
+  }
+});
 
 test("me 라우터: 참여 전·나간 뒤 room은 null, 참여 중에는 기존 방 응답과 같은 공개 요약", async (t) => {
   const { db, alice, bob, get } = fixture(t);

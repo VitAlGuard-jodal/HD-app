@@ -273,8 +273,7 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
       if (!room) throw new HttpError(404, "ROOM_NOT_FOUND", "방을 찾을 수 없습니다.");
 
       if (method === "GET" && !action) {
-        const { members, ...summary } = publicRoomDetails(db, room);
-        json(response, 200, { room: summary, members });
+        json(response, 200, { room: publicRoom(room), members: listRoomMembers(db, room.id) });
         return;
       }
       if (method === "POST" && action === "join") {

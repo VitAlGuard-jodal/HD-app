@@ -32,14 +32,14 @@ class AppServices {
   Future<void> initialize() async {
     await mic.initialize();
     await calls.initialize();
-    final code = calls.state.roomCode;
-    if (code != null) {
-      if (calls.state.selfHandle == store.handle) {
-        await rooms.open(code);
-      } else {
-        await calls.stop();
-      }
+    // A surviving native service is not consent to restart capture in a new
+    // Dart process. /v1/me will expose membership as an explicit-entry card.
+    if (calls.state.roomCode != null ||
+        calls.state.isActive ||
+        calls.state.isStarting) {
+      await calls.stop();
     }
+    calls.pendingOpenRoom = null;
   }
 
   Future<void> logout() async {

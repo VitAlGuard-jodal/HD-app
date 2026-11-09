@@ -24,6 +24,13 @@ class ApiClient {
   final Duration _sseSilenceTimeout;
   final HttpClient Function() _clientFactory;
   static const _timeout = Duration(seconds: 15);
+  static const _timeoutError = ApiException(0, 'timeout', '서버 응답 없음');
+  static Never _onTimeout() => throw _timeoutError;
+  static void _onStreamTimeout(EventSink<List<int>> sink) {
+    sink.addError(_timeoutError);
+    sink.close();
+  }
+
   // 서버 ping 15초 + 여유 5초
   static const sseSilenceTimeout = Duration(seconds: 20);
 
@@ -142,6 +149,7 @@ class ApiClient {
           request.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
           final response = await request.close().timeout(
             const Duration(seconds: 35),
+            onTimeout: _onTimeout,
           );
           if (cancelled) break;
           if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -153,7 +161,7 @@ class ApiClient {
           final parser = SseParser();
           // 타임아웃을 원시 바이트에 적용하여 : ping도 연결 생존으로 센다.
           final lines = response
-              .timeout(_sseSilenceTimeout)
+              .timeout(_sseSilenceTimeout, onTimeout: _onStreamTimeout)
               .transform(utf8.decoder)
               .transform(const LineSplitter());
           await for (final line in lines) {
@@ -234,6 +242,9 @@ class ApiClient {
         final transient =
             error is SocketException ||
             error is TimeoutException ||
+            error is ApiException &&
+                error.status == 0 &&
+                error.code == 'timeout' ||
             error is HttpException;
         if (!retryable || attempt >= 1 || !transient) rethrow;
         await Future<void>.delayed(retryDelay);
@@ -256,11 +267,14 @@ class ApiClient {
         );
         request.add(utf8.encode(jsonEncode(body)));
       }
-      final response = await request.close().timeout(_timeout);
+      final response = await request.close().timeout(
+        _timeout,
+        onTimeout: _onTimeout,
+      );
       if (response.statusCode < 200 || response.statusCode >= 300)
         throw await _responseError(response);
       final text = await response
-          .timeout(_timeout)
+          .timeout(_timeout, onTimeout: _onStreamTimeout)
           .transform(utf8.decoder)
           .join();
       if (response.statusCode == 204 || text.trim().isEmpty) return null;
@@ -291,7 +305,7 @@ class ApiClient {
     );
     final request = await client
         .openUrl(method, Uri.parse('$base$path'))
-        .timeout(_timeout);
+        .timeout(_timeout, onTimeout: _onTimeout);
     request.followRedirects = false;
     request.headers.set(HttpHeaders.acceptHeader, 'application/json');
     final token = tokenStore.token;
@@ -302,7 +316,7 @@ class ApiClient {
 
   Future<ApiException> _responseError(HttpClientResponse response) async {
     final text = await response
-        .timeout(_timeout)
+        .timeout(_timeout, onTimeout: _onStreamTimeout)
         .transform(utf8.decoder)
         .join();
     JsonMap? json;

@@ -79,6 +79,7 @@ class RoomSession extends ChangeNotifier {
     mediaEngine.connectionChanged = (connection, message) {
       mediaConnection = connection;
       mediaError = message;
+      // The engine emits failed only after every peer exhausts recovery.
       if (connection == MediaConnectionState.failed && !joiningCall) {
         _scheduleRetry();
       } else if (connection == MediaConnectionState.connected) {
@@ -98,6 +99,15 @@ class RoomSession extends ChangeNotifier {
   late final StreamSubscription<Map<String, MeshPeerState>> _peerSubscription;
   Map<String, MeshPeerState> get peerStates => mediaEngine.peerStates;
   RoomState state = const RoomState();
+  Room? _restorableRoom;
+  Room? get restorableRoom => _restorableRoom;
+
+  void setRestorableRoom(Room? room) {
+    if (_disposed || state.code != null) return;
+    _restorableRoom = room;
+    _notify();
+  }
+
   CallState get call => callService.state;
   bool muted = false;
   bool speakerphone = true;
@@ -107,6 +117,7 @@ class RoomSession extends ChangeNotifier {
   Timer? _retryTimer;
   bool _wantCall = false;
   bool _interrupted = false;
+  bool get interrupted => micRouter.audioInterrupted;
   int? _lastSystemVolume;
   bool _settingVolume = false;
   Future<void> _volumeQueue = Future<void>.value();
@@ -149,17 +160,14 @@ class RoomSession extends ChangeNotifier {
   int _callGeneration = 0;
 
   void _setLocalSpeaking(bool speaking) {
-    final value = speaking && !muted && call.isActive && !state.isLeaving;
+    final value =
+        speaking && !muted && !interrupted && call.isActive && !state.isLeaving;
     if (_localSpeaking == value || _disposed) return;
     _localSpeaking = value;
     _notify();
   }
 
-  Future<void> open(
-    String code, {
-    bool force = false,
-    VoidCallback? onReady,
-  }) async {
+  Future<void> open(String code, {bool force = false}) async {
     if (state.isLeaving) return;
     if (!force && state.code == code && _subscription != null) return;
     if (state.code != null && state.code != code)
@@ -174,6 +182,7 @@ class RoomSession extends ChangeNotifier {
     await _subscription?.cancel();
     _subscription = null;
     if (!_current(generation)) return;
+    _restorableRoom = null;
     state = state.code == code
         ? state.copyWith(error: null, isConnected: false)
         : RoomState(code: code);
@@ -182,7 +191,6 @@ class RoomSession extends ChangeNotifier {
     if (!_current(generation)) return;
     // Wait for hello.members before restoring the media session.
     _eventQueue = Future<void>.value();
-    var reportedReady = false;
     _subscription = api
         .subscribeEvents(code)
         .listen(
@@ -192,13 +200,6 @@ class RoomSession extends ChangeNotifier {
                 .then((_) async {
                   if (!_current(generation)) return;
                   await _onEvent(code, event, generation);
-                  if (_current(generation) &&
-                      event is Hello &&
-                      state.isConnected &&
-                      !reportedReady) {
-                    reportedReady = true;
-                    onReady?.call();
-                  }
                 })
                 .catchError((Object error) {
                   if (_current(generation))
@@ -241,6 +242,11 @@ class RoomSession extends ChangeNotifier {
           await api.joinRoom(code);
           if (!_current(generation)) return;
           await _refresh(code, generation);
+          if (_current(generation) && _mediaJoined) {
+            await mediaEngine.reconcilePeers(
+              state.members.map((member) => member.handle).toList(),
+            );
+          }
         } catch (error) {
           if (!_current(generation)) return;
           if (_isAccessError(error)) {
@@ -252,8 +258,14 @@ class RoomSession extends ChangeNotifier {
       case Hello():
         await _setMembers(event.members);
         if (!_current(generation)) return;
-        // A new SSE hello must not rebuild an already running mesh.
+        // Keep live peers; repair only offers lost while SSE was unavailable.
         state = state.copyWith(isConnected: true, error: null);
+        if (_mediaJoined) {
+          await mediaEngine.reconcilePeers(
+            state.members.map((member) => member.handle).toList(),
+          );
+          if (!_current(generation)) return;
+        }
         _maybeAutoJoin();
       case MemberJoined():
         await _refresh(code, generation);
@@ -529,7 +541,7 @@ class RoomSession extends ChangeNotifier {
   }
 
   Future<void> setCallVolume(int value) {
-    callVolume = value.clamp(0, 200);
+    callVolume = value.clamp(0, 100);
     _notify();
     final volume = callVolume;
     final operation = _volumeQueue.then((_) async {
@@ -554,6 +566,7 @@ class RoomSession extends ChangeNotifier {
     speakerphone = outputRoute == OutputRoute.speaker;
     if (_interrupted != micRouter.audioInterrupted) {
       _interrupted = micRouter.audioInterrupted;
+      if (_interrupted) _setLocalSpeaking(false);
       mediaEngine.setInterrupted(_interrupted);
     }
     if (_wantCall &&
@@ -628,6 +641,7 @@ class RoomSession extends ChangeNotifier {
 
   Future<void> forget() async {
     ++_generation;
+    _restorableRoom = null;
     await _subscription?.cancel();
     _subscription = null;
     await leaveCall();

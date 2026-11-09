@@ -5,9 +5,66 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unavo/audio/mic_router.dart';
 import 'package:unavo/auth/session_store.dart';
 import 'package:unavo/call/call_service.dart';
+import 'package:unavo/call/media_engine.dart';
+import 'package:unavo/core/app_services.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('새 프로세스는 남아 있는 네이티브 통화를 정리하고 방을 자동으로 열지 않는다', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    SharedPreferences.setMockInitialValues({
+      'token': 'test',
+      'handle': 'alice',
+    });
+    final services = AppServices(
+      SessionStore(await SharedPreferences.getInstance()),
+      mediaEngine: NoopMediaEngine(),
+    );
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final invoked = <String>[];
+    messenger.setMockMethodCallHandler(
+      MicRouter.channel,
+      (call) async => switch (call.method) {
+        'getState' => {'level': 0.0},
+        'permissions' => {'microphone': true},
+        'getOutputRoute' => {'route': 'speaker'},
+        _ => null,
+      },
+    );
+    messenger.setMockMethodCallHandler(CallService.channel, (call) async {
+      invoked.add(call.method);
+      return call.method == 'getState'
+          ? {'roomCode': 'ABC123', 'selfHandle': 'alice', 'isActive': true}
+          : null;
+    });
+    const events = [
+      MethodChannel('unavo/audio/levels'),
+      MethodChannel('unavo/audio/routes'),
+      MethodChannel('unavo/call/events'),
+    ];
+    for (final channel in events) {
+      messenger.setMockMethodCallHandler(channel, (_) async => null);
+    }
+    addTearDown(() async {
+      services.dispose();
+      await Future<void>.delayed(Duration.zero);
+      for (final channel in [
+        MicRouter.channel,
+        CallService.channel,
+        ...events,
+      ]) {
+        messenger.setMockMethodCallHandler(channel, null);
+      }
+    });
+    await services.initialize();
+    expect(invoked, ['getState', 'stop']);
+    expect(services.rooms.state.code, isNull);
+    expect(services.rooms.joiningCall, isFalse);
+    expect(services.calls.state.isActive, isFalse);
+  });
 
   test('iOS는 Android와 같은 오디오·통화 채널 계약을 사용한다', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;

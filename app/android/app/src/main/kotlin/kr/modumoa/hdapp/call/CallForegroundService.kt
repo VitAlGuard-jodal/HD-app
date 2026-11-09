@@ -83,7 +83,6 @@ class CallForegroundService : Service() {
                             app.micRouter.apply(chosen)
                             if (app.callState.value.isStopping || sequence != app.callSequence) return@launch
                             app.callState.value = CallState(roomCode = code, selfHandle = handle, isActive = true)
-                            app.setSpeakerphone(true)
                             notificationJob?.cancel()
                             notificationJob = scope.launch {
                                 app.callMuted.collect {
@@ -93,17 +92,26 @@ class CallForegroundService : Service() {
                             }
                             microphoneObserver = scope.launch {
                                 app.micRouter.state.collect { mic ->
-                                    if (!mic.isRecording && mic.error != null) {
-                                        app.callState.update { it.copy(error = mic.error) }
-                                        // Keep the already-started FGS available for reconnect.
-                                        app.publishOutput()
+                                    // 라우터는 경로 오류를 한 번 복구한 뒤 최종 실패만 게시한다.
+                                    // 영구 포커스 손실은 복구 없이 즉시 이 경로로 종료한다.
+                                    if (!mic.isCallActive && mic.error != null) {
+                                        stopWithError(mic.error)
                                     }
                                 }
                             }
                         } catch (cancelled: CancellationException) { throw cancelled }
                         catch (error: Exception) {
-                            app.callState.update { it.copy(error = error.message ?: "통화 참여에 실패했습니다.") }
-                            stopSelf()
+                            stopWithError(error.message ?: "통화 참여에 실패했습니다.")
+                            return@launch
+                        }
+                        if (app.callState.value.isStopping || sequence != app.callSequence) return@launch
+                        // 출력 경로 실패는 Dart의 outputError로만 전달하고 통화는 유지한다.
+                        try {
+                            app.setSpeakerphone(true)
+                        } catch (error: Exception) {
+                            app.outputState.update {
+                                it + ("error" to (error.message ?: "출력 장치를 변경하지 못했습니다."))
+                            }
                         }
                     }
                 } catch (error: Exception) {
@@ -132,6 +140,14 @@ class CallForegroundService : Service() {
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
+    }
+
+    private fun stopWithError(message: String) {
+        if (sequence != app.callSequence || app.callState.value.isStopping) return
+        app.callState.update {
+            it.copy(isStarting = false, isActive = false, isStopping = true, error = message)
+        }
+        stopSelf()
     }
 
     private fun showForegroundNotification(notification: Notification) {

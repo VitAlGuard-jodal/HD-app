@@ -66,7 +66,7 @@ class WebRtcMediaEngine extends MediaEngine {
   Future<void> _volumeWrites = Future<void>.value();
   bool _pollingStats = false;
   bool _listeningToMic = false;
-  bool _signalingFailed = false;
+  String? _credentialError;
   MediaConnectionState _localConnection = MediaConnectionState.idle;
   String? _localError;
   bool _acceptingSignals = false;
@@ -78,6 +78,14 @@ class WebRtcMediaEngine extends MediaEngine {
     _members = List.of(handles);
     await _mesh?.updateMembers(_members);
     _publishState();
+  }
+
+  @override
+  Future<void> reconcilePeers(List<String> handles) async {
+    final generation = _generation;
+    _members = List.of(handles);
+    await _starting;
+    if (_current(generation)) await _mesh?.reconcile(_members);
   }
 
   @override
@@ -197,7 +205,7 @@ class WebRtcMediaEngine extends MediaEngine {
         if (_current(generation)) {
           _acceptingSignals = false;
           _setLocalConnection(
-            MediaConnectionState.failed,
+            MediaConnectionState.idle,
             exceptionMessage(error, '음성 연결을 시작하지 못했습니다.'),
           );
           rethrow;
@@ -251,10 +259,8 @@ class WebRtcMediaEngine extends MediaEngine {
           unawaited(
             setVolume(_playbackVolume).catchError((Object error) {
               if (_current(generation)) {
-                _setLocalConnection(
-                  MediaConnectionState.failed,
-                  exceptionMessage(error, '통화 음량을 적용하지 못했습니다.'),
-                );
+                _localError = exceptionMessage(error, '통화 음량을 적용하지 못했습니다.');
+                _publishState();
               }
             }),
           );
@@ -306,10 +312,8 @@ class WebRtcMediaEngine extends MediaEngine {
 
   @override
   Future<void> setVolume(double volume) {
-    // Both native RTCAudioSource.volume and org.webrtc.AudioTrack.setVolume
-    // accept gain 0..10. 100% is unity (1); the phone slider allows up to
-    // 200% (+6 dB) because the iPhone call-mode speaker is quiet.
-    _playbackVolume = volume.clamp(0, 2);
+    // Unity is the ceiling: libwebrtc saturates amplified samples near 0 dBFS.
+    _playbackVolume = volume.clamp(0, 1);
     final operation = _volumeWrites.then((_) async {
       for (final peer in _peers.values.toList()) {
         for (final track in peer.audioTracks.toList()) {
@@ -333,10 +337,8 @@ class WebRtcMediaEngine extends MediaEngine {
         })
         .catchError((Object error) {
           if (_current(generation) && _mesh != null) {
-            _setLocalConnection(
-              MediaConnectionState.failed,
-              exceptionMessage(error, '통화 마이크를 변경하지 못했습니다.'),
-            );
+            _localError = exceptionMessage(error, '통화 마이크를 변경하지 못했습니다.');
+            _publishState();
           }
         });
   }
@@ -389,20 +391,15 @@ class WebRtcMediaEngine extends MediaEngine {
       }
       await _mesh?.restartIce();
       if (!_current(generation)) return;
-      if (_signalingFailed) {
-        _localConnection = MediaConnectionState.connected;
-        _localError = null;
-      }
-      _signalingFailed = false;
+      _credentialError = null;
       _scheduleCredentials(credentials, requestedAt, generation);
       _publishState();
     } catch (_) {
       if (!_current(generation) || _mesh == null) return;
-      _signalingFailed = true;
-      _setLocalConnection(
-        MediaConnectionState.failed,
-        '통화 연결 정보를 갱신하지 못해 다시 시도합니다.',
-      );
+      // Existing allocations can still carry audio. Only this timer retries;
+      // a warning must never trigger RoomSession's leave/join recovery.
+      _credentialError = '통화 연결 정보를 갱신하지 못해 다시 시도합니다.';
+      _publishState();
       final remaining =
           _credentialsExpireAt?.difference(DateTime.now()).inMilliseconds ?? 0;
       final retry = remaining > 0 ? (remaining ~/ 2).clamp(250, 5000) : 5000;
@@ -480,7 +477,12 @@ class WebRtcMediaEngine extends MediaEngine {
   void _publishState() {
     publishPeerStates(_states);
     final state = receiveConnectionState(_localConnection, _states.values);
-    connectionChanged?.call(state, _localError);
+    connectionChanged?.call(
+      state,
+      state == MediaConnectionState.failed
+          ? '모든 참여자의 음성 연결 복구에 실패했습니다.'
+          : _localError ?? _credentialError,
+    );
   }
 
   void _setLocalConnection(MediaConnectionState state, [String? message]) {
@@ -548,7 +550,7 @@ class WebRtcMediaEngine extends MediaEngine {
             _setSpeaking(handle, false);
           }
           _selectedInput = null;
-          _signalingFailed = false;
+          _credentialError = null;
         }
       }
     }
@@ -570,7 +572,9 @@ class _WebRtcPeer implements MeshPeer {
 
   @override
   Future<Map<String, Object?>> createOffer({bool iceRestart = false}) async {
-    final offer = await pc.createOffer(offerConstraints(iceRestart: iceRestart));
+    final offer = await pc.createOffer(
+      offerConstraints(iceRestart: iceRestart),
+    );
     offer.sdp = stripTransportCc(offer.sdp!);
     await pc.setLocalDescription(offer);
     return Map<String, Object?>.from(offer.toMap() as Map);

@@ -3,6 +3,8 @@ import 'dart:async';
 const meshMemberLimit = 4;
 const meshCapacityReason = '음성 통화는 먼저 입장한 4명까지 참여할 수 있습니다.';
 const meshRecoveryTimeout = Duration(seconds: 8);
+const meshOfferTimeout = Duration(seconds: 8);
+const _maxPeerRetries = 3;
 
 enum MeshPeerState { connecting, connected, failed, closed }
 
@@ -92,6 +94,29 @@ class MeshCoordinator {
     });
   }
 
+  // On SSE return, either side may have missed the newcomer's first offer.
+  // Keep live peers and negotiations; the usual glare rule resolves new offers.
+  Future<void> reconcile(Iterable<String> members) async {
+    await updateMembers(members);
+    await _enqueue(() async {
+      for (final handle in admitted(_members)) {
+        if (!_allows(handle)) continue;
+        final slot = _peers[handle];
+        if (slot != null &&
+            (slot.state == MeshPeerState.connected ||
+                slot.offerPending ||
+                slot.recovering ||
+                slot.offerTimer != null)) {
+          continue;
+        }
+        await _forPeer(handle, () async {
+          await _drop(handle, replacing: true);
+          await _offer(handle);
+        });
+      }
+    });
+  }
+
   Future<void> onSignal(String from, String kind, Object? payload) => _enqueue(
     () => _forPeer(from, () async {
       if (!_allows(from) || payload is! Map) return;
@@ -105,8 +130,15 @@ class MeshCoordinator {
           if (data['type'] != 'offer' || data['sdp'] is! String) return;
           var slot = _peers[from];
           final recoveryAttempts = slot?.retryAttempts ?? 0;
+          final offerAttempts = slot?.offerAttempts ?? 0;
           final recovering = slot?.recovering ?? false;
           if (slot?.id == id && slot!.remoteDescription) return;
+          if (slot?.state == MeshPeerState.failed) {
+            // A terminal local offer may still be installed in native SDP.
+            // A new remote negotiation needs a fresh peer, not that stale SDP.
+            await _drop(from, replacing: true);
+            slot = null;
+          }
           if (slot != null && slot.offerPending) {
             if (selfHandle.compareTo(from) < 0) {
               // Lexicographically smaller handle keeps its local offer.
@@ -129,11 +161,14 @@ class MeshCoordinator {
               return;
             }
             // Recreate instead of relying on native SDP rollback support.
-            await _drop(from);
+            await _drop(from, replacing: true);
             slot = null;
           }
           if (slot?.peer == null) slot = await _newPeer(from);
           if (slot == null || !_current(from, slot)) return;
+          slot.offerTimer?.cancel();
+          slot.offerTimer = null;
+          slot.offerAttempts = offerAttempts;
           // Glare can replace the native peer, but cannot reset its retry
           // budget or leave a silent recovery without a response deadline.
           if (recovering) {
@@ -164,6 +199,8 @@ class MeshCoordinator {
           if (!_current(from, slot)) return;
           slot.offerPending = false;
           slot.remoteDescription = true;
+          slot.offerTimer?.cancel();
+          slot.offerTimer = null;
           await _flushIce(from, slot);
         case 'ice':
           if (data['candidate'] is! String) return;
@@ -190,12 +227,18 @@ class MeshCoordinator {
     for (final handle in _peers.keys.toList()) {
       if (_closed) return;
       final slot = _peers[handle]!;
-      if (slot.recovering || slot.state == MeshPeerState.failed) continue;
+      if (slot.recovering ||
+          slot.state == MeshPeerState.failed ||
+          slot.peer == null && slot.offerTimer != null)
+        continue;
       await _forPeer(handle, () async {
         if (_peers[handle]!.offerPending) {
           // An unanswered offer may contain an allocation using old TURN
           // credentials. Rebuild it so a late join never replays expired ICE.
-          await _drop(handle);
+          final attempts = slot.offerAttempts;
+          await _drop(handle, replacing: true);
+          if (!_allows(handle)) return;
+          _peers[handle] = _PeerSlot()..offerAttempts = attempts;
           await _offer(handle);
         } else if (selfHandle.compareTo(handle) < 0) {
           await _offer(handle, iceRestart: true);
@@ -219,7 +262,59 @@ class MeshCoordinator {
     if (_current(handle, slot)) {
       slot.localOffer = offer;
       await sendSignal(handle, 'offer', {...offer, 'negotiationId': id});
+      _scheduleOfferTimeout(handle, slot, id);
     }
+  }
+
+  void _scheduleOfferTimeout(String handle, _PeerSlot slot, String id) {
+    // ICE recovery already has its own bounded 2/4/8-second deadlines.
+    if (!_current(handle, slot) || !slot.offerPending || slot.recovering)
+      return;
+    slot.offerTimer?.cancel();
+    late final Timer deadline;
+    deadline = Timer(meshOfferTimeout, () {
+      unawaited(
+        _enqueue(() async {
+          if (!_current(handle, slot) ||
+              !slot.offerPending ||
+              slot.id != id ||
+              !identical(slot.offerTimer, deadline))
+            return;
+          slot.offerTimer = null;
+          if (slot.offerAttempts >= _maxPeerRetries) {
+            slot.retryAttempts = _maxPeerRetries;
+            _failPeer(handle, slot);
+            return;
+          }
+          final attempts = slot.offerAttempts + 1;
+          await _drop(handle, replacing: true);
+          if (!_allows(handle)) return;
+          final next = _PeerSlot()..offerAttempts = attempts;
+          _peers[handle] = next;
+          _publishPeer(handle, next, MeshPeerState.connecting);
+          // Each unanswered peer closes at 8s. Additional backoff makes offer
+          // send intervals 8/16/24s; the final offer also gets exactly 8s to answer.
+          if (attempts == 1) {
+            await _forPeer(handle, () => _offer(handle));
+          } else {
+            late final Timer backoff;
+            backoff = Timer(meshOfferTimeout * (attempts - 1), () {
+              unawaited(
+                _enqueue(() async {
+                  if (_current(handle, next) &&
+                      identical(next.offerTimer, backoff)) {
+                    next.offerTimer = null;
+                    await _forPeer(handle, () => _offer(handle));
+                  }
+                }).catchError((Object _) {}),
+              );
+            });
+            next.offerTimer = backoff;
+          }
+        }).catchError((Object _) {}),
+      );
+    });
+    slot.offerTimer = deadline;
   }
 
   Future<_PeerSlot?> _newPeer(String handle) async {
@@ -249,6 +344,9 @@ class MeshCoordinator {
         (state) {
           if (!_current(handle, slot)) return;
           if (state == MeshPeerState.connected) {
+            slot.offerTimer?.cancel();
+            slot.offerTimer = null;
+            slot.offerAttempts = 0;
             slot.retryTimer?.cancel();
             slot.retryTimer = null;
             slot.retryAttempts = 0;
@@ -257,7 +355,7 @@ class MeshCoordinator {
           } else if (state == MeshPeerState.failed ||
               state == MeshPeerState.closed) {
             _failPeer(handle, slot);
-          } else if (slot.recovering || slot.retryAttempts < 3) {
+          } else if (slot.recovering || slot.retryAttempts < _maxPeerRetries) {
             _publishPeer(handle, slot, state);
           }
         },
@@ -292,10 +390,13 @@ class MeshCoordinator {
 
   void _failPeer(String handle, _PeerSlot slot) {
     if (!_current(handle, slot)) return;
-    if (slot.retryAttempts >= 3) {
+    slot.offerTimer?.cancel();
+    slot.offerTimer = null;
+    if (slot.retryAttempts >= _maxPeerRetries) {
       slot.retryTimer?.cancel();
       slot.retryTimer = null;
       slot.recovering = false;
+      slot.offerPending = false;
       _publishPeer(handle, slot, MeshPeerState.failed);
       return;
     }
@@ -307,7 +408,7 @@ class MeshCoordinator {
   void _schedulePeerRetry(String handle, _PeerSlot slot) {
     if (!_current(handle, slot) || !slot.recovering || slot.retryTimer != null)
       return;
-    final exhausted = slot.retryAttempts >= 3;
+    final exhausted = slot.retryAttempts >= _maxPeerRetries;
     final delay = exhausted
         ? meshRecoveryTimeout
         : Duration(seconds: 2 << slot.retryAttempts);
@@ -315,8 +416,7 @@ class MeshCoordinator {
       slot.retryTimer = null;
       if (!_current(handle, slot) || !slot.recovering) return;
       if (exhausted) {
-        slot.recovering = false;
-        _publishPeer(handle, slot, MeshPeerState.failed);
+        _failPeer(handle, slot);
         return;
       }
       unawaited(
@@ -357,16 +457,25 @@ class MeshCoordinator {
     if (_ignored.length > 128) _ignored.remove(_ignored.first);
   }
 
-  Future<void> _drop(String handle) async {
+  Future<void> _drop(String handle, {bool replacing = false}) async {
     final slot = _peers.remove(handle);
     if (slot == null) return;
     slot.retryTimer?.cancel();
+    slot.offerTimer?.cancel();
     slot.recovering = false;
     if (slot.id != null) _ignore('$handle/${slot.id}');
+    if (replacing) {
+      // Keep a connecting placeholder while native close is awaited. Otherwise
+      // the remaining failed peers could briefly look like a terminal mesh, or
+      // a concurrent member removal could miss this slot and leave stale state.
+      final replacement = _PeerSlot();
+      _peers[handle] = replacement;
+      _publishPeer(handle, replacement, MeshPeerState.connecting);
+    }
     try {
       await slot.peer?.close();
     } finally {
-      onPeerState?.call(handle, MeshPeerState.closed);
+      if (!replacing) onPeerState?.call(handle, MeshPeerState.closed);
     }
   }
 
@@ -376,6 +485,7 @@ class MeshCoordinator {
     _closed = true; // Invalidate in-flight factory/SDP work immediately.
     for (final slot in _peers.values) {
       slot.retryTimer?.cancel();
+      slot.offerTimer?.cancel();
       slot.recovering = false;
     }
     return _closeFuture = _enqueue(() async {
@@ -419,6 +529,8 @@ class _PeerSlot {
   MeshPeer? peer;
   MeshPeerState state = MeshPeerState.connecting;
   Timer? retryTimer;
+  Timer? offerTimer;
+  int offerAttempts = 0;
   int retryAttempts = 0;
   bool recovering = false;
   String? id;
