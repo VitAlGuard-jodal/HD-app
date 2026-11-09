@@ -26,6 +26,11 @@ class RnnoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProcessing {
     private var lastVad = 0.0f
     private var handle = 0L
     @Volatile private var processing = true
+    @Volatile var floorEnabled = true
+        private set
+    private val softFloor = SoftFloor()
+    private val floorInput = FloatArray(SoftFloor.FRAME_SIZE)
+    private val floorOutput = FloatArray(SoftFloor.FRAME_SIZE)
     private var dump: CaptureDump? = null
     // 덤프를 교체해도 writer는 하나만 사용하며, 유휴 상태가 되면 스레드를 정리한다.
     private val dumpWriter = ThreadPoolExecutor(
@@ -35,6 +40,10 @@ class RnnoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProcessing {
 
     fun setProcessing(value: Boolean) {
         processing = value
+    }
+
+    fun setFloorEnabled(value: Boolean) {
+        floorEnabled = value
     }
 
     fun startDump(dir: File, seconds: Int) {
@@ -89,15 +98,37 @@ class RnnoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProcessing {
             val processAudio = processing
             val activeDump = dump
             val dumpFrame = activeDump?.captureInput(buffer, numFrames, sampleRate, processAudio)
-            if (!processAudio || handle == 0L || numFrames != 480) {
+            if (!processAudio || handle == 0L || numFrames != SoftFloor.FRAME_SIZE) {
                 bypassed++
             } else {
-                val vad = RnnoiseBridge.process(handle, buffer, numFrames)
-                if (vad >= 0.0f) {
-                    processed++
-                    lastVad = vad
-                } else {
-                    bypassed++
+                val applyFloor = floorEnabled
+                val originalOrder = buffer.order()
+                try {
+                    if (applyFloor) {
+                        // 절대 인덱스로 읽고 써서 position을 보존하고 프레임별 할당을 피한다.
+                        buffer.order(ByteOrder.nativeOrder())
+                        for (i in 0 until numFrames) {
+                            floorInput[i] = buffer.getFloat(i * 4)
+                        }
+                    }
+                    val vad = RnnoiseBridge.process(handle, buffer, numFrames)
+                    if (vad >= 0.0f) {
+                        processed++
+                        lastVad = vad
+                        if (applyFloor) {
+                            for (i in 0 until numFrames) {
+                                floorOutput[i] = buffer.getFloat(i * 4)
+                            }
+                            softFloor.apply(floorInput, floorOutput, numFrames)
+                            for (i in 0 until numFrames) {
+                                buffer.putFloat(i * 4, floorOutput[i])
+                            }
+                        }
+                    } else {
+                        bypassed++
+                    }
+                } finally {
+                    buffer.order(originalOrder)
                 }
             }
             if (activeDump != null && dumpFrame != null) {
@@ -125,6 +156,7 @@ class RnnoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProcessing {
             "processed" to processed,
             "bypassed" to bypassed,
             "vad" to lastVad.toDouble(),
+            "floor" to floorEnabled,
             "dumpPath" to (dump?.path ?: ""),
             "dumpBytes" to (dump?.bytes ?: 0L),
             "dumpDropped" to (dump?.dropped ?: 0L),
@@ -158,6 +190,7 @@ class RnnoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProcessing {
     }
 
     private fun releaseLocked() {
+        softFloor.reset()
         if (handle != 0L) {
             RnnoiseBridge.destroy(handle)
             handle = 0L

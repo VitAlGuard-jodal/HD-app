@@ -59,6 +59,7 @@ class UnavoNoisePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         } else {
             call.argument<Int>("dumpSeconds") ?: 0
         }
+        val floor = call.argument<Boolean>("floor") ?: true
 
         val controller = FlutterWebRTCPlugin.sharedSingleton?.audioProcessingController
         if (controller == null) {
@@ -80,6 +81,7 @@ class UnavoNoisePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         } else {
             detachProcessor()
         }
+        processor.setFloorEnabled(floor)
         processor.setProcessing(enabled)
         processingEnabled = enabled
         if (dumpSeconds > 0) {

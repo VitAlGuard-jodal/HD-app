@@ -12,15 +12,17 @@ class UnavoNoise {
     return result['enabled'] == true;
   }
 
-  /// RNNoise 처리와 캡처 PCM 덤프 시간을 설정한다(0초이면 덤프하지 않음).
+  /// RNNoise 처리, 소프트 바닥 혼합, 캡처 PCM 덤프 시간을 설정한다(0초이면 덤프하지 않음).
   static Future<Map<String, Object?>> configure({
     required bool enabled,
     int dumpSeconds = 0,
+    bool floor = true,
   }) async {
     try {
       return await _channel.invokeMapMethod<String, Object?>('configure', {
             'enabled': enabled,
             'dumpSeconds': dumpSeconds,
+            'floor': floor,
           }) ??
           const <String, Object?>{'supported': false};
     } on MissingPluginException {
@@ -40,7 +42,7 @@ class UnavoNoise {
     }
   }
 
-  /// supported, enabled, sampleRate, channels, frames, processed, bypassed, vad, exportPort.
+  /// supported, enabled, floor, sampleRate, channels, frames, processed, bypassed, vad, exportPort.
   /// dumpPath, dumpBytes, dumpDropped(입력 파일 경로, 기록한 입력 바이트, 누락 10 ms 블록 수).
   static Future<Map<String, Object?>> status() async {
     try {

@@ -17,6 +17,10 @@ const remoteSpeakingThreshold = 0.02;
 const remoteSpeakingInterval = Duration(milliseconds: 500);
 const _icePolicy = String.fromEnvironment('UNAVO_ICE_POLICY');
 const _noiseFilter = String.fromEnvironment('UNAVO_NOISE', defaultValue: 'on');
+const _noiseFloor = String.fromEnvironment(
+  'UNAVO_NOISE_FLOOR',
+  defaultValue: 'on',
+);
 const _apm = String.fromEnvironment('UNAVO_APM', defaultValue: 'on');
 const _captureDumpSeconds = int.fromEnvironment(
   'UNAVO_CAPTURE_DUMP',
@@ -123,11 +127,12 @@ class WebRtcMediaEngine extends MediaEngine {
         if (!_current(generation)) return;
         try {
           debugPrint(
-            '[noise] filter=$_noiseFilter apm=$_apm dump=${_captureDumpSeconds}s export=$_captureExportPort',
+            '[noise] filter=$_noiseFilter apm=$_apm dump=${_captureDumpSeconds}s export=$_captureExportPort floor=$_noiseFloor',
           );
           await UnavoNoise.configure(
             enabled: _noiseFilter != 'off',
             dumpSeconds: _captureDumpSeconds,
+            floor: _noiseFloor != 'off',
           );
           if (_captureExportPort > 0) {
             final result = await UnavoNoise.exportDump(

@@ -32,10 +32,12 @@ void main() {
     expect(calls[0].arguments, <String, Object?>{
       'enabled': true,
       'dumpSeconds': 0,
+      'floor': true,
     });
     expect(calls[1].arguments, <String, Object?>{
       'enabled': false,
       'dumpSeconds': 0,
+      'floor': true,
     });
   });
 
@@ -55,12 +57,24 @@ void main() {
       await UnavoNoise.configure(enabled: false, dumpSeconds: 60),
       response,
     );
+    expect(
+      await UnavoNoise.configure(enabled: false, dumpSeconds: 60, floor: false),
+      response,
+    );
 
-    expect(calls, hasLength(1));
-    expect(calls.single.method, 'configure');
-    expect(calls.single.arguments, <String, Object?>{
+    expect(calls, hasLength(2));
+    for (final call in calls) {
+      expect(call.method, 'configure');
+    }
+    expect(calls[0].arguments, <String, Object?>{
       'enabled': false,
       'dumpSeconds': 60,
+      'floor': true,
+    });
+    expect(calls[1].arguments, <String, Object?>{
+      'enabled': false,
+      'dumpSeconds': 60,
+      'floor': false,
     });
   });
 
