@@ -59,6 +59,7 @@ class RoomSession extends ChangeNotifier {
     callService.onToggleMute = () {
       if (call.isActive || joiningCall) setMuted(!muted);
     };
+    _lastAudioState = _audioState();
     micRouter.addListener(_audioChanged);
     callVolume = store.callVolume;
     callService.addListener(_nativeCallChanged);
@@ -117,6 +118,7 @@ class RoomSession extends ChangeNotifier {
   Timer? _retryTimer;
   bool _wantCall = false;
   bool _interrupted = false;
+  late List<Object?> _lastAudioState;
   bool get interrupted => micRouter.audioInterrupted;
   int? _lastSystemVolume;
   bool _settingVolume = false;
@@ -529,11 +531,6 @@ class RoomSession extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> setSpeakerphone(bool value) async {
-    speakerphone = await micRouter.setSpeakerphone(value);
-    _notify();
-  }
-
   Future<void> cycleOutputRoute() async {
     await micRouter.cycleOutputRoute();
     speakerphone = outputRoute == OutputRoute.speaker;
@@ -562,7 +559,37 @@ class RoomSession extends ChangeNotifier {
     return operation;
   }
 
+  // Compare values: each native meter event rebuilds MicDevice/List objects.
+  // Only MicLevel listens to level/rms/dbfs; they must not rebuild the room.
+  List<Object?> _audioState() {
+    final state = micRouter.state;
+    final selected = state.selected;
+    return [
+      state.mode,
+      (selected?.id, selected?.type, selected?.name, selected?.webrtcDeviceId),
+      state.manualId,
+      state.isRecording,
+      state.isPreviewing,
+      state.isCallActive,
+      state.error,
+      micRouter.permissions.microphone,
+      micRouter.permissions.notifications,
+      micRouter.audioInterrupted,
+      micRouter.resumeFailed,
+      micRouter.outputRoute,
+      micRouter.outputError,
+      micRouter.systemCallVolume,
+      micRouter.systemVolumeWritable,
+      ...micRouter.availableOutputRoutes,
+      for (final device in state.devices)
+        (device.id, device.type, device.name, device.webrtcDeviceId),
+    ];
+  }
+
   void _audioChanged() {
+    final next = _audioState();
+    if (listEquals(_lastAudioState, next)) return;
+    _lastAudioState = next;
     speakerphone = outputRoute == OutputRoute.speaker;
     if (_interrupted != micRouter.audioInterrupted) {
       _interrupted = micRouter.audioInterrupted;

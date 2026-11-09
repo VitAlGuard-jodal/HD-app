@@ -54,9 +54,6 @@ class MeshCoordinator {
   int _offerNumber = 0;
 
   Set<String> get peers => Set.unmodifiable(_peers.keys);
-  Map<String, MeshPeerState> get peerStates => Map.unmodifiable({
-    for (final entry in _peers.entries) entry.key: entry.value.state,
-  });
   Future<void> get idle => _tail;
 
   // The server orders hello.members by joinedAt, then handle for ties.

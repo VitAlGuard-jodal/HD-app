@@ -15,8 +15,11 @@ import 'sdp_munge.dart';
 
 const remoteSpeakingThreshold = 0.02;
 const remoteSpeakingInterval = Duration(milliseconds: 500);
+const _statsLog = bool.fromEnvironment('UNAVO_STATS_LOG');
+const _statsLogInterval = Duration(seconds: 5);
 const _icePolicy = String.fromEnvironment('UNAVO_ICE_POLICY');
-const _noiseFilter = String.fromEnvironment('UNAVO_NOISE', defaultValue: 'on');
+// 결정 9-A(2026-11-09): RNNoise 는 생목소리를 잡음으로 지운 실측 때문에 기본 끔. 실험은 --dart-define=UNAVO_NOISE=on.
+const _noiseFilter = String.fromEnvironment('UNAVO_NOISE', defaultValue: 'off');
 const _noiseFloor = String.fromEnvironment(
   'UNAVO_NOISE_FLOOR',
   defaultValue: 'on',
@@ -111,18 +114,10 @@ class WebRtcMediaEngine extends MediaEngine {
           // 안드로이드 캡처를 48 kHz 로 고정한다. 기본(16 kHz)이면 RNNoise 가 통과만 한다.
           // 팩토리 생성 전 첫 flutter_webrtc 호출이어야 반영된다(두 번째부터는 무시).
           await WebRTC.initialize(options: {'audioSampleRate': 48000});
-          await Helper.setAndroidAudioConfiguration(
-            AndroidAudioConfiguration(
-              manageAudioFocus: false,
-              androidAudioMode: AndroidAudioMode.inCommunication,
-              androidAudioStreamType: AndroidAudioStreamType.voiceCall,
-              androidAudioAttributesUsageType:
-                  AndroidAudioAttributesUsageType.voiceCommunication,
-              androidAudioAttributesContentType:
-                  AndroidAudioAttributesContentType.speech,
-            ),
-          );
         }
+        // AppDelegate / UnavoApplication disable flutter_webrtc session
+        // management before registration. Native bridges own category, focus
+        // and output routing, including interruption/device-change recovery.
         if (!_current(generation)) return;
         _local = await navigator.mediaDevices.getUserMedia({
           'audio': {
@@ -153,18 +148,6 @@ class WebRtcMediaEngine extends MediaEngine {
         }
         if (!_current(generation)) return;
         setMuted(_muted);
-        if (defaultTargetPlatform == TargetPlatform.iOS) {
-          await Helper.setAppleAudioConfiguration(
-            AppleAudioConfiguration(
-              appleAudioCategory: AppleAudioCategory.playAndRecord,
-              appleAudioMode: AppleAudioMode.voiceChat,
-              appleAudioCategoryOptions: {
-                AppleAudioCategoryOption.allowBluetooth,
-                AppleAudioCategoryOption.defaultToSpeaker,
-              },
-            ),
-          );
-        }
         await _selectInput(generation);
         if (!_current(generation)) return;
         final mesh = MeshCoordinator(
@@ -344,6 +327,8 @@ class WebRtcMediaEngine extends MediaEngine {
   }
 
   Future<void> _selectInput(int generation) async {
+    // iOS input selection is part of the native session/output policy too.
+    if (defaultTargetPlatform == TargetPlatform.iOS) return;
     final id = micRouter.state.selected?.webrtcDeviceId;
     if (id == null || id == _selectedInput || !_current(generation)) return;
     final devices = await navigator.mediaDevices.enumerateDevices();
@@ -418,7 +403,8 @@ class WebRtcMediaEngine extends MediaEngine {
         var level = 0.0;
         var localLevel = 0.0;
         try {
-          for (final report in await entry.value.pc.getStats()) {
+          final reports = await entry.value.pc.getStats();
+          for (final report in reports) {
             final values = report.values;
             final audio = (values['kind'] ?? values['mediaType']) == 'audio';
             final remote =
@@ -435,6 +421,17 @@ class WebRtcMediaEngine extends MediaEngine {
                 localLevel = max(localLevel, audioLevel);
               }
             }
+          }
+          // Reuse speaking stats; disabled builds allocate no logger or timer.
+          if (_statsLog &&
+              _current(generation) &&
+              identical(_peers[entry.key], entry.value) &&
+              !entry.value.closed) {
+            entry.value.statsLog!.log(
+              entry.key,
+              reports,
+              _statsTimer?.tick ?? 0,
+            );
           }
         } catch (_) {
           // A peer can close while a stats request is outstanding.
@@ -567,6 +564,7 @@ class _WebRtcPeer implements MeshPeer {
   _WebRtcPeer(this.pc, this.onClosed);
   final RTCPeerConnection pc;
   final void Function() onClosed;
+  final _PeerStatsLog? statsLog = _statsLog ? _PeerStatsLog() : null;
   bool closed = false;
   final Set<MediaStreamTrack> audioTracks = {};
 
@@ -626,5 +624,118 @@ class _WebRtcPeer implements MeshPeer {
         onClosed();
       }
     }
+  }
+}
+
+class _PeerStatsLog {
+  int _lastTick = 0;
+  StatsReport? _previousInbound;
+
+  void log(String handle, List<StatsReport> reports, int tick) {
+    // Timer ticks also account for skipped polls, without a second clock/timer.
+    if ((tick - _lastTick) * remoteSpeakingInterval.inMicroseconds <
+        _statsLogInterval.inMicroseconds) {
+      return;
+    }
+    _lastTick = tick;
+    final byId = {for (final report in reports) report.id: report};
+    Iterable<StatsReport> ofType(String type) =>
+        reports.where((report) => report.type == type);
+    Iterable<StatsReport> audio(String type) => ofType(type).where(
+      (report) =>
+          (report.values['kind'] ?? report.values['mediaType']) == 'audio',
+    );
+    final outbound = audio('outbound-rtp').firstOrNull;
+    final inbound = audio('inbound-rtp').firstOrNull;
+    final remoteReports = audio('remote-inbound-rtp');
+    final remoteInbound =
+        remoteReports
+            .where(
+              (report) =>
+                  report.id == outbound?.values['remoteId'] ||
+                  report.values['localId'] == outbound?.id,
+            )
+            .firstOrNull ??
+        remoteReports.firstOrNull;
+    final transports = ofType('transport');
+    final audioTransport =
+        byId[outbound?.values['transportId'] ?? inbound?.values['transportId']];
+    StatsReport? selectedPair(StatsReport? transport) {
+      final pair = byId[transport?.values['selectedCandidatePairId']];
+      return pair?.type == 'candidate-pair' ? pair : null;
+    }
+
+    final pairs = ofType('candidate-pair');
+    final pair =
+        selectedPair(audioTransport) ??
+        transports.map(selectedPair).whereType<StatsReport>().firstOrNull ??
+        pairs
+            .where((report) => report.values['selected'] == true)
+            .firstOrNull ??
+        pairs
+            .where(
+              (report) =>
+                  report.values['nominated'] == true &&
+                  (report.values['state'] == null ||
+                      report.values['state'] == 'succeeded'),
+            )
+            .firstOrNull;
+    final local = byId[pair?.values['localCandidateId']];
+    final remote = byId[pair?.values['remoteCandidateId']];
+    final delay = _number(inbound?.values['jitterBufferDelay']);
+    final emitted = _number(inbound?.values['jitterBufferEmittedCount']);
+    final jbDelay = delay != null && emitted != null && emitted > 0
+        ? _milliseconds(delay / emitted)
+        : '-';
+
+    debugPrint(
+      '[stats] peer=$handle '
+      'pair=${local?.values['candidateType'] ?? '-'}/${remote?.values['candidateType'] ?? '-'} '
+      'rtt=${_milliseconds(pair?.values['currentRoundTripTime'])} '
+      'out: sent=${_value(outbound, 'packetsSent')} '
+      'bytes=${_value(outbound, 'bytesSent')} '
+      'remoteLost=${_value(remoteInbound, 'packetsLost')} '
+      'remoteFrac=${_value(remoteInbound, 'fractionLost')} '
+      'remoteJit=${_milliseconds(remoteInbound?.values['jitter'])} '
+      'in: recv=${_value(inbound, 'packetsReceived')} '
+      'lost=${_value(inbound, 'packetsLost')} '
+      'jit=${_milliseconds(inbound?.values['jitter'])} '
+      'conceal=${_value(inbound, 'concealedSamples')} '
+      'events=${_value(inbound, 'concealmentEvents')} '
+      'accel=${_value(inbound, 'removedSamplesForAcceleration')} '
+      'decel=${_value(inbound, 'insertedSamplesForDeceleration')} '
+      'jbDelay=$jbDelay '
+      'Δlost=${_delta(inbound, 'packetsLost')} '
+      'Δconceal=${_delta(inbound, 'concealedSamples')} '
+      'Δevents=${_delta(inbound, 'concealmentEvents')}',
+    );
+    _previousInbound = inbound;
+  }
+
+  static num? _number(Object? value) {
+    final number = value is num
+        ? value
+        : value is String
+        ? num.tryParse(value)
+        : null;
+    return number != null && number.isFinite ? number : null;
+  }
+
+  static String _value(StatsReport? report, String key) =>
+      _number(report?.values[key])?.toString() ?? '-';
+
+  static String _milliseconds(Object? value) {
+    final seconds = _number(value);
+    return seconds == null ? '-' : (seconds * 1000).toStringAsFixed(2);
+  }
+
+  String _delta(StatsReport? inbound, String key) {
+    final previous = _previousInbound;
+    if (inbound == null || previous == null || inbound.id != previous.id) {
+      return '-';
+    }
+    final before = _number(previous.values[key]);
+    final after = _number(inbound.values[key]);
+    return before == null || after == null ? '-' : '${after - before}';
   }
 }

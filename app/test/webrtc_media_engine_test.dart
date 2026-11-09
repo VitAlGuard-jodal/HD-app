@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' show StatsReport;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unavo/audio/mic_router.dart';
 import 'package:unavo/auth/session_store.dart';
@@ -16,6 +17,143 @@ import 'package:unavo/net/models.dart';
 import 'package:unavo/room/room_session.dart';
 
 void main() {
+  testWidgets('UNAVO_STATS_LOG는 기존 폴링으로 5초마다 한 줄 통계와 증가분을 기록한다', (
+    tester,
+  ) async {
+    const enabled = bool.fromEnvironment('UNAVO_STATS_LOG');
+    final f = await _Fixture.create(tester);
+    final lines = <String>[];
+    final originalDebugPrint = debugPrint;
+    debugPrint = (message, {wrapWidth}) {
+      if (message != null && message.startsWith('[stats] ')) lines.add(message);
+    };
+    Future<void> poll(int count) async {
+      for (var i = 0; i < count; i++) {
+        await tester.pump(remoteSpeakingInterval);
+      }
+    }
+
+    final inbound = StatsReport('in-audio', 'inbound-rtp', 0, {
+      'mediaType': 'audio',
+      'packetsReceived': 180,
+      'packetsLost': 2,
+      'jitter': 0.006,
+      'concealedSamples': 480,
+      'concealmentEvents': 2,
+      'removedSamplesForAcceleration': 96,
+      'insertedSamplesForDeceleration': 48,
+      'jitterBufferDelay': 2.4,
+      'jitterBufferEmittedCount': 120,
+    });
+    f.native.stats = [
+      // 먼저 등장한 영상 통계를 오디오 통계로 선택해서는 안 된다.
+      for (final type in ['outbound-rtp', 'remote-inbound-rtp', 'inbound-rtp'])
+        StatsReport('video-$type', type, 0, {
+          'kind': 'video',
+          'packetsSent': 999,
+          'packetsLost': 999,
+        }),
+      StatsReport('out-audio', 'outbound-rtp', 0, {
+        'kind': 'audio',
+        'transportId': 'transport',
+        'remoteId': 'remote-audio',
+        'packetsSent': 200,
+        'bytesSent': 32000,
+      }),
+      StatsReport('remote-audio', 'remote-inbound-rtp', 0, {
+        'kind': 'audio',
+        'localId': 'out-audio',
+        'packetsLost': 3,
+        'fractionLost': 0.015,
+        'jitter': '0.004',
+      }),
+      inbound,
+      StatsReport('transport', 'transport', 0, {
+        'selectedCandidatePairId': 'pair',
+      }),
+      // nominated 후보보다 transport가 가리키는 실제 선택 쌍이 우선한다.
+      StatsReport('unused-pair', 'candidate-pair', 0, {
+        'nominated': true,
+        'state': 'succeeded',
+        'currentRoundTripTime': 9,
+      }),
+      StatsReport('pair', 'candidate-pair', 0, {
+        'localCandidateId': 'local',
+        'remoteCandidateId': 'remote',
+        'currentRoundTripTime': 0.042,
+      }),
+      StatsReport('local', 'local-candidate', 0, {'candidateType': 'srflx'}),
+      StatsReport('remote', 'remote-candidate', 0, {'candidateType': 'relay'}),
+    ];
+    const outgoing =
+        '[stats] peer=bob pair=srflx/relay rtt=42.00 '
+        'out: sent=200 bytes=32000 remoteLost=3 remoteFrac=0.015 remoteJit=4.00 ';
+    const first =
+        '${outgoing}in: recv=180 lost=2 jit=6.00 conceal=480 events=2 '
+        'accel=96 decel=48 jbDelay=20.00 Δlost=- Δconceal=- Δevents=-';
+    const second =
+        '${outgoing}in: recv=180 lost=5 jit=6.00 conceal=960 events=3 '
+        'accel=96 decel=48 jbDelay=20.00 Δlost=3 Δconceal=480 Δevents=1';
+    try {
+      await f.open(tester);
+      await f.connect(tester);
+      await poll(9);
+      expect(lines, isEmpty);
+      await poll(1);
+      expect(lines, enabled ? [first] : <String>[]);
+      expect(f.native.statsReads, List.filled(10, 'pc1'));
+
+      // 이전 스냅샷은 보존하고 다음 getStats 응답만 바꾼다.
+      f.native.stats[f.native.stats.indexOf(
+        inbound,
+      )] = StatsReport(inbound.id, inbound.type, 5000, {
+        ...inbound.values,
+        'packetsLost': 5,
+        'concealedSamples': 960,
+        'concealmentEvents': 3,
+      });
+      await poll(9);
+      expect(lines, enabled ? [first] : <String>[]);
+      await poll(1);
+      expect(lines, enabled ? [first, second] : <String>[]);
+      expect(f.native.statsReads, List.filled(20, 'pc1'));
+
+      // transport가 없으면 nominated 쌍 사용. 리포트 교체 시 증가분 초기화.
+      f.native.stats = [
+        StatsReport('fallback', 'candidate-pair', 0, {
+          'nominated': true,
+          'state': 'succeeded',
+          'localCandidateId': 'local',
+          'remoteCandidateId': 'remote',
+        }),
+        StatsReport('local', 'local-candidate', 0, {'candidateType': 'host'}),
+        StatsReport('remote', 'remote-candidate', 0, {
+          'candidateType': 'relay',
+        }),
+        StatsReport('new-inbound', 'inbound-rtp', 0, {
+          'kind': 'audio',
+          'packetsLost': 0,
+          'concealedSamples': 0,
+          'concealmentEvents': 0,
+          'jitter': 'unavailable',
+          'jitterBufferDelay': 1,
+          'jitterBufferEmittedCount': 0,
+        }),
+      ];
+      await poll(10);
+      const missing =
+          '[stats] peer=bob pair=host/relay rtt=- '
+          'out: sent=- bytes=- remoteLost=- remoteFrac=- remoteJit=- '
+          'in: recv=- lost=0 jit=- conceal=0 events=0 '
+          'accel=- decel=- jbDelay=- Δlost=- Δconceal=- Δevents=-';
+      expect(lines, enabled ? [first, second, missing] : <String>[]);
+      expect(f.native.statsReads, List.filled(30, 'pc1'));
+    } finally {
+      debugPrint = originalDebugPrint;
+      await f.dispose(tester);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   testWidgets('엔진 수신 이득은 직접 2.0을 전달해도 1.0을 넘지 않는다', (tester) async {
     final f = await _Fixture.create(tester);
     try {
@@ -394,6 +532,8 @@ class _Native {
   final unexpected = <String>[];
   final volumes = <double>[];
   final volumeTargets = <String>[];
+  final statsReads = <String>[];
+  List<StatsReport> stats = [];
   int created = 0;
   static const _audioTrack = <String, Object?>{
     'id': 'local-audio',
@@ -516,7 +656,18 @@ class _Native {
         case 'createOffer':
           return {'type': 'offer', 'sdp': 'offer'};
         case 'getStats':
-          return {'stats': <Object?>[]};
+          statsReads.add((call.arguments as Map)['peerConnectionId'] as String);
+          return {
+            'stats': [
+              for (final report in stats)
+                {
+                  'id': report.id,
+                  'type': report.type,
+                  'timestamp': report.timestamp,
+                  'values': report.values,
+                },
+            ],
+          };
         case 'setVolume':
           // 핸들러 안의 expect 는 실패해도 테스트에 드러나지 않고 호출만 삼킨다 — 기록만 하고 본문에서 검증.
           final args = call.arguments as Map;

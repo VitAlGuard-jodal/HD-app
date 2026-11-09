@@ -2,6 +2,7 @@ import AVFoundation
 import Flutter
 import UIKit
 import WebRTC
+import flutter_webrtc
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -16,6 +17,8 @@ import WebRTC
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    // The app bridge owns session policy before any plugin can open audio.
+    FlutterWebRTCPlugin.setAudioSessionManagementEnabled(false)
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "UnavoAudioChannels") {
       audioBridge = UnavoAudioBridge(messenger: registrar.messenger())
@@ -65,7 +68,6 @@ final class UnavoAudioBridge {
   private var requestedOutput: String? // nil prefers external devices, then speaker
   private var interrupted = false
   private var resumeFailed = false
-  private var connectedExternalOutputs = Set<String>()
   private var requestingPermission = false
   private var devices: [AVAudioSessionPortDescription] = []
   private var manualID: Int?
@@ -111,14 +113,8 @@ final class UnavoAudioBridge {
       default: result(FlutterMethodNotImplemented)
       }
     }
-    observe(AVAudioSession.routeChangeNotification) { [weak self] note in
-      guard let self = self else { return }
-      if let reason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-         reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue {
-        // Rebuild on hardware removal, including a headset hidden by a speaker override.
-        self.connectedExternalOutputs.removeAll()
-      }
-      self.scheduleRouteRefresh()
+    observe(AVAudioSession.routeChangeNotification) { [weak self] _ in
+      self?.scheduleRouteRefresh()
     }
     observe(.AVAudioEngineConfigurationChange) { [weak self] note in
       guard let self = self, let changed = note.object as? AVAudioEngine, changed === self.engine else { return }
@@ -135,6 +131,7 @@ final class UnavoAudioBridge {
         self.emitAudio()
       } else if type == AVAudioSession.InterruptionType.ended.rawValue {
         do {
+          try self.configureSession()
           try self.session.setActive(true)
           self.sessionActive = true
           try self.applyOutputRoute()
@@ -169,7 +166,7 @@ final class UnavoAudioBridge {
     }
     do {
       // 카테고리만 설정하고 사용자가 시험/통화를 시작하기 전에는 활성화하지 않는다.
-      try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker])
+      try configureSession()
     } catch { audioError = error.localizedDescription }
     refreshDevices()
   }
@@ -214,7 +211,12 @@ final class UnavoAudioBridge {
     if requestedOutput == "speaker" || requestedOutput == "receiver" {
       return devices.first { $0.portType == .builtInMic }
     }
-    if let route = requestedOutput, let port = devices.first(where: { outputName($0.portType) == route }) { return port }
+    if let route = requestedOutput {
+      if let port = devices.first(where: { outputName($0.portType) == route }) { return port }
+      // Output-only wired devices may use the built-in mic. Otherwise a
+      // missing external input must not silently become a built-in choice.
+      return currentOutput() == route ? devices.first { $0.portType == .builtInMic } : nil
+    }
     if requestedOutput == nil {
       for route in ["bluetooth", "carAudio", "headphones"] {
         if let port = devices.first(where: { outputName($0.portType) == route }) { return port }
@@ -260,14 +262,17 @@ final class UnavoAudioBridge {
   private func availableOutputs() -> [String] {
     let external = Set((session.availableInputs ?? []).compactMap { outputName($0.portType) }
       + session.currentRoute.outputs.compactMap { outputName($0.portType) })
-    connectedExternalOutputs.formUnion(external.filter { ["bluetooth", "carAudio", "headphones"].contains($0) })
     return ["bluetooth", "carAudio", "headphones", "speaker", "receiver"].filter {
-      $0 == "speaker" || $0 == "receiver" || connectedExternalOutputs.contains($0)
+      $0 == "speaker" || $0 == "receiver" || external.contains($0)
     }
   }
 
+  private func currentOutput() -> String? {
+    return session.currentRoute.outputs.compactMap { outputName($0.portType) }.first
+  }
+
   private func outputState() -> [String: Any] {
-    return ["route": session.currentRoute.outputs.compactMap { outputName($0.portType) }.first ?? "speaker",
+    return ["route": currentOutput() ?? "speaker",
             "available": availableOutputs(), "interrupted": interrupted, "resumeFailed": resumeFailed,
             "error": audioError as Any? ?? NSNull()]
   }
@@ -277,6 +282,16 @@ final class UnavoAudioBridge {
     // defaultToSpeaker must be removed for an explicit receiver choice.
     if requestedOutput == "receiver" { options.remove(.defaultToSpeaker) }
     let mode: AVAudioSession.Mode = capture == .preview ? .default : .voiceChat
+    // Also supply the same policy to libwebrtc's stored configuration (e.g.
+    // the simulator ADM can reapply it). No Dart/plugin writer remains.
+    let rtcSession = RTCAudioSession.sharedInstance()
+    rtcSession.lockForConfiguration()
+    defer { rtcSession.unlockForConfiguration() }
+    let configuration = RTCAudioSessionConfiguration.webRTC()
+    configuration.category = AVAudioSession.Category.playAndRecord.rawValue
+    configuration.categoryOptions = options
+    configuration.mode = mode.rawValue
+    RTCAudioSessionConfiguration.setWebRTC(configuration)
     if session.category != .playAndRecord || session.mode != mode || session.categoryOptions != options {
       try session.setCategory(.playAndRecord, mode: mode, options: options)
     }
@@ -376,6 +391,13 @@ final class UnavoAudioBridge {
       }
     } catch {
       audioError = error.localizedDescription
+      if call.method == "setOutputRoute" || call.method == "setSpeakerphone" {
+        // A failed preference must neither keep retrying nor label a missing
+        // device as selected. Publish the actual route, including on failure.
+        requestedOutput = currentOutput()
+        try? configureSession()
+        refreshDevices()
+      }
       emitAudio()
       result(FlutterError(code: "audio_error", message: error.localizedDescription, details: nil))
     }
@@ -537,7 +559,7 @@ final class UnavoAudioBridge {
         do {
           // Applying .none repeatedly can itself emit route-change notifications.
           // Only correct a default/explicit route when it no longer matches.
-          let actual = self.session.currentRoute.outputs.compactMap { self.outputName($0.portType) }.first
+          let actual = self.currentOutput()
           let preferred = self.requestedOutput ?? self.availableOutputs().first
           if actual != preferred { try self.applyOutputRoute() }
           if self.capture == .preview && (self.engine?.isRunning != true || self.routeSignature != self.currentSignature()) {

@@ -20,6 +20,98 @@ import 'package:unavo/room/room_session.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('레벨·RMS·dBFS만 바뀌면 첫 이벤트부터 RoomSession 알림은 0회다', () async {
+    final f = await _Fixture.create();
+    try {
+      var roomNotifications = 0;
+      var levelNotifications = 0;
+      f.session.addListener(() => roomNotifications++);
+      f.mic.addListener(() => levelNotifications++);
+      for (var tick = 1; tick <= 10; tick++) {
+        f.mic.state = MicState(
+          level: tick / 10,
+          rms: tick * 100,
+          dbfs: -60.0 + tick,
+        );
+        f.mic.changed();
+      }
+      expect(roomNotifications, 0);
+      expect(levelNotifications, 10);
+      expect(f.mic.state.level, 1);
+      expect(f.mic.state.rms, 1000);
+      expect(f.mic.state.dbfs, -50);
+    } finally {
+      await f.dispose();
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('동일한 장치 맵의 미리보기 레벨은 건너뛰고 선택·출력·인터럽션 변경은 알린다', () async {
+    final f = await _Fixture.create();
+    MicState frame({int selectedId = 1, double level = 0}) => MicState.fromMap({
+      'mode': 'phone',
+      'devices': [
+        {'id': 1, 'type': 15, 'name': '내장', 'webrtcDeviceId': 'built-in'},
+        {'id': 2, 'type': 7, 'name': '헤드셋', 'webrtcDeviceId': 'bluetooth'},
+      ],
+      'selected': selectedId == 1
+          ? {'id': 1, 'type': 15, 'name': '내장', 'webrtcDeviceId': 'built-in'}
+          : {'id': 2, 'type': 7, 'name': '헤드셋', 'webrtcDeviceId': 'bluetooth'},
+      'isRecording': true,
+      'isPreviewing': true,
+      'level': level,
+      'rms': (level * 1000).round(),
+      'dbfs': -60 + level * 60,
+    });
+    try {
+      f.mic.state = frame();
+      f.mic.changed();
+      var notifications = 0;
+      f.session.addListener(() => notifications++);
+      for (var tick = 1; tick <= 10; tick++) {
+        // 네이티브 이벤트마다 MicDevice/List 객체가 새로 만들어지는 경로.
+        f.mic.state = frame(level: tick / 10);
+        f.mic.changed();
+      }
+      expect(notifications, 0);
+      f.mic.state = frame(selectedId: 2);
+      f.mic.changed();
+      expect(notifications, 1);
+      f.mic.state = frame(selectedId: 2, level: .5);
+      f.mic.changed();
+      expect(notifications, 1);
+      f.mic.availableOutputRoutes = [
+        OutputRoute.bluetooth,
+        OutputRoute.speaker,
+        OutputRoute.receiver,
+      ];
+      f.mic.changed();
+      expect(notifications, 2);
+      f.mic.availableOutputRoutes = List.of(f.mic.availableOutputRoutes);
+      f.mic.changed();
+      expect(notifications, 2);
+      f.mic.outputRoute = OutputRoute.receiver;
+      f.mic.changed();
+      expect(notifications, 3);
+      expect(f.session.speakerphone, isFalse);
+      expect(f.session.outputLabel, startsWith('현재 수화부.'));
+      f.mic.audioInterrupted = true;
+      f.mic.changed();
+      expect(notifications, 4);
+      expect(f.media.interrupted, isTrue);
+      f.mic.changed();
+      expect(notifications, 4);
+      f.mic.audioInterrupted = false;
+      f.mic.changed();
+      expect(notifications, 5);
+      expect(f.media.interrupted, isFalse);
+      f.mic.outputError = '선택한 출력 장치가 연결되어 있지 않습니다.';
+      f.mic.changed();
+      expect(notifications, 6);
+    } finally {
+      await f.dispose();
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   test('새 기동은 me만 읽고 restorableRoom만 채우며 통화를 시작하지 않는다', () {
     fakeAsync((clock) {
       final f = _microtasksOnly(clock, _Fixture.create());

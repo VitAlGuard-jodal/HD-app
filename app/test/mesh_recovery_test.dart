@@ -28,9 +28,9 @@ void main() {
       clock.elapse(const Duration(seconds: 24));
       expect(f.offerIds['bob'], hasLength(4));
       expect(f.offerIds['bob']!.toSet(), hasLength(4));
-      expect(f.mesh.peerStates['bob'], MeshPeerState.connecting);
+      expect(f.published['bob'], MeshPeerState.connecting);
       clock.elapse(const Duration(seconds: 8));
-      expect(f.mesh.peerStates['bob'], MeshPeerState.failed);
+      expect(f.published['bob'], MeshPeerState.failed);
       clock.elapse(const Duration(minutes: 1));
       expect(f.offerIds['bob'], hasLength(4));
       expect(clock.pendingTimers, isEmpty);
@@ -85,7 +85,7 @@ void main() {
       _settle(clock, f.mesh.join(['alice', 'bob']));
       clock.elapse(const Duration(seconds: 56));
       final failed = f.peers['bob']!;
-      expect(f.mesh.peerStates['bob'], MeshPeerState.failed);
+      expect(f.published['bob'], MeshPeerState.failed);
       _settle(
         clock,
         f.mesh.onSignal('bob', 'offer', {
@@ -97,7 +97,7 @@ void main() {
       expect(failed.closes, 1);
       expect(identical(f.peers['bob'], failed), isFalse);
       f.peers['bob']!.state(MeshPeerState.connected);
-      expect(f.mesh.peerStates['bob'], MeshPeerState.connected);
+      expect(f.published['bob'], MeshPeerState.connected);
       expect(clock.pendingTimers, isEmpty);
       _settle(clock, f.mesh.close());
     });
@@ -114,7 +114,7 @@ void main() {
       for (var i = 0; i < 5; i++) {
         bob.state(MeshPeerState.failed);
       }
-      expect(f.mesh.peerStates['bob'], MeshPeerState.connecting);
+      expect(f.published['bob'], MeshPeerState.connecting);
       expect(clock.nonPeriodicTimerCount, 1);
       clock.elapse(const Duration(milliseconds: 1999));
       expect(bob.restarts, 0);
@@ -126,8 +126,8 @@ void main() {
       expect(bob.restarts, 3);
       // No further native failed event: the final response deadline still ends.
       clock.elapse(meshRecoveryTimeout);
-      expect(f.mesh.peerStates['bob'], MeshPeerState.failed);
-      expect(f.mesh.peerStates['charlie'], MeshPeerState.connected);
+      expect(f.published['bob'], MeshPeerState.failed);
+      expect(f.published['charlie'], MeshPeerState.connected);
       expect(charlie.restarts, 0);
       expect(charlie.offers, 1);
       expect(charlie.closes, 0);
@@ -138,7 +138,7 @@ void main() {
       bob.state(MeshPeerState.connecting);
       clock.elapse(const Duration(minutes: 1));
       expect(bob.restarts, 3);
-      expect(f.mesh.peerStates['bob'], MeshPeerState.failed);
+      expect(f.published['bob'], MeshPeerState.failed);
       expect(clock.pendingTimers, isEmpty);
       _settle(clock, f.mesh.close());
     });
@@ -173,7 +173,7 @@ void main() {
       charlie.state(MeshPeerState.failed);
       _settle(clock, f.mesh.updateMembers(['alice', 'charlie']));
       bob.state(MeshPeerState.failed);
-      expect(f.mesh.peerStates.containsKey('bob'), isFalse);
+      expect(f.published.containsKey('bob'), isFalse);
       expect(clock.nonPeriodicTimerCount, 1);
       _settle(clock, f.mesh.close());
       charlie.state(MeshPeerState.failed);
@@ -193,8 +193,8 @@ void main() {
       f.peers['charlie']!.state(MeshPeerState.connected);
       clock.elapse(const Duration(seconds: 14));
       expect(f.peers['bob']!.restarts, 3);
-      expect(f.mesh.peerStates['bob'], MeshPeerState.failed);
-      expect(f.mesh.peerStates['charlie'], MeshPeerState.connected);
+      expect(f.published['bob'], MeshPeerState.failed);
+      expect(f.published['charlie'], MeshPeerState.connected);
       expect(f.peers['charlie']!.offers, 1);
       expect(f.errors, isEmpty);
       expect(clock.pendingTimers, isEmpty);
@@ -226,7 +226,7 @@ void main() {
       clock.elapse(const Duration(seconds: 8));
       expect(replacement.restarts, 2);
       clock.elapse(meshRecoveryTimeout);
-      expect(f.mesh.peerStates['bob'], MeshPeerState.failed);
+      expect(f.published['bob'], MeshPeerState.failed);
       expect(clock.pendingTimers, isEmpty);
       _settle(clock, f.mesh.close());
     });

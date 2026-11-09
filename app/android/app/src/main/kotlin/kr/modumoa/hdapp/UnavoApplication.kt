@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
+import com.cloudwebrtc.webrtc.audio.AudioSwitchManager
 import kr.modumoa.hdapp.audio.MicRouter
 import kr.modumoa.hdapp.call.CallForegroundService
 import kr.modumoa.hdapp.call.CallState
@@ -23,6 +24,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -56,6 +58,9 @@ class UnavoApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Set the process-wide gate before any FlutterEngine/getUserMedia.
+        // manageAudioFocus=false alone still starts AudioSwitch and routes.
+        AudioSwitchManager.setAudioSessionManagementEnabled(false)
         micRouter = MicRouter(this)
         manager.registerAudioDeviceCallback(devices, Handler(Looper.getMainLooper()))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -63,7 +68,10 @@ class UnavoApplication : Application() {
         }
         ContextCompat.registerReceiver(this, volumes, IntentFilter(VOLUME_CHANGED), ContextCompat.RECEIVER_EXPORTED)
         scope.launch {
-            micRouter.state.collect { publishOutput() }
+            // getOutputRoute reads only this field from MicState. Device and
+            // volume changes have their own callbacks; meter ticks stay local.
+            micRouter.state.distinctUntilChangedBy { it.isInterrupted }
+                .collect { publishOutput() }
         }
         publishOutput()
     }
