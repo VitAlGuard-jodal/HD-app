@@ -349,6 +349,7 @@ void main() {
     ) async {
       final f = await _Fixture.create(tester, car: car, size: size);
       try {
+        _expectWatermarkBounds(tester);
         await completeConsentFuture(tester, f.services.locationShare.start());
         f.services.api.events.add(
           Hello(
@@ -371,10 +372,7 @@ void main() {
           expect(mapSize.height / panelSize.height, closeTo(7 / 3, .001));
           expect(mapSize.width, panelSize.width);
         }
-        expect(
-          find.descendant(of: panel, matching: find.byType(UnavoWatermark)),
-          findsOneWidget,
-        );
+        _expectWatermarkBounds(tester);
         expect(
           find.descendant(of: map, matching: find.byType(UnavoWatermark)),
           findsNothing,
@@ -441,6 +439,7 @@ void main() {
         expect(glow.boxShadow, isNotEmpty);
         await _tap(tester, '지도 축소');
         expect(panel, findsOneWidget);
+        _expectWatermarkBounds(tester);
         expect(f.services.rooms.followTarget, 'alice');
         expect(tester.takeException(), isNull);
       } finally {
@@ -505,7 +504,7 @@ void main() {
     }
   }, timeout: _timeout);
 
-  testWidgets('테마·지도 밝기는 플랫폼 밝기를 따르고 수동 버튼은 없다', (tester) async {
+  testWidgets('테마·지도·워터마크는 플랫폼 밝기를 따르고 패널 대비를 유지한다', (tester) async {
     final f = await _Fixture.create(tester);
     addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
     try {
@@ -523,6 +522,64 @@ void main() {
           Theme.of(tester.element(find.byType(RoomMap))).brightness,
           brightness,
         );
+        final panel = find.byKey(const ValueKey('room-call-panel'));
+        final background = tester.widget<Container>(panel).color!;
+        // 통화 패널은 라이트 테마에서도 불투명한 ink를 사용한다.
+        expect(background, UnavoColors.ink);
+        final watermark = find.descendant(
+          of: panel,
+          matching: find.byType(UnavoWatermark),
+        );
+        expect(watermark, findsOneWidget);
+        final opacity = tester
+            .widget<Opacity>(
+              find.descendant(of: watermark, matching: find.byType(Opacity)),
+            )
+            .opacity;
+        final dark = brightness == Brightness.dark;
+        expect(opacity, dark ? .16 : .18);
+        _expectWatermarkBounds(tester);
+        expect(
+          tester
+              .widget<IgnorePointer>(
+                find.descendant(
+                  of: watermark,
+                  matching: find.byType(IgnorePointer),
+                ),
+              )
+              .ignoring,
+          isTrue,
+        );
+        final unavoStyle = tester
+            .widget<Text>(
+              find.descendant(of: watermark, matching: find.text('UNAVO')),
+            )
+            .style!;
+        for (final label in ['Una Vox', 'UNAVO']) {
+          final style = tester
+              .widget<Text>(
+                find.descendant(of: watermark, matching: find.text(label)),
+              )
+              .style!;
+          expect(style.color, dark ? UnavoColors.text : UnavoColors.gold);
+          expect(style.fontFamily, 'Rye');
+          expect(
+            style.fontSize,
+            label == 'Una Vox' ? unavoStyle.fontSize! / 2 : unavoStyle.fontSize,
+          );
+          expect(style.height, 1);
+          final rendered = Color.alphaBlend(
+            style.color!.withValues(alpha: opacity),
+            background,
+          );
+          final backgroundLuminance = background.computeLuminance();
+          // 합성 후 휘도의 패널 대비 상대 차이가 25% 이상이어야 한다.
+          expect(
+            (rendered.computeLuminance() - backgroundLuminance) /
+                backgroundLuminance,
+            greaterThanOrEqualTo(.25),
+          );
+        }
         expect(find.byTooltip('낮 테마 보기'), findsNothing);
         expect(find.byTooltip('밤 테마 보기'), findsNothing);
       }
@@ -530,6 +587,45 @@ void main() {
       await f.dispose(tester);
     }
   }, timeout: _timeout);
+}
+
+void _expectWatermarkBounds(WidgetTester tester) {
+  const epsilon = .01;
+  final panel = find.byKey(const ValueKey('room-call-panel'));
+  final watermark = find.descendant(
+    of: panel,
+    matching: find.byType(UnavoWatermark),
+  );
+  expect(watermark, findsOneWidget);
+  final fitted = find.descendant(
+    of: watermark,
+    matching: find.byType(FittedBox),
+  );
+  expect(tester.widget<FittedBox>(fitted).fit, BoxFit.scaleDown);
+  final panelRect = tester.getRect(panel);
+  final maxWidth = panelRect.width * .8;
+  final maxHeight = panelRect.height * .4;
+  // getRect는 FittedBox의 배율까지 적용한 전역 좌표로 두 줄을 측정한다.
+  final topLine = tester.getRect(
+    find.descendant(of: watermark, matching: find.text('Una Vox')),
+  );
+  final bottomLine = tester.getRect(
+    find.descendant(of: watermark, matching: find.text('UNAVO')),
+  );
+  final wordmark = topLine.expandToInclude(bottomLine);
+  expect(wordmark.width, greaterThan(0));
+  expect(wordmark.height, greaterThan(0));
+  expect(wordmark.width, lessThanOrEqualTo(maxWidth + epsilon));
+  expect(wordmark.height, lessThanOrEqualTo(maxHeight + epsilon));
+  // 고정 40/80 크기에 머무르지 않고 폭 또는 높이 한계까지 채워야 한다.
+  expect(
+    (wordmark.width - maxWidth).abs() < epsilon ||
+        (wordmark.height - maxHeight).abs() < epsilon,
+    isTrue,
+  );
+  expect(wordmark.center.dx, closeTo(panelRect.center.dx, epsilon));
+  expect(wordmark.center.dy, closeTo(panelRect.center.dy, epsilon));
+  expect(topLine.bottom, closeTo(bottomLine.top, epsilon));
 }
 
 Future<void> _tap(WidgetTester tester, String label) async {

@@ -260,7 +260,7 @@ M5a는 프로필의 따라가기·따라가기 요청·따라가기 중지에 �
 
 **배치.** 폰은 SafeArea 전체를 사용한다. 세로 지도:통화 방 7:3(상/하), 가로는 7:3(좌/우)다. 차량은 CarShell 주 패널을 7:3(좌/우)로 쓴다. 폰 세로의 작은 통화 영역에는 가로 멤버 띠, 옆 통화 영역에는 세로 목록을 둔다. 바는 폰 SafeArea 바닥 또는 차량 주 패널 바닥 +8dp에 고정한다. 마이크·출력 경로(폰)·필요 시 재연결(폰)·음량·나가기만 허용한다. 음량은 폰·차량 모두 표시하고 수신 이득 상한 100%와 기존 차량 시스템 음량 연동 스위치는 유지한다. 좁은 패널의 버튼과 확장 음량 조작은 가로 스크롤한다.
 
-`UnavoWatermark`는 Rye의 “Una Vox”(40)·“UNAVO”(80)를 행 높이 1로 바로 붙이고 통화 영역 중앙에 opacity 0.10·IgnorePointer로 표시한다. 지도에는 배치하지 않는다. 전체 화면은 같은 지도 상태를 GlobalKey로 이동시켜 통화를 유지하고 통화 방은 숨긴다. 하단 바는 계속 보이며 좌상단에는 최대 6명 원형 아바타(폰 40·차량 56dp)를 가로로 놓는다. 말할 때 테두리 3dp와 바깥 글로우는 새 토큰 `UnavoColors.speaking = #7CFF5B`다. 자기 발화는 localSpeaking, 원격 발화는 speaking 집합을 따른다.
+`UnavoWatermark`는 Rye의 “Una Vox”를 “UNAVO” 글자 크기의 1/2로 두고 행 높이 1로 바로 붙인다. `LayoutBuilder`로 통화 방 영역 폭의 80%·높이의 40%를 한계로 잡고, 영역 폭에 비례하는 두 줄을 `FittedBox(scaleDown)`으로 맞춰 중앙에 표시한다(M5a-e). IgnorePointer·ExcludeSemantics를 유지하고 Stack에서 멤버 카드가 워터마크 위에 그려진다. `Theme.of(context).brightness`에 따라 다크는 크림색 `UnavoColors.text`·opacity 0.16, 라이트는 금색 `UnavoColors.gold`·opacity 0.18을 쓰며 M5a-d의 테마별 색상은 유지한다. 통화 패널 배경은 두 테마 모두 불투명 `UnavoColors.ink`다. 지도에는 배치하지 않는다. 전체 화면은 같은 지도 상태를 GlobalKey로 이동시켜 통화를 유지하고 통화 방은 숨긴다. 하단 바는 계속 보이며 좌상단에는 최대 6명 원형 아바타(폰 40·차량 56dp)를 가로로 놓는다. 말할 때 테두리 3dp와 바깥 글로우는 새 토큰 `UnavoColors.speaking = #7CFF5B`다. 자기 발화는 localSpeaking, 원격 발화는 speaking 집합을 따른다.
 
 **지도 조작.** 우상단 세로 묶음은 흰 원·그림자·진회색 아이콘, 지름 폰44/차량64dp, 간격10dp다. focus는 줌 유지 재중심, compass는 heading/북쪽 위 토글, locationoff는 공유 중지다. 전체 화면에서는 collapse를 추가한다. 평상시 좌하단 로고 위에는 흰색 60% expand 원을 둔다. 네이버 로고는 클릭 가능하고 전체 화면의 바 위에 여백을 확보한다. 타일 변형은 하지 않는다. 신규 compass/expand/collapse SVG는 Fable이 공급하며 테스트는 메모리 icon_bundle을 사용한다. 마커·카메라는 §13을 따른다.
 
