@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -86,7 +87,11 @@ class ConsentTestServices implements AppServices {
   }) async {
     SharedPreferences.setMockInitialValues({
       if (signedIn) ...{'token': 'test', 'handle': handle},
-      if (savedVersion != null) 'legal.consent.v1': savedVersion,
+      if (savedVersion != null)
+        'legal.consent.v1': jsonEncode({
+          'privacy': {'accepted': true, 'version': savedVersion},
+          'location': {'accepted': true, 'version': '1'},
+        }),
     });
     final preferences = await completeConsentFuture(
       tester,
@@ -174,30 +179,41 @@ class ConsentTestApi extends ApiClient {
     unawaited(events.done);
   }
   final events = StreamController<RoomEvent>.broadcast();
-  final members = const [Member('alice', '앨리스', '1'), Member('bob', '보비', '2')];
+  List<Member> members = const [
+    Member('alice', '앨리스', '1'),
+    Member('bob', '보비', '2'),
+  ];
   int logins = 0, signups = 0, meReads = 0, logouts = 0;
   int stops = 0, sends = 0;
-  bool logoutFails = false;
+  bool logoutFails = false, stopFails = false;
   final follows = <String>[];
   final followResponses = <(String, bool)>[];
   int unfollows = 0;
   @override
-  Future<void> follow(String code, String target) async {
+  Future<FollowResult> follow(String code, String target) async {
     follows.add(target);
+    return FollowResult('$target-request', ++revision, followAccepted);
   }
 
+  int revision = 0;
+  bool followAccepted = true;
+  Future<void>? roomGate, locationGate;
+  bool roomFails = false;
+
   @override
-  Future<void> respondFollow(
+  Future<int> respondFollow(
     String code,
     String requester, {
     required bool accepted,
   }) async {
     followResponses.add((requester, accepted));
+    return ++revision;
   }
 
   @override
-  Future<void> stopFollowing(String code) async {
+  Future<int> stopFollowing(String code) async {
     unfollows++;
+    return ++revision;
   }
 
   Future<void> close() => events.close();
@@ -231,8 +247,12 @@ class ConsentTestApi extends ApiClient {
   }
 
   @override
-  Future<RoomDetails> getRoom(String code) async =>
-      RoomDetails(Room(code, '함께 가는 길', leader: 'alice'), members);
+  Future<RoomDetails> getRoom(String code) async {
+    await roomGate;
+    if (roomFails) throw const ApiException(503, 'unavailable', '참여자 조회 실패');
+    return RoomDetails(Room(code, '함께 가는 길', leader: 'alice'), members);
+  }
+
   @override
   Stream<RoomEvent> subscribeEvents(String code) => events.stream;
   @override
@@ -240,12 +260,14 @@ class ConsentTestApi extends ApiClient {
   @override
   Future<bool> sendLocation(String code, LocationFix fix) async {
     sends++;
+    await locationGate;
     return false;
   }
 
   @override
   Future<void> stopLocation(String code) async {
     stops++;
+    if (stopFails) throw const ApiException(503, 'unavailable', '삭제 실패');
   }
 }
 

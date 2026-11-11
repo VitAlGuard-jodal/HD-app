@@ -141,35 +141,39 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 **시연 환경(결정 6-A).** 찌지직의 실제 음원은 맥북 키보드·손·쿨링팬 충격음이 몸체를 타고 내장 마이크로 들어간 것. 시연·녹화 중 맥에 손을 대지 않고 맥 입력 음량을 낮춰 피크(실측 0 dBFS)에 여유를 둔다. 같은 방에 폰과 차를 두면 에코 제거기가 자기 목소리를 에코로 지워(26~43 dB) 음질 판단이 왜곡되므로, 음질 시험은 폰 마이크 음소거 또는 다른 방에서 한다.
 
-## 12. 위치 공유·참여자별 궤적(M1→M5a)
+## 12. 위치 공유·참여자별 궤적(M6)
 
-**식별.** `leader`/`RoomSession.leaderHandle`은 방장(방을 만든 사람)의 handle만 뜻한다. 생성·조회·참여·`/v1/me.room`·`hello.leader`는 같은 값을 쓴다. 따라갈 대상은 방장 여부와 무관한 `followTarget`이며 자기 자신을 따라갈 수 없다.
+**식별.** `leader`/`RoomSession.leaderHandle`은 방을 만든 사람의 handle이다. 따라갈 대상은 방장과 무관한 `followTarget`이며 자기 자신은 따를 수 없다. 서버·앱은 함께 배포하는 follow 프로토콜 v2를 사용한다(§15). 이전 클라이언트 호환은 제공하지 않는다.
 
 | 메서드·경로 | 본문 / 응답 | 규칙 |
 |---|---|---|
-| `POST /v1/rooms/:code/location` | `{stream,lat,lng,acc?,speed?,heading?,at,seq}` → `202 {accepted:true,dropped}` | 방 멤버만. handle은 인증 사용자, receivedAt은 서버 시각. 잘못된 표본 400, 속도 제한 429 |
-| `GET /v1/rooms/:code/positions` | `{positions:[LocationFix],trails:{handle:[LocationFix]}}` | 방 멤버만, `Cache-Control: no-store` |
-| `DELETE /v1/rooms/:code/location` | `202 {accepted:true}` | 내 위치와 내 follow 관계를 정리. 나를 따르던 사람에게도 종료 응답 |
+| `POST /v1/rooms/:code/location` | `{stream,lat,lng,acc?,speed?,heading?,at,seq}` → `202 {accepted:true,dropped}` | 멤버만, handle은 인증 사용자, receivedAt은 서버 시각. 잘못된 표본 400, 간격 제한 429 |
+| `GET /v1/rooms/:code/positions` | `{positions:[LocationFix],trails:{followTarget:[LocationFix]},revision}` | 멤버만, `Cache-Control: no-store`. 전체 최신 위치와 수신자의 수락된 대상 궤적만 |
+| `DELETE /v1/rooms/:code/location` | `202 {accepted:true}` | 내 위치·양방향 follow·pending을 즉시 정리. 무변경 반복 삭제는 방송하지 않음 |
 
-`LocationFix`는 `{handle,stream,lat,lng,acc?,speed?,heading?,at,seq,receivedAt}`다. acc는 m, speed는 m/s, heading은 0~360도, at/receivedAt은 epoch ms다. SSE `location`과 `location-stopped{handle}`는 송신 handle의 모든 연결을 제외한다. 자신의 성공한 표본은 앱 세션에 직접 반영한다(로컬 receivedAt은 0). `hello`는 `leader`, `positions`, `trails`, 수신자 자신의 `followTarget`, 아직 응답하지 않은 `followRequests:[requester]`를 포함한다. 옛 단일 `trail` 필드는 `trails`로 교체한다.
+`LocationFix`는 `{handle,stream,lat,lng,acc?,speed?,heading?,at,seq,receivedAt}`다. 위도 −90~90, 경도 −180~180, acc/speed ≥ 0, heading 0~360, at ≥ 0을 유한수로 검사한다. `seq`는 `Number.isSafeInteger(seq) && seq >= 0`, 범위 0~9,007,199,254,740,991이고 stream은 16자리 소문자 hex다. handle별 400ms 최소 간격과 `(handle,stream)`별 seq 중복·역순 드롭을 유지한다. stream 변경으로 간격 제한을 우회할 수 없다. 앱 파서는 num을 검사하고 안전 정수를 int로 변환한다. 잘못된 location/hello/trail 표본 하나는 건너뛰며 다른 표본·통화 시그널과 SSE 연결은 유지한다. 원문·좌표 없이 프로세스당 한 번만 파싱 경고를 기록한다.
 
-**메모리 저장소.** `RoomLocationStore`는 방별 최신 위치 1건/handle, `followers: Map<target, Set<requester>>`, 응답 대기 요청, 공유 중인 handle 집합, `trails: Map<handle, LocationFix[]>`, 마지막 seq·수신 시각을 가진다. 요청자는 한 대상만 따른다. 대기 중 요청도 follower 관계에 포함하고, 첫 팔로워가 생기면 대상의 현재 위치가 있을 때 그 점부터 궤적을 시작한다. 각 대상은 최대 7,200점이며 초과분은 앞에서 버린다. 마지막 팔로워 해제 즉시 해당 궤적을 삭제한다. 스냅샷은 내부 Map·배열·fix와 분리된 사본이다.
+**메모리 저장소·revision.** 방별 최신 위치 1건/handle, 수락 관계(`accepted`, `followers`), 대기 요청(`pendingRequests`), 공유 중인 handle, 궤적, 마지막 seq·수신 시각과 `disconnectedAt`을 보관한다. 요청자는 한 대상만 요청하거나 따른다. 대기 요청은 팔로워가 아니며 궤적을 만들지 않는다. 수락된 첫 팔로워부터 대상의 현재 위치를 시작점으로 궤적을 만들고 최대 7,200점만 보관한다. 마지막 팔로워 해제 때 그 대상 궤적을 삭제한다. 방의 위치·관계·공유·단절/복귀·멤버 상태 변경마다 revision을 증가시키며, 중복 표본·무변경 follow 재요청·무변경 삭제는 증가시키지 않는다. 스냅샷은 내부 저장소와 분리된 사본이다.
 
-위도 −90~90, 경도 −180~180, acc/speed ≥ 0, heading 0~360, 유한한 at, 정수 seq ≥ 0, stream 16자리 소문자 hex를 검증한다. handle별 400ms 최소 간격과 `(handle, stream)`별 seq 중복·역순 드롭을 유지한다. stream을 바꾸어도 간격 제한을 우회할 수 없다. 유효한 드롭도 수신 간격에 포함한다.
+**공유 수명·단절 유예.** 마지막 SSE 소켓이 닫히면 DB 멤버십과 위치·follow·pending·궤적을 유지한 채 `disconnectedAt`을 기록하고 `LOCATION_DISCONNECT_GRACE_MS = 30초` 타이머를 시작한다. 같은 handle이 유예 안에 재구독하면 타이머를 취소하고 hello로 최신 상태를 복원한다. 다른 소켓이 남아 있으면 유예도 시작하지 않는다. 유예 만료 후에도 소켓이 없으면 `removeLocation(...,'left')`로 양방향 관계와 위치를 정리한다. 명시적 공유 중지·leave·로그아웃은 유예 없이 정리한다. 마지막 멤버 leave는 방·위치·궤적·순번·시그널 백로그·유예 타이머를 삭제한다. `/leave`는 현재·전 멤버에게 204, 한 번도 속하지 않은 사용자에게 403이며 이미 삭제된 방은 404다.
 
-**정리.** 공유 중지·leave·해당 handle의 마지막 SSE 연결 해제는 위치, 그 사람의 따라가기, 그 사람을 따르던 팔로워 관계를 정리한다. 대상이 나가거나 마지막 연결이 끊기면 팔로워에게 `follow-response {target,accepted:false,reason:'left'}`, 공유 중지는 `reason:'stopped'`를 보낸다. 다른 기기의 SSE 연결이 남아 있으면 공유와 관계를 유지한다. SSE 단절 때 DB 멤버십은 보존한다. 마지막 멤버의 leave는 빈 방·위치·궤적·순번·시그널 백로그를 모두 지운다. 위치와 follow는 SQLite에 쓰지 않으며 프로세스 재시작으로도 사라진다. 위치 POST의 개별 액세스 로그 대신 방별 분당 집계를 유지한다.
+**stale 만료.** 마지막 저장 표본의 서버 receivedAt부터 `LOCATION_STALE_MS = 90초`가 지나면 snapshot/positions/hello에서 제외한다. 30초 주기 단일 sweep이 만료된 handle의 위치·궤적·관계를 삭제하고 `location-stopped {handle,reason:'stale',revision}` 및 해당 요청 ID의 종료 응답을 보낸다. 조회 경로도 만료 정리를 실행하므로 sweep 직전에도 오래된 위치를 노출하지 않는다. 위치·follow는 SQLite나 디스크에 저장하지 않으며 서버 프로세스 재시작으로 사라진다. 위치 POST는 개별 액세스 로그 없이 방별 분당 건수만 집계한다.
 
-**앱 전송·수명.** `LocationShare`의 기능별 동의는 화면이 담당한다. `start()`는 위치 권한을 요청하고 거부는 “위치 권한이 없습니다”, 서비스 꺼짐은 “위치 서비스가 꺼져 있습니다”로 표시한다. 기본 전송 간격은 1초이며 그 사이 최신 표본 하나만 보류한다. speed < 0.5m/s·이동 < 3m이면 5초 간격, 3회 연속 실패도 다음 성공까지 5초 간격이다. seq는 전송 시도마다 증가하고 같은 실행의 중지·재시작·방 변경에도 이어진다. 방 나가기·코드 변경·세션 해제 시 구독과 보류 타이머를 중지하고 진행 중 위치 POST 이후 DELETE를 보내 늦은 응답이 위치를 되살리지 않게 한다. 기능별 공유 동의는 새 실행에서 복원하지 않는다.
+**앱 전송·취소 토큰.** 기능별 동의는 화면에서 받고 `LocationShare.start({required Object token, required bool Function() stillValid})`를 호출한다. 권한 요청 직전·권한 완료 후·watch 직전에 요청 유효성을 재검사한다. 모달 진입부터 토큰을 관리하며 수신 요청은 requestId, 송신 요청은 POST 결과의 requestId와 연결한다. FollowCancelled·MemberLeft·방 변경은 토큰을 무효화한다. 이번 요청이 새로 켠 공유는 즉시 stop하고, 이전부터 켜져 있던 공유는 유지한다. 수락 완료 후에는 요청 토큰에서 공유를 분리한다. pending 송신 요청은 수락 전까지 토큰을 유지한다. 기능별 동의 기록만으로 새 프로세스에서 GPS·공유를 자동 시작하지 않는다.
 
-`RoomSession`은 `followTarget: String?`, `trailOf(handle)`, `followError`, 수신 요청·거절 안내 대기열을 제공한다. hello와 `trails` 이벤트는 궤적을 교체하고, location은 handle/stream별 순번으로 중복을 거른다. 공유를 끄면 followTarget도 비우며 follow POST/DELETE를 직렬화해 늦은 요청이 중지를 덮지 않게 한다. SSE 응답은 POST 완료보다 먼저 올 수 있으므로 요청 대상은 응답 전에 기록하고, 다른 대상에 대한 늦은 응답은 무시한다. 마지막 SSE 단절 후의 hello는 서버가 정리한 followTarget을 반영한다.
+권한 거부는 “위치 권한이 없습니다”, 서비스 꺼짐은 “위치 서비스가 꺼져 있습니다”로 표시한다. 기본 전송은 1초이며 최신 표본 하나만 보류한다. speed < 0.5m/s·이동 < 3m이거나 연속 전송 실패 3회면 5초 간격이다. seq와 stream은 같은 실행의 중지·재시작·방 변경에도 유지한다. 송신자에게 location SSE를 반사하지 않으므로 성공한 자기 표본은 세션에서 직접 반영한다.
+
+**공유 중지·삭제 재시도.** stop은 로컬 GPS·보류 타이머·과거 위치 오류를 즉시 지운다. 삭제 작업은 `(code,handle,generation)`으로 보존하고 진행 중 위치 POST 뒤에 DELETE를 보낸다. 실패 시 1·2·4·8·16·32·60초(이후 최대 60초) 간격으로 재시도한다. 같은 방을 떠나거나 인증/멤버/방이 없어진 401·403·404이면 재시도를 중단한다. 새 공유는 이미 전송된 이전 DELETE 완료를 기다린 뒤 오래된 작업과 타이머를 폐기하므로 이전 세대 삭제가 새 공유 뒤에 실행되지 않는다. 삭제 대기는 `deletionPending`/`deletionStatus`의 “위치 삭제 대기 중”으로 표시하며 `LocationShare.error`와 분리한다. 방 변경도 과거 오류를 지운다.
+
+`leave()`/`forget()`은 `mediaEngine.leave()`와 `callService.stop()`을 먼저 호출하고 UI를 통화 종료 상태로 전환한다. 위치 POST→DELETE 완료는 그 뒤 기다리므로 위치 네트워크 지연이 마이크·오디오 종료를 늦추지 않는다. 같은 프로세스의 SSE 복귀는 hello의 수락 대상·pending 대상·수신 요청·revision으로 복원한다. 진행 중 follow POST와 오래된 hello, 먼저 도착한 SSE 응답의 순서 조정은 §15를 따른다.
 
 **정차 규칙(M5a-c).** `LocationShare.motionState`는 `unknown`·`moving`·`stationary`의 3상태다. 최근 3초 관찰 창의 표본 중 speed ≥ 0.5m/s 또는 창의 첫 표본에서 3m 이상 이동한 표본이 있으면 즉시 moving이다. 이동 조건 없이 3초 관찰을 마치면 stationary이며, 속도가 없는 표본은 이동 거리로 판단한다. 표본 없음·초기 관찰 중·표본 단절 3초 이상·위치 스트림 오류·공유 중지는 unknown이다. 차량은 moving일 때만 동의 모달 진입과 따라가기 시작을 막고 “정차 후 설정할 수 있습니다”를 표시한다. unknown과 stationary는 허용하므로 위치 공유 전에도 동의 모달을 열 수 있다.
 
 동의 후 `start()`가 완료되면 다시 검사한다. unknown에서 follow POST를 보낸 경우에도 최초 moving/stationary 판정 때 한 번 더 확인한다. 첫 판정이 moving이면 followTarget을 비우고 같은 문구를 표시하며, 이미 보낸 POST 뒤에 follow DELETE를 직렬화해 관계를 정리한다. 내 위치 공유는 유지한다. 첫 stationary 판정 이후에는 이동 중에도 따라가기를 유지하며 중지는 언제나 가능하다. 첫 판정 대기는 해당 따라가기 시도에만 적용하고 중지·거절·대상 변경·방 변경 후 늦은 표본으로 이전 시도를 되살리지 않는다. 폰에는 이 제한과 최초 판정 취소를 적용하지 않는다.
 
-**동의 체계(M4).** 개인정보 처리방침과 위치정보 수집·이용 동의는 이 설치의 첫 로그인·회원가입 성공 직후에 한 번 받는다. 저장된 세션을 `restoreSession`으로 복원할 때도 같은 조건을 적용한다. `legal.consent.v1`에 문서 버전 문자열 `"1"`을 저장하며 `legalVersion`과 다르면 방 목록·차량 대시보드보다 `LegalConsentScreen`을 먼저 표시한다. 두 항목을 모두 체크하고 저장에 성공해야 다음 화면으로 간다. 로그아웃해도 설치의 문서 동의는 보존하며, 문서 버전이 올라가면 다시 받는다. 미동의는 “동의하지 않아 서비스를 이용할 수 없습니다” 안내 확인 후 기존 로그아웃 경로를 호출하고 로그인 화면으로 돌아간다. 서버 로그아웃이 실패해도 방·로컬 로그인은 정리한다. 알림의 방 열기 요청도 전체 동의가 끝날 때까지 보류한다.
+**동의 체계(결정 16-A).** 이 설치의 첫 로그인·회원가입·저장 세션 복원 시 개인정보 처리방침만 필수로 받는다. 위치정보 수집·이용 동의는 선택이며 미체크 상태로도 음성 통화·방 목록에 진입할 수 있다. `legal.consent.v1`에는 `{privacy:{accepted,version},location:{accepted,version}}` JSON을 저장한다. `legalVersion = '2'`는 개인정보 문서 버전이고 변경하지 않은 위치 문서는 `locationLegalVersion = '1'`로 각각 기록한다. 이전 버전 문자열 또는 현재 개인정보 동의가 없는 저장값은 동의 화면을 다시 표시한다. 로그아웃해도 설치의 문서 동의는 보존한다. 개인정보 미동의는 기존 안내·로그아웃 경로이며 알림의 방 열기도 필수 동의 완료까지 보류한다.
 
-M5a 기능별 동의는 §15의 프로필 탭 모달과 상대의 요청 수락 모달로 통합한다. 공유 중인 대상은 추가 팔로워마다 재동의하지 않는다. 권한 거부·방 변경·취소된 요청의 늦은 동의는 새 공유나 따라가기를 시작하지 않는다. 모달의 차단·중앙 배치 규칙은 §14를 유지한다.
+위치 항목을 체크하지 않았어도 §15의 따라가기·요청 수락 모달에서 기능별 동의를 받으면 그때 위치 항목의 동의 여부·버전을 저장한다. 저장 성공 후에만 권한 요청으로 진행한다. 선택 동의의 저장은 자동 공유 허가가 아니며 매 새 기능 시작의 모달과 취소 토큰 규칙을 유지한다. `app/assets/legal/location.md`의 “동의하지 않을 권리” 문단은 변경하지 않는다.
 
 ## 13. 지도 화면(M2·M3·M5a)
 
@@ -240,23 +244,23 @@ flutter build apk --release --no-pub --target-platform android-arm64 --dart-defi
 
 ## 14. 동의 UI(M4)
 
-`ui/widgets/unavo_dialog.dart`의 `showConsentDialog(context, title:, lines:, detail:)`는 bool, `showNoticeDialog(context, message:)`는 void Future를 반환한다. 두 팝업 모두 루트 Navigator의 `showDialog(barrierDismissible: false)`와 `PopScope(canPop: false)`를 사용해 화면 중앙에 뜬다. 바깥 탭·시스템 뒤로가기는 닫기를 유발하지 않으며, 응답 전에는 뒤쪽 화면과 차량 보조 패널의 버튼을 누를 수 없다. 방 상태가 바뀌어도 방 화면의 자동 pop이 앞에 있는 동의 모달을 대신 닫지 않는다. 기존 `location_consent_sheet.dart`는 제거했다.
+`ui/widgets/unavo_dialog.dart`의 `showConsentDialog(context, title:, lines:, detail:, note:)`는 bool, `showNoticeDialog(context, message:)`는 void Future를 반환한다. 두 팝업 모두 루트 Navigator의 `showDialog(barrierDismissible: false)`와 `PopScope(canPop: false)`를 사용해 화면 중앙에 뜬다. 바깥 탭·시스템 뒤로가기는 닫기를 유발하지 않으며, 응답 전에는 뒤쪽 화면과 차량 보조 패널의 버튼을 누를 수 없다. 방 상태가 바뀌어도 방 화면의 자동 pop이 앞에 있는 동의 모달을 대신 닫지 않는다. 기존 `location_consent_sheet.dart`는 제거했다.
 
 폰의 카드 폭은 화면의 90% 이내·최대 420, 차량은 최대 560이다. 호출 위치의 `ControlScale`을 다이얼로그 경로에 전달해 폰 56dp·차량 80dp 조작부를 유지한다. 제목·본문과 선택 상세 영역은 스크롤할 수 있고 하단 응답 버튼은 고정한다. 동의는 기존 `check`, 미동의는 `back`, 안내 닫기는 `check` 아이콘의 `PanelButton`만 사용하며 버튼 글자는 표시하지 않는다. 접근성 라벨·선택 상태는 유지한다.
 
 M5a는 프로필의 따라가기·따라가기 요청·따라가기 중지에 이 모달을 사용한다. 본문은 대상 또는 요청자의 표시 이름, 공유 범위, 종료 조건, 국내 서버의 보관 기간을 알린다. 미동의 안내와 시작 순서는 §15를 따른다. 시작·동의 대기 중에는 중복 조작을 막고, 여러 요청은 하나씩 처리한다.
 
-`screens/phone/legal_consent.dart`는 로그인 뒤의 전체 동의 페이지다. 차량에서는 `CarShell`의 주 패널을 채우고 두 항목의 체크·전문 펼치기를 제공한다. 체크는 `check` 아이콘의 선택 상태와 색으로, 전문 펼치기는 `chevron`으로 표시한다. 두 문서가 로드되고 두 항목 모두 체크됐을 때만 하단 동의 버튼을 활성화한다. 전문은 `rootBundle.loadString('assets/legal/privacy.md')`와 `location.md`로 읽는다. 원문 파일을 수정하지 않고 `#`·`##` 줄은 제목, `-` 줄은 글머리 기호, 나머지는 본문으로 그리며 펼친 전문에는 별도 스크롤 영역을 둔다. 추가 마크다운 패키지는 사용하지 않는다.
+`screens/phone/legal_consent.dart`는 로그인 뒤의 전체 동의 페이지다. 차량에서는 `CarShell`의 주 패널을 채우고 두 항목의 체크·전문 펼치기를 제공한다. 체크는 `check` 아이콘의 선택 상태와 색으로, 전문 펼치기는 `chevron`으로 표시한다. 두 문서가 로드되고 필수 개인정보 항목을 체크하면 하단 동의 버튼을 활성화한다. 위치 항목은 선택으로 표시한다. 전문은 `rootBundle.loadString('assets/legal/privacy.md')`와 `location.md`로 읽는다. 원문 파일을 수정하지 않고 `#`·`##` 줄은 제목, `-` 줄은 글머리 기호, 나머지는 본문으로 그리며 펼친 전문에는 별도 스크롤 영역을 둔다. 추가 마크다운 패키지는 사용하지 않는다.
 
 검증 대상은 `unavo_dialog_test.dart`, `room_consent_flow_test.dart`, `legal_consent_test.dart`, 갱신한 `location_share_test.dart`·`room_session_location_test.dart`다. 새 위젯 테스트는 30초 timeout과 유한한 pump를 사용하고 이벤트 핸들러 안에서 expect하지 않는다. M4 작업에서는 format·analyze만 수행하며 Flutter test/build는 Fable이 별도로 실행한다.
 
 ## 15. 방 화면 UX(M5a)
 
-**입장·따라가기.** 입장 시 지도 없이 멤버 카드와 음성·방 관리 바를 표시한다. 방 화면의 “우나보 UNAVO” 상단 제목만 제거하고 메인 화면의 제목·기존 워드마크는 유지한다. `MemberAvatar`는 표시 이름 첫 글자의 원형 아바타이며 이후 사진으로 바꿀 경계다. 내 카드 탭은 동작하지 않는다. 다른 카드 탭은 `showConsentDialog(title: '따라가기')`를 열고 표시 이름, “○○ 님의 위치를 따라갑니다”, “내 위치도 같은 방 참여자에게 보입니다”, “방을 나가거나 따라가기를 중지하면 끝납니다”, “위치는 방이 있는 동안만 서버(국내)에 남습니다”를 표시한다. 이것이 요청자의 위치 공유 동의다. 동의 → 꺼져 있으면 `LocationShare.start()` → 성공 및 차량 moving 아님을 확인 → follow POST → 지도 표시 순서다. 차량의 표본 없는 unknown도 모달과 POST를 허용하며, 동의 후 최초 이동 판정 시 취소·공유 유지 규칙은 §12를 따른다. 미동의는 “동의하지 않아 따라가기 기능을 사용할 수 없습니다” 안내다.
+**입장·따라가기.** 입장 시 지도 없이 멤버 카드와 음성·방 관리 바를 표시한다. 방 화면의 “우나보 UNAVO” 상단 제목만 제거하고 메인 화면의 제목·기존 워드마크는 유지한다. `MemberAvatar`는 표시 이름 첫 글자의 원형 아바타이며 이후 사진으로 바꿀 경계다. 공유 중인 내 카드 탭은 아래의 공유 중지 모달을 열고, 공유 중이 아니면 무동작이다. 다른 카드 탭은 `showConsentDialog(title: '따라가기')`를 열고 표시 이름, “○○ 님의 위치를 따라갑니다”, “내 위치도 같은 방 참여자에게 보입니다”, “방을 나가거나 위치 공유를 중지하면 공유가 끝납니다”, “위치는 방이 있는 동안만 서버(국내)에 남습니다”를 표시한다. 이것이 요청자의 위치 공유 동의다. 동의 → 꺼져 있으면 `LocationShare.start(token:, stillValid:)` → 성공 및 차량 moving 아님을 확인 → follow POST → pending 대기 → 수락 확인 → 지도 표시 순서다. 이미 공유 중인 대상은 POST 응답에서 즉시 수락된다. 차량의 표본 없는 unknown도 모달과 POST를 허용하며, 동의 후 최초 이동 판정 시 취소·공유 유지 규칙은 §12를 따른다. 미동의는 “동의하지 않아 따라가기 기능을 사용할 수 없습니다” 안내다.
 
 대상은 follow-request를 받으면 “따라가기 요청” 모달로 요청자 이름·공유 범위·종료 조건·보관 기간을 확인한다. 수락은 `start()` 성공 후 accepted:true, 미동의나 권한 실패는 accepted:false를 보낸다. 이미 공유 중이면 추가 모달 없이 수락한다. 서버도 현재 fix 또는 이전 수락으로 공유 중임을 아는 대상은 즉시 수락한다. 요청자의 거절 안내는 “○○ 님이 위치 공유에 동의하지 않았습니다”이며 followTarget과 지도를 해제한다. 대기 중 취소·방 변경·퇴장 뒤의 늦은 응답은 적용하지 않는다.
 
-같은 대상 카드를 다시 탭하면 “따라가기 중지” 모달이다. check 선택 시 follow DELETE·지도 닫힘이며 내 공유는 계속한다. 지도 안 locationoff 버튼은 내 공유와 따라가기를 함께 중지한다. 방을 나가면 모두 종료한다. 동의 모달은 가운데·차단형·아이콘 버튼만 사용하는 M4 규칙을 유지한다.
+같은 대상 카드를 다시 탭하면 “따라가기 중지” 모달이다. check 선택 시 follow DELETE·지도 닫힘이며 내 공유는 계속한다. 공유 중인 내 카드와 지도 안 locationoff 버튼은 동일한 `showConsentDialog(title: '위치 공유 중지', lines: ['내 위치 공유를 중지합니다'])`를 연다. 선택 인자 `note`로 본문 아래에 “위치 공유를 중단하게 되면 그룹 안에 있는 파트너와 연결이 끊기게 됩니다. 그래도 하시겠습니까?”를 `UnavoType.caption` 회색 보조 스타일로 표시한다. check 선택은 내 공유·따라가기와 지도를 닫고, 나를 따르던 팔로워는 서버 종료 이벤트로 해제한다. back 선택은 상태를 유지한다. 방을 나가면 모두 종료한다. 동의 모달은 가운데·차단형·아이콘 버튼만 사용하는 M4 규칙을 유지한다.
 
 **배치.** 폰은 SafeArea 전체를 사용한다. 세로 지도:통화 방 7:3(상/하), 가로는 7:3(좌/우)다. 차량은 CarShell 주 패널을 7:3(좌/우)로 쓴다. 폰 세로의 작은 통화 영역에는 가로 멤버 띠, 옆 통화 영역에는 세로 목록을 둔다. 바는 폰 SafeArea 바닥 또는 차량 주 패널 바닥 +8dp에 고정한다. 마이크·출력 경로(폰)·필요 시 재연결(폰)·음량·나가기만 허용한다. 음량은 폰·차량 모두 표시하고 수신 이득 상한 100%와 기존 차량 시스템 음량 연동 스위치는 유지한다. 좁은 패널의 버튼과 확장 음량 조작은 가로 스크롤한다.
 
@@ -266,16 +270,22 @@ M5a는 프로필의 따라가기·따라가기 요청·따라가기 중지에 �
 
 **자동 테마.** 수동 override·라이트/다크 토글은 전역 제거하고 저장된 수동 값은 읽지 않는다. ThemeMode.system 및 `MediaQuery.platformBrightness`가 앱·배경·지도 야간 모드의 출처다. Android Automotive(Pleos)는 OS가 전달하는 차량 주야간 모드, iOS는 시스템 다크 모드(사용자 설정의 일몰 자동 포함)를 따른다. iOS에는 주변 조도 센서의 공개 API가 없어 직접 센서를 읽지 않는다. Android 조도 센서 연결은 후속 결정 항목이다.
 
-**서버 follow 프로토콜.** 모두 인증된 같은 방 멤버에게만 허용한다. `leader`는 방장 의미를 유지한다.
+**서버 follow 프로토콜 v2.** 모두 인증된 같은 방 멤버에게만 허용하며 본문 수신 전후의 멤버 재검사를 유지한다. follow/respond/unfollow 세 경로는 합산하여 방·handle당 1초에 한 번만 처리한다(429 `FOLLOW_RATE_LIMIT`). 앱은 이 응답을 받으면 같은 작업 큐에서 1초 후 한 번 재시도한다.
 
 | 메서드·경로 | 본문 | 응답·SSE |
 |---|---|---|
-| `POST /v1/rooms/:code/follow` | `{target}` | 202. 공유 중이면 요청자에게 `follow-response {target,accepted:true}`, 아니면 대상에게 `follow-request {requester}` |
-| `POST /v1/rooms/:code/follow/respond` | `{requester,accepted}` | 202. 수락 시 같은 대상의 대기 요청들을 함께 수락, 거절 시 지정 요청만 해제. 완료·취소된 요청에는 409 FOLLOW_EXPIRED |
-| `DELETE /v1/rooms/:code/follow` | — | 202. 요청자의 관계만 해제하며 공유는 유지 |
+| `POST /v1/rooms/:code/follow` | `{target}` | `202 {requestId,revision,accepted}`. 공유 중인 대상이면 즉시 accepted, 아니면 pending 저장 |
+| `POST /v1/rooms/:code/follow/respond` | `{requestId,accepted}` | `202 {accepted,revision}`. 수락은 같은 대상의 대기 요청들을 수락하며 거절은 지정 요청만 해제. 모르는·완료된·다른 대상의 ID는 404 `FOLLOW_EXPIRED` |
+| `DELETE /v1/rooms/:code/follow` | — | `202 {accepted:true,revision}`. 요청자의 수락 관계 또는 pending만 해제 |
 
-관계 변경 때 `trails {trails:{handle:[fix]}}` SSE로 모든 참여자의 궤적 캐시를 맞춘다. 대상 변경·취소·응답 완료에는 대상에게 `follow-cancelled {requester}`를 보내 대기 모달을 중복 처리하지 않게 한다. 이미 열린 M4 모달은 사용자의 응답으로 닫되 취소된 요청의 동의는 실행하지 않는다. hello에는 수신자 자신의 followTarget·followRequests와 전체 positions/trails 스냅샷이 있다. 마지막 팔로워·퇴장·disconnect 정리는 §12를 따른다.
+SSE `follow-request {requestId,requester,displayName,revision}`와 `follow-response {requestId,requester,target,accepted,revision,reason?}`를 사용한다. 대상 전환·취소·응답 완료 시 대상에게 `follow-cancelled {requestId,requester,revision,reason}`를 보낸다(`cancelled`/`accepted`/`declined`). 수락 완료 알림은 토큰을 확정하고 취소 알림은 그 요청만 무효화한다. 이미 열린 차단형 모달은 사용자 응답으로 닫지만, 무효화된 요청의 늦은 동의는 실행하지 않는다.
+
+hello는 `{self,members,leader,positions,trails,revision,followTarget,pendingFollow,followRequestId,followRequests}`다. `followTarget`은 수락된 대상 문자열 또는 null, `pendingFollow`는 대기 대상 문자열 또는 null, `followRequestId`는 해당 관계의 식별자다. `followRequests`는 나에게 온 대기 요청 객체 목록으로 requestId·requester·target·displayName을 담는다. 대상이 단절 유예 중이어도 서버가 요청을 유지하고 재접속 hello로 전달한다.
+
+전체 `trails` SSE 방송은 제거했다. `trail {handle,points,revision}`은 수락된 팔로워가 추가될 때 **그 팔로워에게만 한 번** 보내며, 이후 `location`을 이어 붙인다. hello와 positions도 수신자의 followTarget 궤적만 포함한다. 무변경 follow 재요청은 기존 requestId·revision·accepted를 돌려주고 이벤트를 하나도 보내지 않는다. 현재 pending 대상이 이미 공유를 시작했다면 같은 ID로 수락 전환하며 이는 실제 변경이다.
+
+앱은 POST 진행 중 사용자의 대상 의도를 보존하고 완료 후 반환된 revision을 기록한다. 작은 revision의 hello는 따라가기 상태를 덮지 않는다. POST 결과보다 먼저 도착한 follow-response는 보류했다가 현재 requestId가 맞을 때만 적용한다. 같은 대상 취소 후 재요청과 이미 수락된 A→B 전환도 같은 규칙이다. accepted 전에는 지도 없이 “따라가기 응답 대기 중”을 표시한다. `follow-request`의 requester가 멤버 캐시에 없어도 요청을 보관하고 비동기 `_refresh`를 시도한 뒤 모달을 표시한다. 조회 실패 시에도 이벤트 displayName(없으면 handle)을 사용한다. 재조회 중 취소는 이벤트 큐를 막지 않고 즉시 폐기한다.
 
 **확인과 남은 결정.** Flutter 테스트는 NaverMap을 pump하지 않고 facade·브이월드·SDK 마커 생성 함수로 검사한다. 새 위젯 테스트는 고정 pump·30초 timeout·핸들러 밖 검증을 사용한다. M5a 작업에서 Flutter test/build는 실행하지 않으며 Fable이 별도 실행한다. 네이티브 지도·주야간 모드·로고 클릭·폰 회전·실차 음성/GPS는 기기 검증 대상이다.
 
-표본이 없는 차량의 첫 따라가기 진입 제약은 M5a-c의 unknown 허용과 동의 후 최초 판정 검사로 해소한다. 따라가기만 중지하거나 상대 요청만 수락한 사람은 지도가 없어 locationoff에 접근할 수 없으며, 현재 지시에서 허용한 공유 종료 경로는 방 나가기다. 통화 방 안의 별도 공유 중지 버튼·내 카드 동작은 이번 범위에 추가하지 않았다.
+표본이 없는 차량의 첫 따라가기 진입 제약은 M5a-c의 unknown 허용과 동의 후 최초 판정 검사로 해소한다. 따라가기만 중지하거나 상대 요청만 수락한 사람도 통화 방의 내 카드를 눌러 공유를 중지할 수 있다. 별도 텍스트 버튼은 추가하지 않는다.

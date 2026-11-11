@@ -124,25 +124,32 @@ class ApiClient {
     await _request('DELETE', '/v1/rooms/${_segment(code)}/location');
   }
 
-  Future<void> follow(String code, String target) async {
-    await _request('POST', '/v1/rooms/${_segment(code)}/follow', {
-      'target': target,
-    });
-  }
+  Future<FollowResult> follow(String code, String target) async =>
+      FollowResult.fromJson(
+        await _response('POST', '/v1/rooms/${_segment(code)}/follow', {
+          'target': target,
+        }),
+      );
 
-  Future<void> respondFollow(
+  Future<int> respondFollow(
     String code,
-    String requester, {
+    String requestId, {
     required bool accepted,
   }) async {
-    await _request('POST', '/v1/rooms/${_segment(code)}/follow/respond', {
-      'requester': requester,
-      'accepted': accepted,
-    });
+    final result = await _response(
+      'POST',
+      '/v1/rooms/${_segment(code)}/follow/respond',
+      {'requestId': requestId, 'accepted': accepted},
+    );
+    return (result['revision'] as num).toInt();
   }
 
-  Future<void> stopFollowing(String code) async {
-    await _request('DELETE', '/v1/rooms/${_segment(code)}/follow');
+  Future<int> stopFollowing(String code) async {
+    final result = await _response(
+      'DELETE',
+      '/v1/rooms/${_segment(code)}/follow',
+    );
+    return (result['revision'] as num).toInt();
   }
 
   Future<void> sendSignal(
@@ -388,33 +395,68 @@ class ApiClient {
       'follow-request',
       'follow-response',
       'follow-cancelled',
-      'trails',
+      'trail',
     }.contains(event.name))
       return null;
-    final data = jsonDecode(event.data) as JsonMap;
+    JsonMap data;
+    try {
+      data = jsonDecode(event.data) as JsonMap;
+    } catch (_) {
+      if (event.name != 'location') rethrow;
+      logInvalidLocation();
+      return null;
+    }
     switch (event.name) {
       case 'follow-request':
-        return FollowRequest(data['requester'] as String);
+        return FollowRequest.fromJson(data);
       case 'follow-cancelled':
-        return FollowCancelled(data['requester'] as String);
+        return FollowCancelled(
+          data['requester'] as String,
+          requestId: data['requestId'] as String,
+          revision: (data['revision'] as num).toInt(),
+          reason: data['reason'] as String?,
+        );
       case 'follow-response':
         return FollowResponse(
           data['target'] as String,
           data['accepted'] as bool,
+          requestId: data['requestId'] as String,
+          requester: data['requester'] as String,
+          revision: (data['revision'] as num).toInt(),
           reason: data['reason'] as String?,
         );
-      case 'trails':
-        return TrailsUpdated(locationTrailsFromJson(data));
+      case 'trail':
+        return TrailUpdated(
+          data['handle'] as String,
+          locationPointsFromJson(data['points']),
+          revision: (data['revision'] as num).toInt(),
+        );
       case 'hello':
         return Hello.fromJson(data);
       case 'location':
-        return LocationUpdated(LocationFix.fromJson(data));
+        final fix = tryLocationFix(data);
+        return fix == null
+            ? null
+            : LocationUpdated(
+                fix,
+                revision: (data['revision'] as num?)?.toInt() ?? 0,
+              );
       case 'location-stopped':
-        return LocationStopped(data['handle'] as String);
+        return LocationStopped(
+          data['handle'] as String,
+          reason: data['reason'] as String? ?? 'stopped',
+          revision: (data['revision'] as num?)?.toInt() ?? 0,
+        );
       case 'member-joined':
-        return MemberJoined(data['handle'] as String);
+        return MemberJoined(
+          data['handle'] as String,
+          revision: (data['revision'] as num?)?.toInt() ?? 0,
+        );
       case 'member-left':
-        return MemberLeft(data['handle'] as String);
+        return MemberLeft(
+          data['handle'] as String,
+          revision: (data['revision'] as num?)?.toInt() ?? 0,
+        );
       case 'signal':
         return Signal(
           data['from'] as String,

@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 typedef JsonMap = Map<String, dynamic>;
 
 class User {
@@ -73,18 +75,42 @@ class LocationFix {
     required this.seq,
     this.receivedAt = 0,
   });
-  factory LocationFix.fromJson(JsonMap json) => LocationFix(
-    handle: json['handle'] as String,
-    stream: json['stream'] as String? ?? '',
-    lat: (json['lat'] as num).toDouble(),
-    lng: (json['lng'] as num).toDouble(),
-    acc: (json['acc'] as num?)?.toDouble(),
-    speed: (json['speed'] as num?)?.toDouble(),
-    heading: (json['heading'] as num?)?.toDouble(),
-    at: json['at'] as num,
-    seq: json['seq'] as int,
-    receivedAt: json['receivedAt'] as num,
-  );
+  factory LocationFix.fromJson(JsonMap json) {
+    num number(String key, {num? min, num? max, bool integer = false}) {
+      final value = json[key];
+      if (value is! num ||
+          !value.isFinite ||
+          (min != null && value < min) ||
+          (max != null && value > max) ||
+          (integer && value != value.truncateToDouble())) {
+        throw const FormatException('위치 표본 숫자 범위 오류');
+      }
+      return value;
+    }
+
+    double? optional(String key, {num? max}) =>
+        json[key] == null ? null : number(key, min: 0, max: max).toDouble();
+    final handle = json['handle'];
+    final stream = json['stream'];
+    if (handle is! String ||
+        handle.isEmpty ||
+        stream is! String ||
+        !RegExp(r'^[0-9a-f]{16}$').hasMatch(stream)) {
+      throw const FormatException('위치 표본 식별자 오류');
+    }
+    return LocationFix(
+      handle: handle,
+      stream: stream,
+      lat: number('lat', min: -90, max: 90).toDouble(),
+      lng: number('lng', min: -180, max: 180).toDouble(),
+      acc: optional('acc'),
+      speed: optional('speed'),
+      heading: optional('heading', max: 360),
+      at: number('at', min: 0),
+      seq: number('seq', min: 0, max: 9007199254740991, integer: true).toInt(),
+      receivedAt: number('receivedAt', min: 0),
+    );
+  }
   final String handle;
   final String stream;
   final double lat, lng;
@@ -114,26 +140,55 @@ class LocationFix {
   int get hashCode => _values.hashCode;
 }
 
+bool _invalidLocationLogged = false;
+void logInvalidLocation() {
+  if (_invalidLocationLogged) return;
+  _invalidLocationLogged = true;
+  debugPrint('잘못된 위치 표본을 건너뛰었습니다');
+}
+
+LocationFix? tryLocationFix(Object? value) {
+  try {
+    if (value is! JsonMap) throw const FormatException();
+    return LocationFix.fromJson(value);
+  } on FormatException {
+    logInvalidLocation();
+    return null;
+  }
+}
+
+List<LocationFix> locationPointsFromJson(Object? value) => value is List
+    ? [
+        for (final point in value)
+          if (tryLocationFix(point) case final fix?) fix,
+      ]
+    : const [];
+
 Map<String, List<LocationFix>> locationTrailsFromJson(JsonMap json) =>
     (json['trails'] as JsonMap? ?? {}).map(
-      (handle, points) => MapEntry(
-        handle,
-        (points as List<dynamic>)
-            .map((value) => LocationFix.fromJson(value as JsonMap))
-            .toList(),
-      ),
+      (handle, points) => MapEntry(handle, locationPointsFromJson(points)),
     );
 
 class LocationSnapshot {
   const LocationSnapshot(this.positions, this.trails);
   factory LocationSnapshot.fromJson(JsonMap json) => LocationSnapshot(
-    (json['positions'] as List<dynamic>? ?? [])
-        .map((value) => LocationFix.fromJson(value as JsonMap))
-        .toList(),
+    locationPointsFromJson(json['positions']),
     locationTrailsFromJson(json),
   );
   final List<LocationFix> positions;
   final Map<String, List<LocationFix>> trails;
+}
+
+class FollowResult {
+  const FollowResult(this.requestId, this.revision, this.accepted);
+  factory FollowResult.fromJson(JsonMap json) => FollowResult(
+    json['requestId'] as String,
+    (json['revision'] as num).toInt(),
+    json['accepted'] as bool,
+  );
+  final String requestId;
+  final int revision;
+  final bool accepted;
 }
 
 class IceServerCredentials {
@@ -175,6 +230,9 @@ final class Hello extends RoomEvent {
     this.trails = const {},
     this.followTarget,
     this.followRequests = const [],
+    this.revision = 0,
+    this.pendingFollow,
+    this.followRequestId,
   ]);
   factory Hello.fromJson(JsonMap json) {
     final self = json['self'];
@@ -188,7 +246,12 @@ final class Hello extends RoomEvent {
       snapshot.positions,
       snapshot.trails,
       json['followTarget'] as String?,
-      (json['followRequests'] as List<dynamic>? ?? []).cast<String>(),
+      (json['followRequests'] as List<dynamic>? ?? [])
+          .map((value) => FollowRequest.fromJson(value as JsonMap))
+          .toList(),
+      (json['revision'] as num?)?.toInt() ?? 0,
+      json['pendingFollow'] as String?,
+      json['followRequestId'] as String?,
     );
   }
   final String self;
@@ -197,49 +260,89 @@ final class Hello extends RoomEvent {
   final List<LocationFix> positions;
   final Map<String, List<LocationFix>> trails;
   final String? followTarget;
-  final List<String> followRequests;
+  final List<FollowRequest> followRequests;
+  final int revision;
+  final String? pendingFollow, followRequestId;
 }
 
 final class FollowRequest extends RoomEvent {
-  const FollowRequest(this.requester);
-  final String requester;
+  const FollowRequest(
+    this.requester, {
+    required this.requestId,
+    this.displayName,
+    this.revision = 0,
+  });
+  factory FollowRequest.fromJson(JsonMap json) => FollowRequest(
+    json['requester'] as String,
+    requestId: json['requestId'] as String,
+    displayName: json['displayName'] as String?,
+    revision: (json['revision'] as num?)?.toInt() ?? 0,
+  );
+  final String requester, requestId;
+  final String? displayName;
+  final int revision;
 }
 
 final class FollowCancelled extends RoomEvent {
-  const FollowCancelled(this.requester);
-  final String requester;
-}
-
-final class FollowResponse extends RoomEvent {
-  const FollowResponse(this.target, this.accepted, {this.reason});
-  final String target;
-  final bool accepted;
+  const FollowCancelled(
+    this.requester, {
+    required this.requestId,
+    this.revision = 0,
+    this.reason,
+  });
+  final String requester, requestId;
+  final int revision;
   final String? reason;
 }
 
-final class TrailsUpdated extends RoomEvent {
-  const TrailsUpdated(this.trails);
-  final Map<String, List<LocationFix>> trails;
+final class FollowResponse extends RoomEvent {
+  const FollowResponse(
+    this.target,
+    this.accepted, {
+    required this.requestId,
+    this.requester = '',
+    this.revision = 0,
+    this.reason,
+  });
+  final String target, requestId, requester;
+  final bool accepted;
+  final int revision;
+  final String? reason;
+}
+
+final class TrailUpdated extends RoomEvent {
+  const TrailUpdated(this.handle, this.points, {this.revision = 0});
+  final String handle;
+  final List<LocationFix> points;
+  final int revision;
 }
 
 final class LocationUpdated extends RoomEvent {
-  const LocationUpdated(this.fix);
+  const LocationUpdated(this.fix, {this.revision = 0});
   final LocationFix fix;
+  final int revision;
 }
 
 final class LocationStopped extends RoomEvent {
-  const LocationStopped(this.handle);
-  final String handle;
+  const LocationStopped(
+    this.handle, {
+    this.reason = 'stopped',
+    this.revision = 0,
+  });
+  final String handle, reason;
+  final int revision;
 }
 
 final class MemberJoined extends RoomEvent {
-  const MemberJoined(this.handle);
+  const MemberJoined(this.handle, {this.revision = 0});
   final String handle;
+  final int revision;
 }
 
 final class MemberLeft extends RoomEvent {
-  const MemberLeft(this.handle);
+  const MemberLeft(this.handle, {this.revision = 0});
   final String handle;
+  final int revision;
 }
 
 final class Signal extends RoomEvent {

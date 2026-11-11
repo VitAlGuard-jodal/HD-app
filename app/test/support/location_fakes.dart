@@ -66,7 +66,7 @@ class FakeLocationHttp {
   final events = StreamController<List<int>>(onCancel: () async {});
   int failures = 0;
   bool dropped = false, deleteFails = false, hang = false;
-  Future<void>? sendGate;
+  Future<void>? sendGate, deleteGate;
   JsonMap snapshot = {'positions': <JsonMap>[], 'trails': <String, dynamic>{}};
   List<LocationHttpCall> get posts =>
       calls.where((call) => call.method == 'POST').toList();
@@ -88,14 +88,20 @@ class FakeLocationHttp {
           'error': {'code': 'unavailable', 'message': '위치 전송 실패'},
         });
       }
-      return _json(202, {'accepted': true, 'dropped': dropped});
+      return _json(202, {
+        'accepted': true,
+        'dropped': dropped,
+        'requestId': 'request-1',
+        'revision': 1,
+      });
     }
     if (call.method == 'DELETE') {
+      if (deleteGate != null) await deleteGate;
       return deleteFails
           ? _json(503, {
               'error': {'message': '중지 실패'},
             })
-          : _json(202, {'accepted': true});
+          : _json(202, {'accepted': true, 'revision': 2});
     }
     return _json(200, snapshot);
   }

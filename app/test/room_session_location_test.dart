@@ -97,6 +97,7 @@ void main() {
       final f = _Fixture.create(clock);
       f.open(positions: [_fix('bob', 0)]);
       final trail = List.generate(7205, (seq) => _fix('alice', seq));
+      f.startSharing();
       f.event(
         Hello('bob', f.api.members, 'alice', [trail.last], {'alice': trail}),
       );
@@ -109,13 +110,12 @@ void main() {
       expect(f.session.trailOf('alice').last.seq, 7205);
       f.event(const LocationStopped('alice'));
       f.event(LocationUpdated(_fix('alice', 0)));
-      expect(f.session.trailOf('alice').first.seq, 6); // 이미 잘린 seq도 재누적하지 않는다.
-      expect(f.session.trailOf('alice').last.seq, 7205);
+      expect(f.session.trailOf('alice'), isEmpty);
       f.dispose();
     });
   });
 
-  test('location-stopped·member-left는 현재 위치만 지우고 그룹장 궤적은 보존한다', () {
+  test('location-stopped·member-left는 종료된 대상 위치와 궤적을 지운다', () {
     fakeAsync((clock) {
       final f = _Fixture.create(clock);
       f.open(
@@ -126,7 +126,7 @@ void main() {
       f.session.addListener(() => notifications++);
       f.event(const LocationStopped('alice'));
       expect(f.session.positions.containsKey('alice'), isFalse);
-      expect(f.session.trailOf('alice'), hasLength(1));
+      expect(f.session.trailOf('alice'), isEmpty);
       expect(notifications, 1);
       f.event(const LocationStopped('alice'));
       expect(notifications, 1);
@@ -134,7 +134,7 @@ void main() {
       f.event(const MemberLeft('bob'));
       expect(f.session.positions, isEmpty);
       expect(f.session.leaderHandle, 'alice');
-      expect(f.session.trailOf('alice'), hasLength(1));
+      expect(f.session.trailOf('alice'), isEmpty);
       f.dispose();
     });
   });
@@ -247,7 +247,7 @@ void main() {
           final following = f.session.startFollowing('alice');
           clock.flushMicrotasks();
           expect(f.api.follows, ['alice']);
-          expect(f.session.followTarget, 'alice');
+          expect(f.session.followIntent, 'alice');
           final locationGate = Completer<void>();
           f.http.sendGate = locationGate.future;
           f.sample(speed: .5);
@@ -261,7 +261,9 @@ void main() {
           gate.complete();
           _finish(clock, following);
           expect(f.api.unfollows, 1);
-          f.event(const FollowResponse('alice', true));
+          f.event(
+            const FollowResponse('alice', true, requestId: 'alice-request'),
+          );
           expect(f.session.followTarget, isNull);
           f.sample(speed: 2);
           expect(f.api.unfollows, 1); // 최초 판정 때 한 번만 취소한다.
@@ -281,7 +283,18 @@ void main() {
       f.startSharing();
       _finish(clock, f.session.startFollowing('alice'));
       f.event(
-        Hello('bob', f.api.members, 'alice', const [], const {}, 'alice'),
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          const [],
+          const {},
+          'alice',
+          const [],
+          2,
+          null,
+          'alice-request',
+        ),
       );
       f.sample(speed: .5);
       expect(f.session.followTarget, isNull);
@@ -356,13 +369,13 @@ void main() {
       f.startSharing();
       f.sample();
       expect(f.session.positions['alice']?.seq, 0);
-      expect(f.session.trailOf('alice').single.seq, 0);
+      expect(f.session.trailOf('alice'), isEmpty);
       clock.elapse(const Duration(seconds: 1));
       f.sample(lat: 37.001);
-      expect(f.session.trailOf('alice').map((fix) => fix.seq), [0, 1]);
+      expect(f.session.trailOf('alice'), isEmpty);
       _finish(clock, f.session.locationShare.stop());
       expect(f.session.positions, isEmpty);
-      expect(f.session.trailOf('alice'), hasLength(2));
+      expect(f.session.trailOf('alice'), isEmpty);
       f.dispose();
     });
   });
@@ -376,23 +389,22 @@ void main() {
       _finish(clock, f.session.startFollowing('bob'));
       expect(f.session.followTarget, 'bob');
       expect(f.api.follows, ['bob']);
-      f.event(
-        TrailsUpdated({
-          'bob': [_fix('bob', 0)],
-          'charlie': [_fix('charlie', 0)],
-        }),
-      );
+      f.event(TrailUpdated('bob', [_fix('bob', 0)], revision: 1));
       f.event(LocationUpdated(_fix('bob', 1)));
       expect(f.session.trailOf('bob').map((fix) => fix.seq), [0, 1]);
-      expect(f.session.trailOf('charlie').map((fix) => fix.seq), [0]);
+      expect(f.session.trailOf('charlie'), isEmpty);
       _finish(clock, f.session.startFollowing('charlie'));
-      f.event(const FollowResponse('bob', false)); // 이전 대상의 늦은 응답
+      f.event(
+        const FollowResponse('bob', false, requestId: 'bob-request'),
+      ); // 이전 대상의 늦은 응답
       expect(f.session.followTarget, 'charlie');
-      f.event(const FollowResponse('charlie', false));
+      f.event(
+        const FollowResponse('charlie', false, requestId: 'charlie-request'),
+      );
       expect(f.session.followTarget, isNull);
       expect(f.session.takeFollowNotice()?.target, 'charlie');
       expect(f.session.locationShare.sharing, isTrue);
-      f.event(const TrailsUpdated({}));
+      f.event(const LocationStopped('charlie'));
       expect(f.session.trailOf('bob'), isEmpty);
       expect(f.session.trailOf('charlie'), isEmpty);
       f.dispose();
@@ -416,7 +428,7 @@ void main() {
       _finish(clock, pending);
       _finish(clock, stopping);
       expect(f.api.unfollows, 1);
-      f.event(const FollowResponse('alice', true));
+      f.event(const FollowResponse('alice', true, requestId: 'alice-request'));
       expect(f.session.followTarget, isNull);
       f.dispose();
     });
@@ -453,6 +465,294 @@ void main() {
       });
     });
   }
+  for (final action in ['leave', 'forget']) {
+    test('R2 $action는 위치 POST 완료 전에 미디어와 통화 서비스를 종료한다', () {
+      fakeAsync((clock) {
+        final f = _Fixture.create(clock);
+        f.open();
+        f.startSharing();
+        final gate = Completer<void>();
+        f.http.sendGate = gate.future;
+        f.sample();
+        final mediaLeaves = f.media.leaves;
+        final callStops = f.calls.stops;
+        final leaving = action == 'leave'
+            ? f.session.leave()
+            : f.session.forget();
+        clock.flushMicrotasks();
+        expect(f.media.leaves, mediaLeaves + 1);
+        expect(f.calls.stops, callStops + 1);
+        expect(f.session.mediaConnection, MediaConnectionState.idle);
+        expect(f.session.state.isLeaving, isTrue);
+        expect(f.http.deletes, isEmpty);
+        gate.complete();
+        _finish(clock, leaving);
+        expect(f.http.deletes, hasLength(1));
+        f.dispose();
+      });
+    });
+  }
+
+  test('C5 오래된 hello→SSE 수락→POST 완료 순서와 수락 A→B 전환을 조정한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.api.members = [...f.api.members, const Member('charlie', '찰리', '3')];
+      f.open();
+      f.startSharing();
+      _finish(clock, f.session.startFollowing('alice'));
+      final gate = Completer<void>();
+      f.api.followGate = gate.future;
+      f.api.followResult = const FollowResult('b-new', 5, false);
+      final pending = f.session.startFollowing('charlie');
+      clock.flushMicrotasks();
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          const [],
+          const {},
+          'alice',
+          const [],
+          2,
+          null,
+          'alice-request',
+        ),
+      );
+      expect(f.session.pendingFollow, 'charlie');
+      expect(f.session.followTarget, isNull);
+      f.event(
+        const FollowResponse('charlie', true, requestId: 'b-new', revision: 6),
+      );
+      gate.complete();
+      _finish(clock, pending);
+      expect(f.session.followTarget, 'charlie');
+      expect(f.session.followRequestId, 'b-new');
+      expect(f.session.followServerRevision, 6);
+      f.event(const LocationStopped('charlie', revision: 4));
+      expect(f.session.followTarget, 'charlie');
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          const [],
+          const {},
+          'alice',
+          const [],
+          4,
+          null,
+          'alice-request',
+        ),
+      );
+      expect(f.session.followTarget, 'charlie');
+      f.event(
+        const FollowResponse('charlie', false, requestId: 'b-old', revision: 7),
+      );
+      expect(f.session.followTarget, 'charlie');
+      f.dispose();
+    });
+  });
+
+  test('C4 hello는 수락·pending·수신 요청을 복원하되 새 실행은 공유를 켜지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      final hello = Hello(
+        'bob',
+        f.api.members,
+        'alice',
+        [_fix('alice', 0)],
+        const {},
+        null,
+        const [
+          FollowRequest('alice', requestId: 'incoming', displayName: '앨리스'),
+        ],
+        3,
+        'alice',
+        'pending-id',
+      );
+      f.event(hello);
+      expect(f.session.locationShare.sharing, isFalse);
+      expect(f.session.pendingFollow, isNull);
+      expect(f.source.requests, 0);
+      expect(f.session.followRequests.keys, ['incoming']);
+      f.startSharing();
+      f.event(hello);
+      expect(f.session.pendingFollow, 'alice');
+      expect(f.session.followTarget, isNull);
+      expect(f.session.followRequestId, 'pending-id');
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          const [],
+          const {},
+          'alice',
+          const [],
+          4,
+          null,
+          'pending-id',
+        ),
+      );
+      expect(f.session.followTarget, 'alice');
+      expect(f.session.pendingFollow, isNull);
+      f.dispose();
+    });
+  });
+
+  test('C6 알려지지 않은 requester를 보관하고 refresh 중 취소를 즉시 반영한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      final gate = Completer<void>();
+      f.api.roomGate = gate.future;
+      f.event(
+        const FollowRequest(
+          'charlie',
+          requestId: 'unknown-request',
+          displayName: '이벤트 이름',
+          revision: 1,
+        ),
+      );
+      expect(
+        f.session.followRequests['unknown-request']?.displayName,
+        '이벤트 이름',
+      );
+      expect(f.session.readyFollowRequests, isEmpty);
+      f.event(
+        const FollowCancelled(
+          'charlie',
+          requestId: 'unknown-request',
+          revision: 2,
+        ),
+      );
+      expect(f.session.followRequests, isEmpty);
+      f.api.members = [...f.api.members, const Member('charlie', '찰리', '3')];
+      gate.complete();
+      clock.flushMicrotasks();
+      expect(f.session.readyFollowRequests, isEmpty);
+      f.event(
+        const FollowRequest(
+          'charlie',
+          requestId: 'new-request',
+          displayName: '이벤트 이름',
+          revision: 3,
+        ),
+      );
+      expect(f.session.readyFollowRequests.single.requestId, 'new-request');
+      f.dispose();
+    });
+  });
+
+  for (final cancelledBy in ['cancel', 'left', 'room']) {
+    test('C2 권한 대기 중 $cancelledBy는 요청 토큰을 무효화한다', () {
+      fakeAsync((clock) {
+        final f = _Fixture.create(clock, handle: 'alice');
+        f.open();
+        f.event(const FollowRequest('bob', requestId: 'req', revision: 1));
+        final token = f.session.beginLocationStart('bob', requestId: 'req');
+        f.source.pendingPermission = Completer<LocationPermissionState>();
+        final start = f.session.locationShare.start(
+          token: token,
+          stillValid: () => f.session.locationStartValid(token),
+        );
+        clock.flushMicrotasks();
+        switch (cancelledBy) {
+          case 'cancel':
+            f.event(
+              const FollowCancelled('bob', requestId: 'req', revision: 2),
+            );
+          case 'left':
+            f.event(const MemberLeft('bob'));
+          case 'room':
+            f.session.state = const RoomState(code: 'NEW123');
+        }
+        f.source.pendingPermission!.complete(LocationPermissionState.granted);
+        _finish(clock, start);
+        expect(f.session.locationShare.sharing, isFalse);
+        expect(f.source.watches, 0);
+        expect(f.http.posts, isEmpty);
+        f.dispose();
+      });
+    });
+  }
+
+  test('C2 수락 전 outbound 토큰은 새 공유를 정리하고 기존 공유는 유지한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      f.api.accepted = false;
+      final token = f.session.beginLocationStart('alice');
+      _finish(
+        clock,
+        f.session.locationShare.start(
+          token: token,
+          stillValid: () => f.session.locationStartValid(token),
+        ),
+      );
+      _finish(clock, f.session.startFollowing('alice'));
+      expect(f.session.pendingFollow, 'alice');
+      f.event(const MemberLeft('alice'));
+      expect(f.session.locationShare.sharing, isFalse);
+      expect(f.source.cancellations, 1);
+      f.startSharing();
+      final existingToken = f.session.beginLocationStart('alice');
+      _finish(
+        clock,
+        f.session.locationShare.start(
+          token: existingToken,
+          stillValid: () => true,
+        ),
+      );
+      f.session.cancelLocationStart(existingToken);
+      expect(f.session.locationShare.sharing, isTrue);
+      f.dispose();
+    });
+  });
+  test('C5 pending 대상 전환은 이전 토큰의 늦은 무효화로 기존 공유를 끄지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.api.members = [...f.api.members, const Member('charlie', '찰리', '3')];
+      f.api.accepted = false;
+      f.open();
+      final first = f.session.beginLocationStart('alice');
+      _finish(
+        clock,
+        f.session.locationShare.start(
+          token: first,
+          stillValid: () => f.session.locationStartValid(first),
+        ),
+      );
+      _finish(clock, f.session.startFollowing('alice'));
+      final next = f.session.beginLocationStart('charlie');
+      _finish(
+        clock,
+        f.session.locationShare.start(
+          token: next,
+          stillValid: () => f.session.locationStartValid(next),
+        ),
+      );
+      _finish(clock, f.session.startFollowing('charlie'));
+      f.sample();
+      expect(f.session.pendingFollow, 'charlie');
+      expect(f.session.locationShare.sharing, isTrue);
+      expect(f.source.watches, 1);
+      expect(f.source.cancellations, 0);
+      f.event(
+        const FollowResponse(
+          'alice',
+          false,
+          requestId: 'alice-request',
+          revision: 3,
+        ),
+      );
+      expect(f.session.pendingFollow, 'charlie');
+      expect(f.session.locationShare.sharing, isTrue);
+      f.dispose();
+    });
+  });
 }
 
 T _finish<T>(FakeAsync clock, Future<T> future) {
@@ -475,7 +775,7 @@ class _Fixture {
     mic = MicRouter(store);
     session = RoomSession(
       api: api,
-      mediaEngine: _Media(),
+      mediaEngine: media,
       store: store,
       callService: calls,
       micRouter: mic,
@@ -502,6 +802,7 @@ class _Fixture {
   final http = FakeLocationHttp();
   final source = FakeLocationSource();
   final calls = _Calls();
+  final media = _Media();
   late final _Api api;
   late final MicRouter mic;
   late final RoomSession session;
@@ -512,6 +813,7 @@ class _Fixture {
   }) {
     _finish(clock, session.open('ABC123'));
     _finish(clock, session.leaveCall()); // 위치 테스트에서는 자동 통화를 시작하지 않는다.
+    if (trail.isNotEmpty) startSharing();
     event(
       Hello(store.handle!, api.members, 'alice', positions, {'alice': trail}),
     );
@@ -523,7 +825,10 @@ class _Fixture {
   }
 
   void startSharing() {
-    _finish(clock, session.locationShare.start());
+    _finish(
+      clock,
+      session.locationShare.start(token: Object(), stillValid: () => true),
+    );
   }
 
   void sample({double lat = 37, double speed = 2}) {
@@ -560,21 +865,34 @@ class _Api extends ApiClient {
   Future<void>? followGate;
   int unfollows = 0;
   @override
-  Future<void> follow(String code, String target) async {
+  Future<FollowResult> follow(String code, String target) async {
     follows.add(target);
+    final result = FollowResult('$target-request', ++revision, accepted);
     await followGate;
+    return followResult ?? result;
   }
 
+  int revision = 0;
+  bool accepted = true;
+  FollowResult? followResult;
+  Future<void>? roomGate;
+  bool roomFails = false;
+
   @override
-  Future<void> stopFollowing(String code) async {
+  Future<int> stopFollowing(String code) async {
     unfollows++;
+    return ++revision;
   }
 
   int leaves = 0;
   Future<void> close() => events.close();
   @override
-  Future<RoomDetails> getRoom(String code) async =>
-      RoomDetails(Room(code, null, leader: 'alice'), members);
+  Future<RoomDetails> getRoom(String code) async {
+    await roomGate;
+    if (roomFails) throw const ApiException(503, 'unavailable', '조회 실패');
+    return RoomDetails(Room(code, null, leader: 'alice'), members);
+  }
+
   @override
   Stream<RoomEvent> subscribeEvents(String code) => events.stream;
   @override
@@ -584,11 +902,20 @@ class _Api extends ApiClient {
 }
 
 class _Calls extends CallService {
+  int stops = 0;
+  @override
+  Future<void> stop() async {
+    stops++;
+  }
+
   @override
   bool get supported => false;
 }
 
 class _Media extends NoopMediaEngine {
+  int leaves = 0;
   @override
-  Future<void> leave() async {}
+  Future<void> leave() async {
+    leaves++;
+  }
 }

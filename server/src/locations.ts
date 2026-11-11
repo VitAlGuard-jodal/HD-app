@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 export interface LocationFix {
   handle: string;
   stream: string;
@@ -13,7 +15,17 @@ export interface LocationFix {
 
 export const LOCATION_TRAIL_LIMIT = 7_200;
 export const LOCATION_MIN_INTERVAL_MS = 400;
+export const LOCATION_DISCONNECT_GRACE_MS = 30_000;
+export const LOCATION_STALE_MS = 90_000;
+export const LOCATION_SWEEP_INTERVAL_MS = 30_000;
+export const FOLLOW_MIN_INTERVAL_MS = 1_000;
 
+export interface FollowRelation {
+  requestId: string;
+  requester: string;
+  target: string;
+  displayName: string;
+}
 export interface LocationSnapshot {
   positions: LocationFix[];
   trails: Record<string, LocationFix[]>;
@@ -21,13 +33,17 @@ export interface LocationSnapshot {
 
 type Acceptance = { ok: false; reason: "invalid" | "rate" } | { ok: true; dropped: boolean };
 interface RoomLocations {
+  revision: number;
   positions: Map<string, LocationFix>;
   trails: Map<string, LocationFix[]>;
   followers: Map<string, Set<string>>;
-  pending: Map<string, string>;
+  accepted: Map<string, FollowRelation>;
+  pendingRequests: Map<string, FollowRelation>;
   sharing: Set<string>;
+  disconnectedAt: Map<string, number>;
   lastSeq: Map<string, number>;
   lastReceivedAt: Map<string, number>;
+  lastFollowAt: Map<string, number>;
 }
 
 function finite(value: unknown): value is number {
@@ -44,89 +60,149 @@ function valid(value: unknown): value is Omit<LocationFix, "receivedAt"> {
     && (fix.acc === undefined || finite(fix.acc) && fix.acc >= 0)
     && (fix.speed === undefined || finite(fix.speed) && fix.speed >= 0)
     && (fix.heading === undefined || finite(fix.heading) && fix.heading >= 0 && fix.heading <= 360)
-    && finite(fix.at) && Number.isInteger(fix.seq) && (fix.seq as number) >= 0;
+    && finite(fix.at) && fix.at >= 0 && Number.isSafeInteger(fix.seq) && (fix.seq as number) >= 0;
 }
 
 export class RoomLocationStore {
   #rooms = new Map<string, RoomLocations>();
+  #now: () => number;
+
+  constructor(now = () => Date.now()) { this.#now = now; }
 
   #room(code: string): RoomLocations {
     let room = this.#rooms.get(code);
     if (!room) {
-      room = { positions: new Map(), trails: new Map(), followers: new Map(),
-        pending: new Map(), sharing: new Set(), lastSeq: new Map(), lastReceivedAt: new Map() };
+      room = { revision: 0, positions: new Map(), trails: new Map(), followers: new Map(),
+        accepted: new Map(), pendingRequests: new Map(), sharing: new Set(), disconnectedAt: new Map(),
+        lastSeq: new Map(), lastReceivedAt: new Map(), lastFollowAt: new Map() };
       this.#rooms.set(code, room);
     }
     return room;
   }
 
-  targetOf(code: string, requester: string): string | null {
-    for (const [target, followers] of this.#rooms.get(code)?.followers ?? []) {
-      if (followers.has(requester)) return target;
-    }
-    return null;
-  }
+  revision(code: string): number { return this.#rooms.get(code)?.revision ?? 0; }
+  changed(code: string): number { return ++this.#room(code).revision; }
 
-  requestsFor(code: string, target: string): string[] {
-    return [...(this.#rooms.get(code)?.pending ?? [])]
-      .filter(([, handle]) => handle === target).map(([requester]) => requester);
-  }
-
-  requestFollow(code: string, requester: string, target: string): boolean {
-    if (this.targetOf(code, requester) !== target) this.unfollow(code, requester);
+  allowFollow(code: string, handle: string): boolean {
     const room = this.#room(code);
-    let followers = room.followers.get(target);
+    const now = this.#now();
+    const previous = room.lastFollowAt.get(handle);
+    if (previous !== undefined && now - previous < FOLLOW_MIN_INTERVAL_MS) return false;
+    room.lastFollowAt.set(handle, now);
+    return true;
+  }
+
+  disconnected(code: string, handle: string): void {
+    const room = this.#room(code);
+    if (room.disconnectedAt.has(handle)) return;
+    room.disconnectedAt.set(handle, this.#now());
+    room.revision++;
+  }
+
+  reconnected(code: string, handle: string): void {
+    const room = this.#rooms.get(code);
+    if (room?.disconnectedAt.delete(handle)) room.revision++;
+  }
+
+  disconnectedAt(code: string, handle: string): number | undefined {
+    return this.#rooms.get(code)?.disconnectedAt.get(handle);
+  }
+
+  targetOf(code: string, requester: string): string | null {
+    return this.#rooms.get(code)?.accepted.get(requester)?.target ?? null;
+  }
+
+  relationOf(code: string, requester: string): FollowRelation | undefined {
+    const room = this.#rooms.get(code);
+    const relation = room?.accepted.get(requester) ?? room?.pendingRequests.get(requester);
+    return relation ? { ...relation } : undefined;
+  }
+
+  pendingOf(code: string, requester: string): string | null {
+    return this.#rooms.get(code)?.pendingRequests.get(requester)?.target ?? null;
+  }
+
+  requestsFor(code: string, target: string): FollowRelation[] {
+    return [...(this.#rooms.get(code)?.pendingRequests.values() ?? [])]
+      .filter((request) => request.target === target).map((request) => ({ ...request }));
+  }
+
+  requestById(code: string, target: string, requestId: string): FollowRelation | undefined {
+    return this.requestsFor(code, target).find((request) => request.requestId === requestId);
+  }
+
+  #addFollower(room: RoomLocations, relation: FollowRelation): void {
+    let followers = room.followers.get(relation.target);
     if (!followers) {
       followers = new Set();
-      room.followers.set(target, followers);
-      const current = room.positions.get(target);
-      room.trails.set(target, current ? [current] : []);
+      room.followers.set(relation.target, followers);
+      const current = room.positions.get(relation.target);
+      room.trails.set(relation.target, current ? [current] : []);
     }
-    followers.add(requester);
+    followers.add(relation.requester);
+    room.accepted.set(relation.requester, relation);
+    room.pendingRequests.delete(relation.requester);
+  }
+
+  requestFollow(code: string, requester: string, target: string, displayName = requester) {
+    const room = this.#room(code);
+    const previous = this.relationOf(code, requester);
+    if (previous?.target === target) {
+      const promoted = !room.accepted.has(requester) && room.sharing.has(target);
+      if (promoted) { this.#addFollower(room, previous); room.revision++; }
+      return { ...previous, accepted: room.accepted.has(requester), changed: promoted, revision: room.revision };
+    }
+    this.unfollow(code, requester);
+    const relation = { requestId: randomUUID(), requester, target, displayName };
     const accepted = room.sharing.has(target);
-    if (accepted) room.pending.delete(requester);
-    else room.pending.set(requester, target);
-    return accepted;
+    if (accepted) this.#addFollower(room, relation);
+    else room.pendingRequests.set(requester, relation);
+    room.revision++;
+    return { ...relation, accepted, changed: true, revision: room.revision };
   }
 
-  respondFollow(code: string, target: string, requester: string, accepted: boolean): string[] | null {
+  respondFollow(code: string, target: string, requestId: string, accepted: boolean): FollowRelation[] | null {
     const room = this.#rooms.get(code);
-    if (room?.pending.get(requester) !== target) return null;
+    const request = this.requestById(code, target, requestId);
+    if (!room || !request) return null;
     if (!accepted) {
-      this.unfollow(code, requester);
-      return [requester];
+      this.unfollow(code, request.requester);
+      return [request];
     }
-    // start() 이후 첫 GPS 표본이 오기 전에도 같은 세션의 공유 동의를 기억한다.
+    // 같은 공유 동의로 이 대상에게 도착한 대기 요청들을 함께 수락한다.
     room.sharing.add(target);
-    const requesters = this.requestsFor(code, target);
-    for (const handle of requesters) room.pending.delete(handle);
-    return requesters;
+    const requests = this.requestsFor(code, target);
+    for (const relation of requests) this.#addFollower(room, relation);
+    room.revision++;
+    return requests;
   }
 
-  unfollow(code: string, requester: string): string | null {
+  unfollow(code: string, requester: string): FollowRelation | undefined {
     const room = this.#rooms.get(code);
-    const target = this.targetOf(code, requester);
-    room?.pending.delete(requester);
-    if (room && target) {
-      const followers = room.followers.get(target)!;
-      followers.delete(requester);
-      if (followers.size === 0) {
-        room.followers.delete(target);
-        room.trails.delete(target);
-      }
+    const relation = this.relationOf(code, requester);
+    if (!room || !relation) return undefined;
+    room.pendingRequests.delete(requester);
+    room.accepted.delete(requester);
+    const followers = room.followers.get(relation.target);
+    followers?.delete(requester);
+    if (followers?.size === 0) {
+      room.followers.delete(relation.target);
+      room.trails.delete(relation.target);
     }
-    return target;
+    room.revision++;
+    return relation;
   }
 
-  removeFollows(code: string, handle: string): { target: string | null; requesters: string[] } {
-    const target = this.unfollow(code, handle);
+  removeFollows(code: string, handle: string): { outgoing?: FollowRelation; incoming: FollowRelation[] } {
+    const outgoing = this.unfollow(code, handle);
     const room = this.#rooms.get(code);
-    const requesters = [...(room?.followers.get(handle) ?? [])];
-    for (const requester of requesters) this.unfollow(code, requester);
-    return { target, requesters };
+    const incoming = [...(room?.accepted.values() ?? []), ...(room?.pendingRequests.values() ?? [])]
+      .filter((relation) => relation.target === handle);
+    for (const relation of incoming) this.unfollow(code, relation.requester);
+    return { outgoing, incoming };
   }
 
-  accept(code: string, fix: unknown, now = Date.now()): Acceptance {
+  accept(code: string, fix: unknown, now = this.#now()): Acceptance {
     if (!valid(fix) || !finite(now)) return { ok: false, reason: "invalid" };
     const room = this.#room(code);
     const lastReceivedAt = room.lastReceivedAt.get(fix.handle);
@@ -136,7 +212,6 @@ export class RoomLocationStore {
     room.lastReceivedAt.set(fix.handle, now);
     const sequenceKey = JSON.stringify([fix.handle, fix.stream]);
     if (fix.seq <= (room.lastSeq.get(sequenceKey) ?? -1)) return { ok: true, dropped: true };
-
     const stored: LocationFix = {
       handle: fix.handle, stream: fix.stream, lat: fix.lat, lng: fix.lng,
       ...(fix.acc === undefined ? {} : { acc: fix.acc }),
@@ -152,31 +227,59 @@ export class RoomLocationStore {
       trail.push(stored);
       if (trail.length > LOCATION_TRAIL_LIMIT) trail.splice(0, trail.length - LOCATION_TRAIL_LIMIT);
     }
+    room.revision++;
     return { ok: true, dropped: false };
   }
 
-  snapshot(code: string): LocationSnapshot {
+  snapshot(code: string, requester?: string): LocationSnapshot {
     const room = this.#rooms.get(code);
+    const now = this.#now();
+    const fresh = (fix: LocationFix) => now - fix.receivedAt < LOCATION_STALE_MS;
+    const target = requester === undefined ? undefined : this.targetOf(code, requester);
     return {
-      positions: [...(room?.positions.values() ?? [])].map((fix) => ({ ...fix })),
+      positions: [...(room?.positions.values() ?? [])].filter(fresh).map((fix) => ({ ...fix })),
       trails: Object.fromEntries([...(room?.trails ?? [])]
+        .filter(([handle]) => (target === undefined || target === handle)
+          && (!room?.positions.has(handle) || fresh(room.positions.get(handle)!)))
         .map(([handle, points]) => [handle, points.map((fix) => ({ ...fix }))])),
     };
   }
 
+  stale(): { code: string; handle: string }[] {
+    const expired: { code: string; handle: string }[] = [];
+    for (const [code, room] of this.#rooms) {
+      for (const fix of room.positions.values()) {
+        if (this.#now() - fix.receivedAt >= LOCATION_STALE_MS) expired.push({ code, handle: fix.handle });
+      }
+    }
+    return expired;
+  }
+
+  codesFor(handle: string): string[] {
+    return [...this.#rooms].filter(([, room]) => room.sharing.has(handle)
+      || room.disconnectedAt.has(handle) || room.accepted.has(handle) || room.pendingRequests.has(handle)
+      || this.#requestsForRoom(room, handle)).map(([code]) => code);
+  }
+
+  #requestsForRoom(room: RoomLocations, handle: string): boolean {
+    return [...room.accepted.values(), ...room.pendingRequests.values()].some((r) => r.target === handle);
+  }
+
   position(code: string, handle: string): LocationFix | undefined {
     const fix = this.#rooms.get(code)?.positions.get(handle);
-    return fix ? { ...fix } : undefined;
+    return fix && this.#now() - fix.receivedAt < LOCATION_STALE_MS ? { ...fix } : undefined;
   }
 
   remove(code: string, handle: string): boolean {
     // 순번은 같은 stream의 늦은 표본을 거르기 위해 방 수명 동안 보존한다.
     const room = this.#rooms.get(code);
-    room?.sharing.delete(handle);
-    return room?.positions.delete(handle) ?? false;
+    if (!room) return false;
+    const sharing = room.sharing.delete(handle);
+    const position = room.positions.delete(handle);
+    const disconnected = room.disconnectedAt.delete(handle);
+    if (sharing || position || disconnected) room.revision++;
+    return sharing || position;
   }
 
-  clear(code: string): void {
-    this.#rooms.delete(code);
-  }
+  clear(code: string): void { this.#rooms.delete(code); }
 }

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../auth/legal_consent_store.dart';
 import '../../audio/mic_router.dart' show OutputRouteLabel;
 import '../../call/media_engine.dart';
 import '../../call/mesh_coordinator.dart';
@@ -91,51 +92,82 @@ class _RoomScreenState extends State<RoomScreen> {
   Future<void> _tapMember(BuildContext dialogContext, Member member) async {
     final session = widget.services.rooms;
     final code = session.state.code;
-    if (member.handle == widget.services.store.handle || code == null) return;
-    final stopping = session.followTarget == member.handle;
+    if (code == null) return;
+    if (member.handle == widget.services.store.handle) {
+      await _stopSharing(dialogContext);
+      return;
+    }
+    final stopping = session.followIntent == member.handle;
     if (!stopping && !session.checkFollowAllowed(member.handle)) return;
+    final token = session.beginLocationStart(member.handle);
+    bool valid() => mounted && session.locationStartValid(token);
+    var pending = false;
+    try {
+      final accepted = await showConsentDialog(
+        dialogContext,
+        title: stopping ? '따라가기 중지' : '따라가기',
+        lines: stopping
+            ? [
+                member.displayName,
+                '${member.displayName} 님의 따라가기를 중지합니다',
+                '지도는 닫히고 내 위치 공유는 계속됩니다',
+              ]
+            : [
+                member.displayName,
+                '${member.displayName} 님의 위치를 따라갑니다',
+                '내 위치도 같은 방 참여자에게 보입니다',
+                '방을 나가거나 위치 공유를 중지하면 공유가 끝납니다',
+                '위치는 방이 있는 동안만 서버(국내)에 남습니다',
+              ],
+      );
+      if (!mounted ||
+          !dialogContext.mounted ||
+          session.state.code != code ||
+          session.state.isLeaving)
+        return;
+      if (!accepted) {
+        if (!stopping)
+          await showNoticeDialog(
+            dialogContext,
+            message: '동의하지 않아 따라가기 기능을 사용할 수 없습니다',
+          );
+        return;
+      }
+      if (stopping) {
+        await session.stopFollowing();
+        return;
+      }
+      if (!valid()) return;
+      await saveLocationConsent(widget.services.store.preferences);
+      if (!valid()) return;
+      await session.locationShare.start(token: token, stillValid: valid);
+      if (!valid() || !session.locationShare.sharing) return;
+      await session.startFollowing(member.handle);
+      if (valid() && session.locationShare.sharing) {
+        pending = session.pendingFollow == member.handle;
+        if (!pending) session.finishLocationStart(token);
+      }
+    } finally {
+      if (!pending) session.cancelLocationStart(token);
+    }
+  }
+
+  Future<void> _stopSharing(BuildContext dialogContext) async {
+    final session = widget.services.rooms;
+    final code = session.state.code;
+    if (!session.locationShare.sharing) return;
     final accepted = await showConsentDialog(
       dialogContext,
-      title: stopping ? '따라가기 중지' : '따라가기',
-      lines: stopping
-          ? [
-              member.displayName,
-              '${member.displayName} 님의 따라가기를 중지합니다',
-              '지도는 닫히고 내 위치 공유는 계속됩니다',
-            ]
-          : [
-              member.displayName,
-              '${member.displayName} 님의 위치를 따라갑니다',
-              '내 위치도 같은 방 참여자에게 보입니다',
-              '방을 나가거나 따라가기를 중지하면 끝납니다',
-              '위치는 방이 있는 동안만 서버(국내)에 남습니다',
-            ],
+      title: '위치 공유 중지',
+      lines: ['내 위치 공유를 중지합니다'],
+      note: '위치 공유를 중단하게 되면 그룹 안에 있는 파트너와 연결이 끊기게 됩니다. 그래도 하시겠습니까?',
     );
-    if (!mounted ||
-        !dialogContext.mounted ||
-        session.state.code != code ||
-        session.state.isLeaving)
-      return;
-    if (!accepted) {
-      if (!stopping)
-        await showNoticeDialog(
-          dialogContext,
-          message: '동의하지 않아 따라가기 기능을 사용할 수 없습니다',
-        );
-      return;
+    if (accepted &&
+        mounted &&
+        session.state.code == code &&
+        !session.state.isLeaving) {
+      await session.locationShare.stop();
     }
-    if (stopping) {
-      await session.stopFollowing();
-      return;
-    }
-    if (!session.state.members.any((m) => m.handle == member.handle)) return;
-    if (!session.locationShare.sharing) await session.locationShare.start();
-    if (!mounted ||
-        session.state.code != code ||
-        session.state.isLeaving ||
-        !session.locationShare.sharing)
-      return;
-    await session.startFollowing(member.handle);
   }
 
   void _scheduleFollowDialogs(BuildContext dialogContext) {
@@ -143,7 +175,7 @@ class _RoomScreenState extends State<RoomScreen> {
     if (_busy ||
         _dialogScheduled ||
         session.state.isLeaving ||
-        (!session.hasFollowNotice && session.followRequests.isEmpty))
+        (!session.hasFollowNotice && session.readyFollowRequests.isEmpty))
       return;
     _dialogScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -172,43 +204,53 @@ class _RoomScreenState extends State<RoomScreen> {
                 message: switch (notice.reason) {
                   'left' => '$name 님이 연결을 종료하여 따라가기가 끝났습니다',
                   'stopped' => '$name 님이 위치 공유를 중지했습니다',
+                  'stale' => '$name 님의 위치 수신이 끊겨 따라가기가 끝났습니다',
                   _ => '$name 님이 위치 공유에 동의하지 않았습니다',
                 },
               );
               continue;
             }
-            final requester = session.followRequests.firstOrNull;
-            if (requester == null) break;
-            final name =
-                session.state.members
-                    .where((m) => m.handle == requester)
-                    .firstOrNull
-                    ?.displayName ??
-                requester;
-            var accepted = session.locationShare.sharing;
-            if (!accepted) {
-              if (!dialogContext.mounted) return;
-              accepted = await showConsentDialog(
-                dialogContext,
-                title: '따라가기 요청',
-                lines: [
-                  name,
-                  '$name 님이 내 위치를 따라가려 합니다',
-                  '동의하면 내 위치가 같은 방 참여자에게 보입니다',
-                  '방을 나가거나 위치 공유를 중지하면 끝납니다',
-                  '위치는 방이 있는 동안만 서버(국내)에 남습니다',
-                ],
-              );
-            }
-            if (!current()) return;
-            if (!session.followRequests.contains(requester)) continue;
-            if (accepted && !session.locationShare.sharing)
-              await session.locationShare.start();
-            if (!current()) return;
-            await session.respondToFollow(
-              requester,
-              accepted: accepted && session.locationShare.sharing,
+            final request = session.readyFollowRequests.firstOrNull;
+            if (request == null) break;
+            final name = request.displayName ?? request.requester;
+            final token = session.beginLocationStart(
+              request.requester,
+              requestId: request.requestId,
             );
+            bool valid() => current() && session.locationStartValid(token);
+            try {
+              var accepted = session.locationShare.sharing;
+              if (!accepted) {
+                if (!dialogContext.mounted) return;
+                accepted = await showConsentDialog(
+                  dialogContext,
+                  title: '따라가기 요청',
+                  lines: [
+                    name,
+                    '$name 님이 내 위치를 따라가려 합니다',
+                    '동의하면 내 위치가 같은 방 참여자에게 보입니다',
+                    '방을 나가거나 위치 공유를 중지하면 끝납니다',
+                    '위치는 방이 있는 동안만 서버(국내)에 남습니다',
+                  ],
+                );
+              }
+              if (!valid()) continue;
+              if (accepted) {
+                await saveLocationConsent(widget.services.store.preferences);
+                if (!valid()) continue;
+                await session.locationShare.start(
+                  token: token,
+                  stillValid: valid,
+                );
+              }
+              if (!valid()) continue;
+              await session.respondToFollow(
+                request.requestId,
+                accepted: accepted && session.locationShare.sharing,
+              );
+            } finally {
+              session.cancelLocationStart(token);
+            }
           }
         }),
       );
@@ -259,7 +301,9 @@ class _RoomScreenState extends State<RoomScreen> {
           }
           final car = widget.mode == DeviceMode.car;
           final automotive = car || widget.services.mic.isAutomotive;
-          final inCall = session.call.isActive || session.joiningCall;
+          final inCall =
+              !state.isLeaving &&
+              (session.call.isActive || session.joiningCall);
           final reconnect =
               session.canReconnect ||
               (!state.isConnected && state.error != null);
@@ -329,7 +373,8 @@ class _RoomScreenState extends State<RoomScreen> {
                 key: ValueKey('member-${member.handle}'),
                 compact: compact,
                 onTap:
-                    member.handle == widget.services.store.handle ||
+                    (member.handle == widget.services.store.handle &&
+                            !session.locationShare.sharing) ||
                         _busy ||
                         state.isLeaving
                     ? null
@@ -380,7 +425,7 @@ class _RoomScreenState extends State<RoomScreen> {
             onStopSharing:
                 _busy || !session.locationShare.sharing || state.isLeaving
                 ? null
-                : () => _run(session.locationShare.stop),
+                : () => _run(() => _stopSharing(context)),
           );
           final exit = FloatingBarButton(
             label: '방 나가기',
@@ -514,6 +559,14 @@ class _RoomScreenState extends State<RoomScreen> {
                             ],
                             statusRow,
                             ErrorText(error),
+                            if (session.locationShare.deletionStatus
+                                case final deletion?)
+                              Text(deletion, style: UnavoType.caption),
+                            if (session.pendingFollow != null)
+                              const Text(
+                                '따라가기 응답 대기 중',
+                                style: UnavoType.caption,
+                              ),
                             const SizedBox(height: 8),
                             if (horizontal)
                               SizedBox(

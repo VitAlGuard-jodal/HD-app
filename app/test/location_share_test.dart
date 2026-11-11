@@ -189,7 +189,7 @@ void main() {
       clock.elapse(const Duration(seconds: 10));
       expect(f.http.posts, hasLength(1));
       expect(clock.pendingTimers, isEmpty);
-      _finish(clock, f.share.start());
+      _finish(clock, f.share.start(token: Object(), stillValid: () => true));
       f.add(lat: 37.002);
       expect(f.http.posts.last.body['seq'], 1);
       expect(f.http.posts.last.body['stream'], stream);
@@ -232,7 +232,7 @@ void main() {
       expect(f.share.sharing, isFalse);
       expect(f.http.deletes.single.uri.path, '/v1/rooms/ABC123/location');
       expect(f.source.watches, 1);
-      _finish(clock, f.share.start());
+      _finish(clock, f.share.start(token: Object(), stillValid: () => true));
       f.add();
       expect(f.http.posts.last.uri.path, '/v1/rooms/NEW123/location');
       f.code = null;
@@ -252,7 +252,7 @@ void main() {
       f.start();
       f.add();
       final stopping = f.share.stop();
-      final restarting = f.share.start();
+      final restarting = f.share.start(token: Object(), stillValid: () => true);
       clock.flushMicrotasks();
       unawaited(f.share.stop());
       gate.complete();
@@ -270,12 +270,12 @@ void main() {
       final f = _Fixture.create(clock);
       expect(f.share.sharing, isFalse);
       expect(f.source.requests, 0);
-      _finish(clock, f.share.start());
+      _finish(clock, f.share.start(token: Object(), stillValid: () => true));
       expect(f.source.requests, 1);
       expect(f.share.sharing, isTrue);
       expect(f.share.error, isNull);
       _finish(clock, f.share.stop());
-      _finish(clock, f.share.start());
+      _finish(clock, f.share.start(token: Object(), stillValid: () => true));
       expect(f.source.requests, 2);
       expect(f.source.watches, 2);
       expect(f.share.sharing, isTrue);
@@ -316,7 +316,7 @@ void main() {
 
       final f = _Fixture.create(clock);
       f.source.pendingPermission = Completer<LocationPermissionState>();
-      final starting = f.share.start();
+      final starting = f.share.start(token: Object(), stillValid: () => true);
       clock.flushMicrotasks();
       f.code = null;
       f.share.roomChanged();
@@ -324,6 +324,116 @@ void main() {
       _finish(clock, starting);
       expect(f.source.watches, 0);
       expect(f.share.sharing, isFalse);
+      f.dispose();
+    });
+  });
+  test('C2 취소 토큰은 권한 요청 전·권한 완료 뒤 watch 전에 검사한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      final token = Object();
+      var valid = false;
+      _finish(clock, f.share.start(token: token, stillValid: () => valid));
+      expect(f.source.requests, 0);
+      valid = true;
+      f.source.pendingPermission = Completer<LocationPermissionState>();
+      final starting = f.share.start(token: token, stillValid: () => valid);
+      clock.flushMicrotasks();
+      expect(f.source.requests, 1);
+      valid = false;
+      f.source.pendingPermission!.complete(LocationPermissionState.granted);
+      _finish(clock, starting);
+      expect(f.source.watches, 0);
+      expect(f.share.sharing, isFalse);
+      expect(f.http.posts, isEmpty);
+      f.dispose();
+    });
+  });
+
+  test('C2 무효화는 이번 토큰이 켠 공유만 끄고 기존 공유는 보존한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      final original = Object();
+      _finish(clock, f.share.start(token: original, stillValid: () => true));
+      final later = Object();
+      _finish(clock, f.share.start(token: later, stillValid: () => true));
+      f.share.invalidateStart(later);
+      clock.flushMicrotasks();
+      expect(f.share.sharing, isTrue);
+      expect(f.source.cancellations, 0);
+      f.share.invalidateStart(original);
+      expect(f.share.sharing, isFalse);
+      clock.flushMicrotasks();
+      expect(f.source.cancellations, 1);
+      f.dispose();
+    });
+  });
+
+  test('C3/C8 DELETE 실패는 오류와 별도 보존하고 1·2·4·8·최대60초 재시도한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.start();
+      f.http.failures = 1;
+      f.add();
+      expect(f.share.error, isNotNull);
+      f.http.deleteFails = true;
+      _finish(clock, f.share.stop());
+      expect(f.share.error, isNull);
+      expect(f.share.deletionStatus, '위치 삭제 대기 중');
+      expect(f.share.sharing, isFalse);
+      var deletes = 1;
+      for (final seconds in [1, 2, 4, 8, 16, 32, 60, 60]) {
+        clock.elapse(Duration(milliseconds: seconds * 1000 - 1));
+        expect(f.http.deletes, hasLength(deletes));
+        clock.elapse(const Duration(milliseconds: 1));
+        expect(f.http.deletes, hasLength(++deletes));
+      }
+      f.http.deleteFails = false;
+      clock.elapse(const Duration(seconds: 60));
+      expect(f.share.deletionPending, isFalse);
+      expect(f.share.deletionStatus, isNull);
+      f.dispose();
+    });
+  });
+
+  test('C3 새 공유는 진행 중 재시도 DELETE 뒤 시작하고 오래된 재시도를 취소한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.start();
+      f.http.deleteFails = true;
+      _finish(clock, f.share.stop());
+      final gate = Completer<void>();
+      f.http.deleteGate = gate.future;
+      clock.elapse(const Duration(seconds: 1));
+      final restart = f.share.start(token: Object(), stillValid: () => true);
+      clock.flushMicrotasks();
+      expect(f.source.watches, 1);
+      expect(f.share.sharing, isFalse);
+      gate.complete();
+      _finish(clock, restart);
+      expect(f.source.watches, 2);
+      expect(f.share.sharing, isTrue);
+      expect(f.share.deletionPending, isFalse);
+      final count = f.http.deletes.length;
+      clock.elapse(const Duration(seconds: 61));
+      expect(f.http.deletes, hasLength(count));
+      f.http.deleteFails = false;
+      f.dispose();
+    });
+  });
+
+  test('C3 방을 떠나면 이전 삭제 작업의 재시도는 중단한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.start();
+      f.http.deleteFails = true;
+      _finish(clock, f.share.stop());
+      f.code = 'NEW123';
+      f.share.roomChanged();
+      final count = f.http.deletes.length;
+      clock.elapse(const Duration(seconds: 120));
+      expect(f.http.deletes, hasLength(count));
+      expect(f.share.deletionPending, isFalse);
+      expect(f.share.error, isNull);
       f.dispose();
     });
   });
@@ -366,7 +476,7 @@ class _Fixture {
   String? code = 'ABC123';
   DateTime now() => DateTime.utc(2026).add(clock.elapsed);
   void start() {
-    _finish(clock, share.start());
+    _finish(clock, share.start(token: Object(), stillValid: () => true));
   }
 
   void add({double lat = 37, double? speed = 2}) {

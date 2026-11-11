@@ -90,15 +90,15 @@ class MemberTile extends StatelessWidget {
       ],
     );
     return Semantics(
-      button: onTap != null && !self,
-      onTap: self ? null : onTap,
+      button: onTap != null,
+      onTap: onTap,
       label:
           '${member.displayName}, @${member.handle}${self ? ", 나" : ""}${_speaking ? ", 말하는 중" : ""}${_interrupted ? ", 다른 오디오 때문에 잠시 중단" : ""}$_connectionLabel',
       child: ExcludeSemantics(
         child: Material(
           color: UnavoColors.input,
           child: InkWell(
-            onTap: self ? null : onTap,
+            onTap: onTap,
             child: Container(
               width: double.infinity,
               constraints: BoxConstraints(minHeight: car ? 80 : 68),

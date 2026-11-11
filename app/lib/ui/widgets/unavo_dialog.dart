@@ -11,6 +11,7 @@ Future<bool> showConsentDialog(
   required String title,
   required List<String> lines,
   Widget? detail,
+  String? note,
 }) async {
   final car = ControlScale.isCar(context);
   return await showDialog<bool>(
@@ -24,6 +25,7 @@ Future<bool> showConsentDialog(
               title: title,
               lines: lines,
               detail: detail,
+              note: note,
               actions: [
                 PanelButton(
                   label: '미동의',
@@ -77,11 +79,13 @@ class _DialogCard extends StatelessWidget {
     this.title,
     required this.lines,
     this.detail,
+    this.note,
     required this.actions,
   });
   final String? title;
   final List<String> lines;
   final Widget? detail;
+  final String? note;
   final List<Widget> actions;
 
   @override
@@ -122,6 +126,16 @@ class _DialogCard extends StatelessWidget {
                         Padding(
                           padding: const EdgeInsets.only(bottom: 12),
                           child: Text(line, style: UnavoType.body),
+                        ),
+                      if (note != null)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: Text(
+                            note!,
+                            style: UnavoType.caption.copyWith(
+                              color: UnavoColors.muted,
+                            ),
+                          ),
                         ),
                       if (detail != null) detail!,
                     ],

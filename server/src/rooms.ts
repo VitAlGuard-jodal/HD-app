@@ -54,8 +54,8 @@ export class RoomEventHub extends EventEmitter {
     return this.#deliver(code, (subscriber) => subscriber.handle === handle, name, data) > 0;
   }
 
-  followResponse(code: string, requester: string, target: string, accepted: boolean, reason?: string): void {
-    this.sendTo(code, requester, "follow-response", { target, accepted, ...(reason ? { reason } : {}) });
+  followResponse(code: string, requestId: string, requester: string, target: string, accepted: boolean, revision: number, reason?: string): void {
+    this.sendTo(code, requester, "follow-response", { requestId, requester, target, accepted, revision, ...(reason ? { reason } : {}) });
   }
 
   queueSignal(code: string, handle: string, name: string, data: unknown, now = Date.now()): void {
@@ -113,6 +113,7 @@ export class RoomEventHub extends EventEmitter {
   }
 
   close(): void {
+    this.emit("closing");
     clearInterval(this.#sweepTimer);
     for (const [code, subscribers] of [...this.#subscribers]) {
       for (const subscriber of [...subscribers]) this.#disconnect(code, subscriber);

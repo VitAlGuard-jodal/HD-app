@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,8 +18,45 @@ import 'support/consent_fakes.dart';
 import 'support/icon_bundle.dart';
 
 void main() {
+  testWidgets('16-A 위치 미동의로도 입장하며 두 항목의 여부·문서 버전을 따로 저장한다', (tester) async {
+    final services = await ConsentTestServices.create(tester);
+    try {
+      await _mount(tester, services);
+      expect(find.text('개인정보 처리방침 (필수)'), findsOneWidget);
+      expect(find.text('위치정보 수집·이용 동의 (선택)'), findsOneWidget);
+      await _tapKey(tester, 'legal-check-0');
+      _expectAcceptButtonState(tester, enabled: true);
+      await _tapKey(tester, 'legal-accept');
+      expect(find.byType(RoomsScreen), findsOneWidget);
+      expect(hasPrivacyConsent(services.store.preferences), isTrue);
+      expect(hasLocationConsent(services.store.preferences), isFalse);
+      final saved = jsonDecode(
+        services.store.preferences.getString(legalConsentKey)!,
+      );
+      expect(saved['privacy'], {'accepted': true, 'version': '2'});
+      expect(saved['location'], {'accepted': false, 'version': '1'});
+      expect(services.locationSource.requests, 0);
+    } finally {
+      await _finish(tester, services);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('이전 단일 버전 문자열은 새 개인정보 동의를 건너뛰지 않는다', (tester) async {
+    final services = await ConsentTestServices.create(tester);
+    try {
+      await completeConsentFuture(
+        tester,
+        services.store.preferences.setString(legalConsentKey, '1'),
+      );
+      await _mount(tester, services);
+      expect(find.byType(LegalConsentScreen), findsOneWidget);
+    } finally {
+      await _finish(tester, services);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   for (final signup in [false, true]) {
-    testWidgets('첫 ${signup ? '회원가입' : '로그인'} 후 두 항목 동의·저장을 거쳐야 방 목록을 연다', (
+    testWidgets('첫 ${signup ? '회원가입' : '로그인'} 후 필수 개인정보 동의·저장을 거쳐야 방 목록을 연다', (
       tester,
     ) async {
       final services = await ConsentTestServices.create(
@@ -36,7 +75,7 @@ void main() {
         _expectAcceptButtonState(tester, enabled: false);
         expect(services.store.preferences.getString(legalConsentKey), isNull);
         await _tapKey(tester, 'legal-check-0');
-        _expectAcceptButtonState(tester, enabled: false);
+        _expectAcceptButtonState(tester, enabled: true);
         await _tapKey(tester, 'legal-check-1');
         _expectAcceptButtonState(tester, enabled: true);
         await _tapKey(tester, 'legal-check-0');
@@ -44,10 +83,7 @@ void main() {
         await _tapKey(tester, 'legal-check-0');
         _expectAcceptButtonState(tester, enabled: true);
         await _tapKey(tester, 'legal-accept');
-        expect(
-          services.store.preferences.getString(legalConsentKey),
-          legalVersion,
-        );
+        expect(hasPrivacyConsent(services.store.preferences), isTrue);
         expect(find.byType(LegalConsentScreen), findsNothing);
         expect(find.byType(RoomsScreen), findsOneWidget);
         expect(services.locationSource.requests, 0);
@@ -157,10 +193,7 @@ void main() {
             await _tapKey(tester, 'legal-check-0');
             await _tapKey(tester, 'legal-check-1');
             await _tapKey(tester, 'legal-accept');
-            expect(
-              services.store.preferences.getString(legalConsentKey),
-              legalVersion,
-            );
+            expect(hasPrivacyConsent(services.store.preferences), isTrue);
             expect(find.byType(RoomsScreen), findsOneWidget);
           }
           expect(services.locationSource.requests, 0);
@@ -220,7 +253,7 @@ void main() {
       );
       _expectAcceptButtonState(tester, enabled: false);
       await _tapKey(tester, 'legal-check-0');
-      _expectAcceptButtonState(tester, enabled: false);
+      _expectAcceptButtonState(tester, enabled: true);
       await _tapKey(tester, 'legal-check-1');
       _expectAcceptButtonState(tester, enabled: true);
       await _tapKey(tester, 'legal-check-0');

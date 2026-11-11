@@ -30,6 +30,11 @@ abstract final class UnavoType {
     height: 1.4,
     color: UnavoColors.text,
   );
+  static const caption = TextStyle(
+    fontSize: 14,
+    height: 1.4,
+    color: UnavoColors.muted,
+  );
   static const title = TextStyle(
     fontSize: 24,
     height: 1.25,

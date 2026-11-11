@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:unavo/auth/legal_consent_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:unavo/core/device_mode.dart';
 import 'package:unavo/call/call_state.dart';
@@ -22,6 +25,206 @@ import 'support/icon_bundle.dart';
 const _timeout = Timeout(Duration(seconds: 30));
 
 void main() {
+  testWidgets('C3/C8 중지는 과거 위치 오류를 지우고 삭제 대기와 현재 음성 오류를 따로 표시한다', (
+    tester,
+  ) async {
+    final f = await _Fixture.create(tester);
+    try {
+      await completeConsentFuture(
+        tester,
+        f.services.locationShare.start(token: Object(), stillValid: () => true),
+      );
+      f.services.locationSource.controllers.last.addError(
+        StateError('이전 위치 오류'),
+      );
+      await pumpConsentUi(tester);
+      expect(f.services.locationShare.error, isNotNull);
+      f.services.rooms.mediaError = '현재 음성 오류';
+      f.services.api.stopFails = true;
+      await _member(tester, 'bob');
+      await _tap(tester, '동의');
+      expect(f.services.locationShare.error, isNull);
+      expect(find.text('위치 삭제 대기 중'), findsOneWidget);
+      expect(find.text('현재 음성 오류'), findsOneWidget);
+      expect(f.services.locationShare.sharing, isFalse);
+      f.services.api.stopFails = false;
+      await tester.pump(const Duration(seconds: 1));
+      await pumpConsentUi(tester);
+      expect(find.text('위치 삭제 대기 중'), findsNothing);
+      expect(find.text('현재 음성 오류'), findsOneWidget);
+    } finally {
+      f.services.api.stopFails = false;
+      await f.dispose(tester);
+    }
+  }, timeout: _timeout);
+  for (final inMap in [false, true]) {
+    testWidgets('내 카드·지도 공유 중지 모달은 같은 회색 안내와 동의 동작을 쓴다 (지도 $inMap)', (
+      tester,
+    ) async {
+      final f = await _Fixture.create(tester);
+      try {
+        await completeConsentFuture(
+          tester,
+          f.services.locationShare.start(
+            token: Object(),
+            stillValid: () => true,
+          ),
+        );
+        if (inMap)
+          await completeConsentFuture(
+            tester,
+            f.services.rooms.startFollowing('alice'),
+          );
+        await pumpConsentUi(tester);
+        if (inMap)
+          await _tap(tester, '위치 공유 중지');
+        else
+          await _member(tester, 'bob');
+        expect(find.text('위치 공유 중지'), findsOneWidget);
+        expect(find.text('내 위치 공유를 중지합니다'), findsOneWidget);
+        final note = find.text(
+          '위치 공유를 중단하게 되면 그룹 안에 있는 파트너와 연결이 끊기게 됩니다. 그래도 하시겠습니까?',
+        );
+        expect(note, findsOneWidget);
+        expect(tester.widget<Text>(note).style?.color, UnavoColors.muted);
+        await _tap(tester, '미동의');
+        expect(f.services.locationShare.sharing, isTrue);
+        if (inMap)
+          await _tap(tester, '위치 공유 중지');
+        else
+          await _member(tester, 'bob');
+        await _tap(tester, '동의');
+        expect(f.services.locationShare.sharing, isFalse);
+        expect(f.services.rooms.followTarget, isNull);
+        expect(find.byType(RoomMap), findsNothing);
+        expect(f.services.api.stops, 1);
+        await _member(tester, 'bob');
+        expect(find.byType(Dialog), findsNothing);
+      } finally {
+        await f.dispose(tester);
+      }
+    }, timeout: _timeout);
+  }
+
+  for (final incoming in [false, true]) {
+    testWidgets('C2 OS 권한 대기 중 ${incoming ? "요청 취소" : "대상 퇴장"}는 GPS를 켜지 않는다', (
+      tester,
+    ) async {
+      final f = await _Fixture.create(
+        tester,
+        handle: incoming ? 'alice' : 'bob',
+      );
+      final permission = Completer<LocationPermissionState>();
+      f.services.locationSource.pendingPermission = permission;
+      try {
+        if (incoming) {
+          f.services.api.events.add(
+            const FollowRequest(
+              'bob',
+              requestId: 'pending',
+              displayName: '보비',
+              revision: 1,
+            ),
+          );
+          await pumpConsentUi(tester);
+        } else {
+          await _member(tester, 'alice');
+        }
+        await _tap(tester, '동의');
+        expect(f.services.locationSource.requests, 1);
+        f.services.api.events.add(
+          incoming
+              ? const FollowCancelled('bob', requestId: 'pending', revision: 2)
+              : const MemberLeft('alice'),
+        );
+        await pumpConsentUi(tester);
+        permission.complete(LocationPermissionState.granted);
+        await pumpConsentUi(tester);
+        expect(f.services.locationSource.watches, 0);
+        expect(f.services.locationShare.sharing, isFalse);
+        expect(f.services.api.follows, isEmpty);
+        expect(f.services.api.followResponses, isEmpty);
+      } finally {
+        if (!permission.isCompleted)
+          permission.complete(LocationPermissionState.denied);
+        await f.dispose(tester);
+      }
+    }, timeout: _timeout);
+  }
+
+  testWidgets('C6 멤버 조회 실패에도 요청 이름으로 모달을 보존하고 refresh 중 취소는 표시하지 않는다', (
+    tester,
+  ) async {
+    final f = await _Fixture.create(tester, handle: 'alice');
+    try {
+      final gate = Completer<void>();
+      f.services.api.roomGate = gate.future;
+      f.services.api.roomFails = true;
+      f.services.api.events.add(
+        const FollowRequest(
+          'charlie',
+          requestId: 'r1',
+          displayName: '이벤트 이름',
+          revision: 1,
+        ),
+      );
+      await pumpConsentUi(tester);
+      expect(find.byType(Dialog), findsNothing);
+      f.services.api.events.add(
+        const FollowCancelled('charlie', requestId: 'r1', revision: 2),
+      );
+      await pumpConsentUi(tester);
+      gate.complete();
+      await pumpConsentUi(tester);
+      expect(find.byType(Dialog), findsNothing);
+      f.services.api.events.add(
+        const FollowRequest(
+          'charlie',
+          requestId: 'r2',
+          displayName: '이벤트 이름',
+          revision: 3,
+        ),
+      );
+      await pumpConsentUi(tester);
+      expect(find.text('이벤트 이름 님이 내 위치를 따라가려 합니다'), findsOneWidget);
+      await _tap(tester, '미동의');
+      expect(f.services.api.followResponses, [('r2', false)]);
+      expect(f.services.rooms.followRequests, isEmpty);
+    } finally {
+      await f.dispose(tester);
+    }
+  }, timeout: _timeout);
+
+  testWidgets('C5 pending 응답은 지도를 열지 않고 요청 ID가 맞는 수락만 적용한다', (tester) async {
+    final f = await _Fixture.create(tester);
+    try {
+      f.services.api.followAccepted = false;
+      await _member(tester, 'alice');
+      await _tap(tester, '동의');
+      expect(f.services.rooms.pendingFollow, 'alice');
+      expect(find.byType(RoomMap), findsNothing);
+      expect(find.text('따라가기 응답 대기 중'), findsOneWidget);
+      f.services.api.events.add(
+        const FollowResponse('alice', true, requestId: 'old', revision: 2),
+      );
+      await pumpConsentUi(tester);
+      expect(find.byType(RoomMap), findsNothing);
+      f.services.api.events.add(
+        const FollowResponse(
+          'alice',
+          true,
+          requestId: 'alice-request',
+          revision: 3,
+        ),
+      );
+      await pumpConsentUi(tester);
+      expect(f.services.rooms.followTarget, 'alice');
+      expect(find.byType(RoomMap), findsOneWidget);
+      expect(f.services.locationShare.sharing, isTrue);
+    } finally {
+      await f.dispose(tester);
+    }
+  }, timeout: _timeout);
   testWidgets('입장은 지도 없는 통화 방, 내 카드는 무동작, 바는 음성·방 관리만 하단 8dp', (tester) async {
     final f = await _Fixture.create(tester);
     try {
@@ -67,6 +270,7 @@ void main() {
       expect(f.services.locationShare.sharing, isTrue);
       expect(f.services.locationSource.watches, 1);
       expect(f.services.api.follows, ['alice']);
+      expect(hasLocationConsent(f.services.store.preferences), isTrue);
       expect(f.services.rooms.followTarget, 'alice');
       expect(find.byType(RoomMap), findsOneWidget);
       await _member(tester, 'alice');
@@ -84,6 +288,8 @@ void main() {
       await _tap(tester, '동의');
       expect(f.services.locationSource.watches, 1);
       await _tap(tester, '위치 공유 중지');
+      expect(find.text('내 위치 공유를 중지합니다'), findsOneWidget);
+      await _tap(tester, '동의');
       expect(f.services.rooms.followTarget, isNull);
       expect(f.services.locationShare.sharing, isFalse);
       expect(f.services.api.stops, 1);
@@ -142,21 +348,35 @@ void main() {
     ) async {
       final f = await _Fixture.create(tester, handle: 'alice');
       try {
-        f.services.api.events.add(const FollowRequest('bob'));
+        f.services.api.events.add(
+          const FollowRequest(
+            'bob',
+            requestId: 'bob-request',
+            displayName: '보비',
+            revision: 2,
+          ),
+        );
         await pumpConsentUi(tester);
         expect(find.text('따라가기 요청'), findsOneWidget);
         expect(find.text('보비 님이 내 위치를 따라가려 합니다'), findsOneWidget);
         await _tap(tester, accepted ? '동의' : '미동의');
-        expect(f.services.api.followResponses, [('bob', accepted)]);
+        expect(f.services.api.followResponses, [('bob-request', accepted)]);
         expect(f.services.locationSource.watches, accepted ? 1 : 0);
         expect(find.byType(RoomMap), findsNothing);
         if (accepted) {
-          f.services.api.events.add(const FollowRequest('bob'));
+          f.services.api.events.add(
+            const FollowRequest(
+              'bob',
+              requestId: 'bob-request',
+              displayName: '보비',
+              revision: 2,
+            ),
+          );
           await pumpConsentUi(tester);
           expect(find.byType(Dialog), findsNothing);
           expect(f.services.api.followResponses, [
-            ('bob', true),
-            ('bob', true),
+            ('bob-request', true),
+            ('bob-request', true),
           ]);
           expect(f.services.locationSource.watches, 1);
         }
@@ -172,7 +392,9 @@ void main() {
     try {
       await _member(tester, 'alice');
       await _tap(tester, '동의');
-      f.services.api.events.add(const FollowResponse('alice', false));
+      f.services.api.events.add(
+        const FollowResponse('alice', false, requestId: 'alice-request'),
+      );
       await pumpConsentUi(tester);
       expect(find.text('앨리스 님이 위치 공유에 동의하지 않았습니다'), findsOneWidget);
       expect(f.services.rooms.followTarget, isNull);
@@ -197,9 +419,18 @@ void main() {
     }
     final target = await _Fixture.create(tester, handle: 'alice');
     try {
-      target.services.api.events.add(const FollowRequest('bob'));
+      target.services.api.events.add(
+        const FollowRequest(
+          'bob',
+          requestId: 'bob-request',
+          displayName: '보비',
+          revision: 2,
+        ),
+      );
       await pumpConsentUi(tester);
-      target.services.api.events.add(const FollowCancelled('bob'));
+      target.services.api.events.add(
+        const FollowCancelled('bob', requestId: 'bob-request'),
+      );
       await pumpConsentUi(tester);
       await _tap(tester, '동의');
       expect(target.services.locationSource.requests, 0);
@@ -236,7 +467,10 @@ void main() {
   testWidgets('차량의 moving 표본은 동의 팝업 전에 정차 오류로 차단한다', (tester) async {
     final f = await _Fixture.create(tester, car: true);
     try {
-      await completeConsentFuture(tester, f.services.locationShare.start());
+      await completeConsentFuture(
+        tester,
+        f.services.locationShare.start(token: Object(), stillValid: () => true),
+      );
       await _sample(tester, f, speed: .5);
       expect(f.services.locationShare.motionState, LocationMotionState.moving);
       await _member(tester, 'alice');
@@ -255,7 +489,10 @@ void main() {
   testWidgets('차량은 stationary에서 모달·따라가기를 허용하고 이후 이동에도 유지한다', (tester) async {
     final f = await _Fixture.create(tester, car: true);
     try {
-      await completeConsentFuture(tester, f.services.locationShare.start());
+      await completeConsentFuture(
+        tester,
+        f.services.locationShare.start(token: Object(), stillValid: () => true),
+      );
       for (var second = 0; second <= 3; second++) {
         if (second > 0) await tester.pump(const Duration(seconds: 1));
         await _sample(tester, f, speed: 0);
@@ -324,7 +561,10 @@ void main() {
   testWidgets('폰은 이동 중에도 모달·동의·따라가기를 허용한다', (tester) async {
     final f = await _Fixture.create(tester);
     try {
-      await completeConsentFuture(tester, f.services.locationShare.start());
+      await completeConsentFuture(
+        tester,
+        f.services.locationShare.start(token: Object(), stillValid: () => true),
+      );
       await _sample(tester, f, speed: 3);
       await _member(tester, 'alice');
       expect(find.text('따라가기'), findsOneWidget);
@@ -350,7 +590,13 @@ void main() {
       final f = await _Fixture.create(tester, car: car, size: size);
       try {
         _expectWatermarkBounds(tester);
-        await completeConsentFuture(tester, f.services.locationShare.start());
+        await completeConsentFuture(
+          tester,
+          f.services.locationShare.start(
+            token: Object(),
+            stillValid: () => true,
+          ),
+        );
         f.services.api.events.add(
           Hello(
             'bob',
@@ -455,7 +701,10 @@ void main() {
     addTearDown(tester.view.resetPadding);
     final f = await _Fixture.create(tester);
     try {
-      await completeConsentFuture(tester, f.services.locationShare.start());
+      await completeConsentFuture(
+        tester,
+        f.services.locationShare.start(token: Object(), stillValid: () => true),
+      );
       f.services.calls.state = const CallState(
         roomCode: 'ABC123',
         selfHandle: 'bob',
@@ -468,7 +717,18 @@ void main() {
           Member('user$index', '참여자$index', '$index'),
       ];
       f.services.api.events.add(
-        Hello('bob', members, 'alice', const [], const {}, 'alice'),
+        Hello(
+          'bob',
+          members,
+          'alice',
+          const [],
+          const {},
+          'alice',
+          const [],
+          2,
+          null,
+          'alice-request',
+        ),
       );
       await pumpConsentUi(tester);
       await _tap(tester, '지도 전체 화면');

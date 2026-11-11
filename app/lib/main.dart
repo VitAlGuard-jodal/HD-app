@@ -83,9 +83,7 @@ class _UnavoAppState extends State<UnavoApp> {
   @override
   void initState() {
     super.initState();
-    _legalAccepted =
-        widget.services.store.preferences.getString(legalConsentKey) ==
-        legalVersion;
+    _legalAccepted = hasPrivacyConsent(widget.services.store.preferences);
     _carRoomVisible = widget.services.rooms.state.code != null;
     widget.services.store.addListener(_sessionChanged);
     widget.services.calls.onOpenRoom = _openRoom;

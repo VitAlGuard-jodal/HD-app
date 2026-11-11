@@ -7,6 +7,7 @@ import type { TestContext } from "node:test";
 import { createApp } from "../../src/app.ts";
 import { issueToken } from "../../src/auth.ts";
 import { openDb } from "../../src/db.ts";
+import { RoomLocationStore, LOCATION_DISCONNECT_GRACE_MS, LOCATION_STALE_MS } from "../../src/locations.ts";
 import { RoomEventHub } from "../../src/rooms.ts";
 import { createRoom, findUserByHandle, joinRoom, leaveRoom } from "../../src/store.ts";
 
@@ -14,7 +15,8 @@ import { createRoom, findUserByHandle, joinRoom, leaveRoom } from "../../src/sto
 async function fixture(t: TestContext) {
   const db = openDb(":memory:");
   const hub = new RoomEventHub();
-  const server = createServer(createApp({ db, hub }));
+  const locations = new RoomLocationStore();
+  const server = createServer(createApp({ db, hub, locations }));
   const controllers = new Set<AbortController>();
   t.after(async () => {
     for (const controller of controllers) controller.abort();
@@ -113,7 +115,7 @@ async function fixture(t: TestContext) {
     return { next, close };
   }
 
-  return { db, hub, base, api, signup, events };
+  return { db, hub, locations, base, api, signup, events };
 }
 
 function assertError(result: { status: number; body: unknown }, status: number): void {
@@ -223,7 +225,7 @@ test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가�
   assert.equal(helloAlice.members.length, 1);
   assert.equal(typeof helloAlice.members[0].joinedAt, "string");
   assert.equal((await api("POST", `/v1/rooms/${code}/join`, bob)).status, 200);
-  assert.deepEqual(await aliceEvents.next("member-joined"), { handle: "bob" });
+  assert.equal((await aliceEvents.next("member-joined")).handle, "bob");
   // 반복 참여는 중복 이벤트를 만들지 않는다. 다음 수신 이벤트의 종류로도 검증한다.
   assert.equal((await api("POST", `/v1/rooms/${code}/join`, bob)).status, 200);
   const bobFirst = await events(code, bob);
@@ -271,8 +273,8 @@ test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가�
   const left = await api("POST", `/v1/rooms/${code}/leave`, bob);
   assert.equal(left.status, 204);
   assert.equal(left.body, undefined);
-  assert.deepEqual(await aliceEvents.next("member-left"), { handle: "bob" });
-  assert.deepEqual(await reconnected.next("member-left"), { handle: "bob" });
+  assert.equal((await aliceEvents.next("member-left")).handle, "bob");
+  assert.equal((await reconnected.next("member-left")).handle, "bob");
   await reconnected.close();
   assert.equal(hub.subscriberCount(code), 1);
   assert.deepEqual((await api("GET", `/v1/rooms/${code}`, alice)).body.members.map((member: { handle: string }) => member.handle), ["alice"]);
@@ -280,7 +282,7 @@ test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가�
   assertError(await api("GET", `/v1/rooms/${code}/events`, bob), 403);
   assert.equal((await api("POST", `/v1/rooms/${code}/leave`, bob)).status, 204);
   assert.equal((await api("POST", `/v1/rooms/${code}/join`, bob)).status, 200);
-  assert.deepEqual(await aliceEvents.next("member-joined"), { handle: "bob" });
+  assert.equal((await aliceEvents.next("member-joined")).handle, "bob");
   assert.equal((await api("GET", `/v1/rooms/${code}`, alice)).body.members.length, 2);
   const rejoined = await events(code, bob);
   assert.equal((await rejoined.next("hello")).members.length, 2);
@@ -413,7 +415,7 @@ test("모든 방 경로는 소문자와 혼합 대소문자를 같은 방으로 
   const joined = await api("POST", "/v1/rooms/abc234/join", bob);
   assert.equal(joined.status, 200);
   assert.equal(joined.body.room.code, "ABC234");
-  assert.deepEqual(await aliceEvents.next("member-joined"), { handle: "bob" });
+  assert.equal((await aliceEvents.next("member-joined")).handle, "bob");
   const bobEvents = await events("aBc234", bob);
   assert.equal((await bobEvents.next("hello")).members.length, 2);
   assert.equal(hub.subscriberCount("ABC234"), 2);
@@ -424,8 +426,8 @@ test("모든 방 경로는 소문자와 혼합 대소문자를 같은 방으로 
   assert.deepEqual(sent.body, { delivered: true });
   assert.deepEqual(await bobEvents.next("signal"), { from: "alice", kind: "custom", payload: null });
   assert.equal((await api("POST", "/v1/rooms/aBc234/leave", bob)).status, 204);
-  assert.deepEqual(await aliceEvents.next("member-left"), { handle: "bob" });
-  assert.deepEqual(await bobEvents.next("member-left"), { handle: "bob" });
+  assert.equal((await aliceEvents.next("member-left")).handle, "bob");
+  assert.equal((await bobEvents.next("member-left")).handle, "bob");
   assert.equal(hub.subscriberCount("ABC234"), 1);
   assert.deepEqual((await api("GET", "/v1/rooms/abc234", alice)).body.members.map((member: { handle: string }) => member.handle), ["alice"]);
 });
@@ -547,44 +549,112 @@ test("JSON 형식·Content-Type·64KB 바이트 제한을 적용한다", { timeo
   assertError(chunked, 413);
 });
 
-test("HTTP follow 수락·추가 팔로워 즉시 수락·해제·hello trails", { timeout: 30_000 }, async (t) => {
+test("HTTP follow v2 pending·ID·revision·수신자별 trail·무변경 방송 0·속도 제한", { timeout: 30_000 }, async (t) => {
   const { api, signup, events } = await fixture(t);
-  const alice = await signup("alice", "앨리스");
-  const bob = await signup("bob", "보비");
-  const charlie = await signup("charlie", "찰리");
+  const alice = await signup("alice", "앨리스"), bob = await signup("bob", "보비"), charlie = await signup("charlie", "찰리");
   const code = (await api("POST", "/v1/rooms", alice, {})).body.room.code;
   const path = `/v1/rooms/${code}`;
   await api("POST", `${path}/join`, bob, {});
   await api("POST", `${path}/join`, charlie, {});
   const a = await events(code, alice), b = await events(code, bob), c = await events(code, charlie);
-  for (const stream of [a, b, c]) {
-    assert.deepEqual((await stream.next("hello")).trails, {});
-  }
-  assert.equal((await api("POST", `${path}/follow`, bob, { target: "alice" })).status, 202);
-  for (const stream of [a, b, c]) assert.deepEqual((await stream.next("trails")).trails, { alice: [] });
-  assert.deepEqual(await a.next("follow-request"), { requester: "bob" });
-  assert.equal((await api("POST", `${path}/follow/respond`, alice, { requester: "bob", accepted: true })).status, 202);
-  assert.deepEqual(await b.next("follow-response"), { target: "alice", accepted: true });
-  await a.next("follow-cancelled");
-  for (const stream of [a, b, c]) await stream.next("trails");
+  for (const stream of [a, b, c]) assert.deepEqual((await stream.next("hello")).trails, {});
+  const pending = await api("POST", `${path}/follow`, bob, { target: "alice" });
+  assert.equal(pending.body.accepted, false);
+  const request = await a.next("follow-request");
+  assert.equal(request.requestId, pending.body.requestId);
+  assert.equal(request.displayName, "보비");
+  assertError(await api("POST", `${path}/follow`, bob, { target: "alice" }), 429);
+  assertError(await api("DELETE", `${path}/follow`, bob), 429);
+  assertError(await api("POST", `${path}/follow/respond`, alice, { requestId: "wrong", accepted: true }), 404);
+  const awaiting = await events(code, bob);
+  const awaitingHello = await awaiting.next("hello");
+  assert.equal(awaitingHello.followTarget, null);
+  assert.equal(awaitingHello.pendingFollow, "alice");
+  assert.equal(awaitingHello.followRequestId, request.requestId);
+  await awaiting.close();
+  const accepted = await api("POST", `${path}/follow/respond`, alice, { requestId: request.requestId, accepted: true });
+  assert.ok(accepted.body.revision > pending.body.revision);
+  assert.deepEqual((await b.next("trail")).points, []);
+  assert.equal((await b.next("follow-response")).requestId, request.requestId);
+  assert.equal((await a.next("follow-cancelled")).reason, "accepted");
   await api("POST", `${path}/location`, alice, {
     stream: "0123456789abcdef", lat: 37, lng: 127, heading: 90, at: 0, seq: 0,
   });
   await b.next("location");
-  await c.next("location");
-  await api("POST", `${path}/follow`, charlie, { target: "alice" });
-  for (const stream of [a, b, c]) assert.equal((await stream.next("trails")).trails.alice.length, 1);
-  assert.deepEqual(await c.next("follow-response"), { target: "alice", accepted: true });
+  await c.next("location"); // 비팔로워에게 trail은 전송하지 않았다.
+  const extra = await api("POST", `${path}/follow`, charlie, { target: "alice" });
+  assert.equal(extra.body.accepted, true);
+  assert.equal((await c.next("trail")).points.length, 1);
+  assert.equal((await c.next("follow-response")).requestId, extra.body.requestId);
   const reconnect = await events(code, bob);
   const hello = await reconnect.next("hello");
   assert.equal(hello.followTarget, "alice");
-  assert.deepEqual(hello.trails, (await api("GET", `${path}/positions`, bob)).body.trails);
-  await reconnect.close(); // 다른 bob 소켓이 남아 있으므로 관계 보존
+  assert.equal(hello.pendingFollow, null);
+  assert.deepEqual(Object.keys(hello.trails), ["alice"]);
+  await reconnect.close();
+  await new Promise((resolve) => setTimeout(resolve, 1050));
+  const repeated = await api("POST", `${path}/follow`, charlie, { target: "alice" });
+  assert.equal(repeated.body.requestId, extra.body.requestId);
+  assert.equal(repeated.body.revision, hello.revision);
+  // 다음 표식 앞에 불필요한 follow/trail 방송이 하나라도 있으면 next가 실패한다.
+  for (const [handle, stream] of [["alice", a], ["bob", b], ["charlie", c]] as const) {
+    await api("POST", `${path}/signal`, alice, { to: handle, kind: "custom", payload: "marker" });
+    assert.equal((await stream.next("signal")).payload, "marker");
+  }
   await api("DELETE", `${path}/follow`, bob);
   await a.next("follow-cancelled");
-  for (const stream of [a, b, c]) assert.equal((await stream.next("trails")).trails.alice.length, 1);
-  await api("DELETE", `${path}/follow`, charlie);
-  await a.next("follow-cancelled");
-  for (const stream of [a, b, c]) assert.deepEqual((await stream.next("trails")).trails, {});
-  assert.equal((await api("GET", `${path}/positions`, alice)).body.positions.length, 1);
+  assert.deepEqual((await api("GET", `${path}/positions`, bob)).body.trails, {});
+});
+
+for (const expired of [false, true]) {
+  test(`HTTP 마지막 SSE 단절 ${expired ? "유예 만료" : "유예 내 재구독"}`, { timeout: 45_000 }, async (t) => {
+    const { api, signup, events, locations } = await fixture(t);
+    const alice = await signup("alice", "앨리스"), bob = await signup("bob", "보비");
+    const code = (await api("POST", "/v1/rooms", alice, {})).body.room.code;
+    const path = `/v1/rooms/${code}`;
+    await api("POST", `${path}/join`, bob, {});
+    await api("POST", `${path}/location`, alice, { stream: "0123456789abcdef", lat: 37, lng: 127, at: 0, seq: 0 });
+    await api("POST", `${path}/follow`, bob, { target: "alice" });
+    const a = await events(code, alice), b = await events(code, bob);
+    await a.next("hello"); await b.next("hello");
+    await a.close();
+    // 닫힘 전달을 기다린 뒤 유예 타이머가 실제로 시작된 상태를 검사한다.
+    for (let attempt = 0; attempt < 100 && locations.disconnectedAt(code, "alice") === undefined; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.notEqual(locations.disconnectedAt(code, "alice"), undefined);
+    if (expired) {
+      await new Promise((resolve) => setTimeout(resolve, LOCATION_DISCONNECT_GRACE_MS + 100));
+      assert.equal((await b.next("follow-response")).reason, "left");
+      assert.equal((await b.next("location-stopped")).reason, "left");
+      assert.equal(locations.targetOf(code, "bob"), null);
+    } else {
+      const restored = await events(code, alice);
+      assert.equal((await restored.next("hello")).positions.length, 1);
+      assert.equal(locations.disconnectedAt(code, "alice"), undefined);
+      assert.equal(locations.targetOf(code, "bob"), "alice");
+    }
+  });
+}
+
+test("HTTP 잘못된 seq·stale·leave 권한 경계", { timeout: 15_000 }, async (t) => {
+  const { api, signup, events, locations } = await fixture(t);
+  const alice = await signup("alice", "앨리스"), bob = await signup("bob", "보비"), outsider = await signup("outsider", "외부인");
+  const code = (await api("POST", "/v1/rooms", alice, {})).body.room.code;
+  const path = `/v1/rooms/${code}`;
+  await api("POST", `${path}/join`, bob, {});
+  const fix = { handle: "alice", stream: "0123456789abcdef", lat: 37, lng: 127, at: 0, seq: 0 };
+  for (const seq of [1e100, 2 ** 53, -1, NaN]) assertError(await api("POST", `${path}/location`, alice, { ...fix, seq }), 400);
+  const relation = locations.requestFollow(code, "bob", "alice");
+  locations.respondFollow(code, "alice", relation.requestId, true);
+  const b = await events(code, bob);
+  await b.next("hello");
+  locations.accept(code, fix, Date.now() - LOCATION_STALE_MS);
+  const snapshot = await api("GET", `${path}/positions`, bob);
+  assert.deepEqual(snapshot.body.positions, []);
+  assert.equal((await b.next("follow-response")).reason, "stale");
+  assert.equal((await b.next("location-stopped")).reason, "stale");
+  assertError(await api("POST", `${path}/leave`, outsider), 403);
+  assert.equal((await api("POST", `${path}/leave`, bob)).status, 204);
+  assert.equal((await api("POST", `${path}/leave`, bob)).status, 204);
 });

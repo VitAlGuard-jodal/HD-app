@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../auth/legal_consent_store.dart';
+export '../../auth/legal_consent_store.dart';
+
 import '../../core/app_services.dart';
 import '../../core/device_mode.dart';
 import '../../core/errors.dart';
@@ -13,8 +16,6 @@ import '../../ui/widgets/phone_frame.dart';
 import '../../ui/widgets/status_chip.dart';
 import '../../ui/widgets/unavo_dialog.dart';
 
-const legalConsentKey = 'legal.consent.v1';
-const legalVersion = '1';
 const _documents = [
   (title: '개인정보 처리방침', asset: 'assets/legal/privacy.md'),
   (title: '위치정보 수집·이용 동의', asset: 'assets/legal/location.md'),
@@ -45,17 +46,17 @@ class _LegalConsentScreenState extends State<LegalConsentScreen> {
   String? _error;
 
   Future<void> _accept() async {
-    if (_busy || !_checked.every((value) => value)) return;
+    if (_busy || !_checked[0]) return;
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      final saved = await widget.services.store.preferences.setString(
-        legalConsentKey,
-        legalVersion,
+      await saveLegalConsent(
+        widget.services.store.preferences,
+        privacy: _checked[0],
+        location: _checked[1],
       );
-      if (!saved) throw const FormatException('동의 내역을 저장하지 못했습니다.');
       if (mounted) widget.onAccepted();
     } catch (error) {
       if (mounted) setState(() => _error = errorMessage(error));
@@ -131,7 +132,7 @@ class _LegalConsentScreenState extends State<LegalConsentScreen> {
                           const SizedBox(width: 12),
                           Expanded(
                             child: Text(
-                              _documents[index].title,
+                              '${_documents[index].title} (${index == 0 ? '필수' : '선택'})',
                               style: UnavoType.body,
                             ),
                           ),
@@ -192,10 +193,7 @@ class _LegalConsentScreenState extends State<LegalConsentScreen> {
                   label: '동의',
                   icon: 'check',
                   style: PanelButtonStyle.gold,
-                  onPressed:
-                      !_busy &&
-                          snapshot.hasData &&
-                          _checked.every((value) => value)
+                  onPressed: !_busy && snapshot.hasData && _checked[0]
                       ? _accept
                       : null,
                 ),

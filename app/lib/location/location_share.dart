@@ -8,6 +8,13 @@ import '../net/api_client.dart';
 import '../net/models.dart';
 import 'location_source.dart';
 
+class _LocationDeletion {
+  _LocationDeletion(this.code, this.handle, this.generation);
+  final String code, handle;
+  final int generation;
+  int failures = 0;
+}
+
 enum LocationMotionState { unknown, moving, stationary }
 
 class LocationShare extends ChangeNotifier {
@@ -19,6 +26,8 @@ class LocationShare extends ChangeNotifier {
     DateTime Function()? now,
   }) : now = now ?? DateTime.now {
     _lastState = _stateValues();
+    _observedRoom = roomCode();
+    _observedHandle = selfHandle();
   }
 
   final ApiClient api;
@@ -33,6 +42,8 @@ class LocationShare extends ChangeNotifier {
   bool get sharing => _sharing;
   LocationPermissionState? get permission => _permission;
   String? get error => _error;
+  bool get deletionPending => _deletion != null;
+  String? get deletionStatus => deletionPending ? '위치 삭제 대기 중' : null;
   LocationFix? get lastSent => _lastSent;
   LocationMotionState get motionState => _motionState;
   bool get isStationary => motionState == LocationMotionState.stationary;
@@ -41,7 +52,7 @@ class LocationShare extends ChangeNotifier {
   LocationMotionState _motionState = LocationMotionState.unknown;
   bool _disposed = false;
   LocationPermissionState? _permission;
-  String? _error, _activeCode, _activeHandle;
+  String? _error, _activeCode, _activeHandle, _observedRoom, _observedHandle;
   LocationFix? _lastSent, _lastAttempt;
   DateTime? _lastAttemptAt, _observingSince;
   LocationSample? _pending;
@@ -49,23 +60,63 @@ class LocationShare extends ChangeNotifier {
   int _seq = 0, _failures = 0, _generation = 0;
   StreamSubscription<LocationSample>? _subscription;
   Timer? _sendTimer, _stationaryTimer;
-  Future<void>? _starting, _stopping, _sending;
+  Future<void>? _starting, _stopping, _sending, _deleting;
+  Object? _startToken;
+  bool Function()? _startValid;
+  _LocationDeletion? _deletion;
+  Timer? _deleteTimer;
+
+  // 성공한 기능 요청의 공유는 더 이상 임시 요청 토큰에 종속되지 않는다.
+  void commitStart(Object token) {
+    if (!sharing && !identical(_startToken, token)) return;
+    _startToken = null;
+    _startValid = null;
+  }
+
+  void invalidateStart(Object token) {
+    if (identical(_startToken, token)) unawaited(stop());
+  }
 
   // 기능을 켤 때마다 화면이 먼저 동의를 받는다. 공유는 자동 복원하지 않는다.
-  Future<void> start() {
-    if (_disposed || sharing) return Future<void>.value();
-    if (_starting != null) return _starting!;
+  Future<void> start({
+    required Object token,
+    required bool Function() stillValid,
+  }) {
+    if (_disposed || !stillValid() || sharing) return Future<void>.value();
+    if (_starting != null) {
+      if (identical(_startToken, token)) return _starting!;
+      return _starting!.then(
+        (_) => start(token: token, stillValid: stillValid),
+      );
+    }
+    _startToken = token;
+    _startValid = stillValid;
     final generation = ++_generation;
     final code = roomCode();
     final handle = selfHandle();
-    return _starting = Future<void>.microtask(
-      () => _start(generation, code, handle),
-    ).whenComplete(() => _starting = null);
+    return _starting =
+        Future<void>.microtask(
+          () => _start(generation, code, handle, stillValid),
+        ).whenComplete(() {
+          _starting = null;
+          if (!sharing &&
+              generation == _generation &&
+              identical(_startToken, token)) {
+            _startToken = null;
+            _startValid = null;
+          }
+        });
   }
 
-  Future<void> _start(int generation, String? code, String? handle) async {
+  Future<void> _start(
+    int generation,
+    String? code,
+    String? handle,
+    bool Function() stillValid,
+  ) async {
     if (_stopping != null) await _stopping;
     if (_disposed ||
+        !stillValid() ||
         generation != _generation ||
         code != roomCode() ||
         handle != selfHandle())
@@ -81,8 +132,9 @@ class LocationShare extends ChangeNotifier {
     _activeCode = code;
     _activeHandle = handle;
     try {
+      if (!stillValid()) return;
       final permission = await source!.requestPermission();
-      if (!_current(generation, code)) return;
+      if (!_current(generation, code) || !stillValid()) return;
       _permission = permission;
       if (permission != LocationPermissionState.granted) {
         _activeCode = null;
@@ -94,6 +146,11 @@ class LocationShare extends ChangeNotifier {
         );
         return;
       }
+      // 재시도 DELETE가 이미 전송됐으면 완료 뒤 새 공유를 시작한다.
+      if (_deleting != null) await _deleting;
+      if (!_current(generation, code) || !stillValid()) return;
+      _cancelDeletion();
+      if (!_current(generation, code) || !stillValid()) return;
       _sharing = true;
       _error = null;
       _failures = 0;
@@ -104,6 +161,10 @@ class LocationShare extends ChangeNotifier {
         (sample) {
           if (!_current(generation, code)) {
             roomChanged();
+            return;
+          }
+          if (!(_startValid?.call() ?? true)) {
+            unawaited(stop());
             return;
           }
           _recordSample(sample);
@@ -226,9 +287,22 @@ class LocationShare extends ChangeNotifier {
 
   // RoomSession이 방 코드/나가기 상태를 바꿀 때 호출한다.
   void roomChanged() {
+    final changed =
+        _observedRoom != roomCode() || _observedHandle != selfHandle();
+    _observedRoom = roomCode();
+    _observedHandle = selfHandle();
+    final deletion = _deletion;
+    if (deletion != null &&
+        (roomCode() != deletion.code || selfHandle() != deletion.handle)) {
+      _cancelDeletion();
+    }
     if (_activeCode != null &&
-        (roomCode() != _activeCode || selfHandle() != _activeHandle))
+        (roomCode() != _activeCode || selfHandle() != _activeHandle)) {
       unawaited(stop());
+    } else if (changed && !sharing && _error != null) {
+      _error = null;
+      _notify();
+    }
   }
 
   Future<void> stop() {
@@ -254,6 +328,19 @@ class LocationShare extends ChangeNotifier {
 
   Future<void> _stop() async {
     final code = _activeCode;
+    final handle = _activeHandle;
+    final job = code != null && handle != null
+        ? _LocationDeletion(code, handle, _generation)
+        : _deletion;
+    if (job != null) {
+      _deleteTimer?.cancel();
+      _deleteTimer = null;
+      _deletion = job;
+    }
+    _startToken = null;
+    _startValid = null;
+    _error = null;
+    _lastSent = null;
     _activeCode = null;
     _activeHandle = null;
     _sharing = false;
@@ -275,13 +362,45 @@ class LocationShare extends ChangeNotifier {
     }
     // 늦게 끝난 POST가 DELETE 뒤에 위치를 되살리지 않게 순서를 보장한다.
     if (_sending != null) await _sending;
-    if (code != null) {
-      try {
-        await api.stopLocation(code);
-      } catch (_) {
-        /* 방이 사라졌거나 연결이 끊겨도 로컬 공유는 끝낸다. */
+    if (_deleting != null) await _deleting;
+    if (job != null && identical(_deletion, job)) await _deleteLocation(job);
+  }
+
+  Future<void> _deleteLocation(_LocationDeletion job) {
+    return _deleting = _attemptDelete(job).whenComplete(() => _deleting = null);
+  }
+
+  Future<void> _attemptDelete(_LocationDeletion job) async {
+    if (!identical(_deletion, job) || sharing && _generation > job.generation)
+      return;
+    try {
+      await api.stopLocation(job.code);
+      if (identical(_deletion, job)) _cancelDeletion();
+    } catch (error) {
+      if (!identical(_deletion, job)) return;
+      if (_disposed ||
+          roomCode() != job.code ||
+          selfHandle() != job.handle ||
+          error is ApiException && {401, 403, 404}.contains(error.status)) {
+        _cancelDeletion();
+        return;
       }
+      final seconds = (1 << job.failures.clamp(0, 6)).clamp(1, 60);
+      job.failures++;
+      _deleteTimer = Timer(Duration(seconds: seconds), () {
+        _deleteTimer = null;
+        if (identical(_deletion, job) && !sharing)
+          unawaited(_deleteLocation(job));
+      });
+      _notify();
     }
+  }
+
+  void _cancelDeletion() {
+    _deleteTimer?.cancel();
+    _deleteTimer = null;
+    _deletion = null;
+    _notify();
   }
 
   bool _current(int generation, String code) =>
@@ -309,6 +428,7 @@ class LocationShare extends ChangeNotifier {
     error,
     lastSent,
     motionState,
+    deletionPending,
   ];
 
   late List<Object?> _lastState;
@@ -323,6 +443,7 @@ class LocationShare extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _deleteTimer?.cancel();
     unawaited(stop());
     super.dispose();
   }

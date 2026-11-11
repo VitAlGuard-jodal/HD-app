@@ -2,13 +2,13 @@ import type { IncomingMessage, RequestListener, ServerResponse } from "node:http
 import type { DatabaseSync } from "node:sqlite";
 import { hashPassword, issueToken, lookupToken, revokeToken, tokenHash, verifyPassword } from "./auth.ts";
 import { isValidDisplayName, isValidHandle, isValidPassword } from "./handles.ts";
-import { RoomLocationStore } from "./locations.ts";
+import { LOCATION_DISCONNECT_GRACE_MS, LOCATION_SWEEP_INTERVAL_MS, RoomLocationStore } from "./locations.ts";
 import { generateRoomCode, RoomEventHub } from "./rooms.ts";
 import { openEventStream } from "./sse.ts";
 import { issueIceServers } from "./turn.ts";
 import {
   addContact, createRoom, createUser, deleteContact, deleteEmptyRoom, findCurrentRoom, findRoomByCode, findUserByHandle,
-  isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicRoomDetails, publicUser,
+  findRoomMembership, isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicRoomDetails, publicUser,
   updateDisplayName,
 } from "./store.ts";
 import type { StoredRoom, StoredUser } from "./store.ts";
@@ -151,28 +151,75 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
     }, 60_000).unref();
   }
 
-  function announceTrails(code: string): void {
-    hub.broadcast(code, "trails", { trails: locations.snapshot(code).trails });
+  const disconnectTimers = new Map<string, Map<string, ReturnType<typeof setTimeout>>>();
+  let closing = false;
+  function cancelDisconnect(code: string, handle: string): void {
+    const timers = disconnectTimers.get(code);
+    clearTimeout(timers?.get(handle));
+    timers?.delete(handle);
+    if (timers?.size === 0) disconnectTimers.delete(code);
   }
 
-  function removeLocation(code: string, handle: string, reason = "left", announce = false): void {
-    const { target, requesters } = locations.removeFollows(code, handle);
-    if (target) hub.sendTo(code, target, "follow-cancelled", { requester: handle });
-    for (const requester of requesters) {
-      hub.followResponse(code, requester, handle, false, reason);
-      hub.sendTo(code, handle, "follow-cancelled", { requester });
-    }
-    if (locations.remove(code, handle) || announce) {
-      hub.broadcastExcept(code, handle, "location-stopped", { handle });
-    }
-    if (target || requesters.length) announceTrails(code);
+  function sendTrail(code: string, requester: string, target: string): void {
+    hub.sendTo(code, requester, "trail", {
+      handle: target, points: locations.snapshot(code, requester).trails[target] ?? [],
+      revision: locations.revision(code),
+    });
   }
 
-  hub.on("unsubscribed", ({ code, handle }: { code: string; handle: string }) => {
-    // 다른 기기/재접속 소켓이 남아 있으면 공유·따라가기를 유지한다.
-    // DB 멤버십은 보존하지만 마지막 연결의 위치·follow 관계는 정리한다.
-    if (hub.subscriberCount(code, handle) === 0) removeLocation(code, handle);
+  function cancelRequest(code: string, relation: { requestId: string; requester: string; target: string }, reason = "cancelled"): void {
+    hub.sendTo(code, relation.target, "follow-cancelled", {
+      requestId: relation.requestId, requester: relation.requester, reason, revision: locations.revision(code),
+    });
+  }
+
+  function removeLocation(code: string, handle: string, reason = "left"): void {
+    cancelDisconnect(code, handle);
+    const { outgoing, incoming } = locations.removeFollows(code, handle);
+    const removed = locations.remove(code, handle);
+    const revision = locations.revision(code);
+    if (outgoing) cancelRequest(code, outgoing);
+    for (const request of incoming) {
+      hub.followResponse(code, request.requestId, request.requester, handle, false, revision, reason);
+      cancelRequest(code, request);
+    }
+    if (removed || outgoing || incoming.length) {
+      hub.broadcastExcept(code, handle, "location-stopped", { handle, reason, revision });
+    }
+  }
+
+  function expireLocations(): void {
+    for (const { code, handle } of locations.stale()) removeLocation(code, handle, "stale");
+  }
+  const locationSweepTimer = setInterval(expireLocations, LOCATION_SWEEP_INTERVAL_MS).unref();
+  hub.on("subscribed", ({ code, handle }: { code: string; handle: string }) => {
+    cancelDisconnect(code, handle);
+    locations.reconnected(code, handle);
   });
+  hub.on("unsubscribed", ({ code, handle }: { code: string; handle: string }) => {
+    if (closing || hub.subscriberCount(code, handle) !== 0) return;
+    // 같은 handle의 마지막 소켓만 유예를 시작한다. 재구독은 이 타이머를 취소한다.
+    cancelDisconnect(code, handle);
+    locations.disconnected(code, handle);
+    let timers = disconnectTimers.get(code);
+    if (!timers) { timers = new Map(); disconnectTimers.set(code, timers); }
+    timers.set(handle, setTimeout(() => {
+      if (hub.subscriberCount(code, handle) === 0) removeLocation(code, handle);
+    }, LOCATION_DISCONNECT_GRACE_MS).unref());
+  });
+  hub.once("closing", () => {
+    closing = true;
+    clearInterval(locationSweepTimer);
+    clearTimeout(locationLogTimer);
+    for (const timers of disconnectTimers.values()) for (const timer of timers.values()) clearTimeout(timer);
+    disconnectTimers.clear();
+  });
+
+  function requireFollowRate(code: string, handle: string): void {
+    if (!locations.allowFollow(code, handle)) {
+      throw new HttpError(429, "FOLLOW_RATE_LIMIT", "따라가기 요청은 1초에 한 번만 보낼 수 있습니다.");
+    }
+  }
 
   async function route(request: IncomingMessage, response: ServerResponse, path: string): Promise<void> {
     const method = request.method;
@@ -220,6 +267,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       await readJson(request, true);
       revokeToken(db, token);
       hub.disconnectToken(tokenHash(token));
+      for (const code of locations.codesFor(user.handle)) removeLocation(code, user.handle, "stopped");
       json(response, 204);
       return;
     }
@@ -319,17 +367,26 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       }
       if (method === "POST" && action === "join") {
         await readJson(request, true);
-        if (joinRoom(db, room.id, user.id)) hub.broadcast(code, "member-joined", { handle: user.handle });
+        if (joinRoom(db, room.id, user.id)) {
+          hub.broadcast(code, "member-joined", { handle: user.handle, revision: locations.changed(code) });
+        }
         json(response, 200, { room: publicRoom(room) });
         return;
       }
       if (method === "POST" && action === "leave") {
         await readJson(request, true);
-        if (leaveRoom(db, room.id, user.id)) hub.broadcast(code, "member-left", { handle: user.handle });
-        removeLocation(code, user.handle);
+        if (!findRoomMembership(db, room.id, user.id)) {
+          throw new HttpError(403, "NOT_ROOM_MEMBER", "방 참여자만 사용할 수 있습니다.");
+        }
+        if (leaveRoom(db, room.id, user.id)) {
+          hub.broadcast(code, "member-left", { handle: user.handle, revision: locations.changed(code) });
+        }
         hub.disconnectUser(code, user.handle);
+        removeLocation(code, user.handle);
         hub.clearSignals(code, user.handle);
         if (deleteEmptyRoom(db, room.id)) {
+          for (const timer of disconnectTimers.get(code)?.values() ?? []) clearTimeout(timer);
+          disconnectTimers.delete(code);
           locations.clear(code);
           hub.clearSignals(code);
         }
@@ -345,42 +402,50 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         if (!target || !isRoomMember(db, room.id, target.id)) {
           throw new HttpError(403, "NOT_ROOM_MEMBER", "대상자가 방 참여자가 아닙니다.");
         }
-        const previous = locations.targetOf(code, user.handle);
-        const accepted = locations.requestFollow(code, user.handle, target.handle);
-        if (previous && previous !== target.handle) hub.sendTo(code, previous, "follow-cancelled", { requester: user.handle });
-        announceTrails(code);
-        if (accepted) hub.followResponse(code, user.handle, target.handle, true);
-        else hub.sendTo(code, target.handle, "follow-request", { requester: user.handle });
-        json(response, 202, { accepted: true });
+        requireFollowRate(code, user.handle);
+        expireLocations();
+        const previous = locations.relationOf(code, user.handle);
+        const result = locations.requestFollow(code, user.handle, target.handle, user.displayName);
+        if (result.changed) {
+          if (previous) cancelRequest(code, previous, previous.requestId === result.requestId ? "accepted" : "cancelled");
+          if (result.accepted) {
+            sendTrail(code, user.handle, target.handle);
+            hub.followResponse(code, result.requestId, user.handle, target.handle, true, result.revision);
+          } else {
+            hub.sendTo(code, target.handle, "follow-request", {
+              requestId: result.requestId, requester: user.handle, displayName: user.displayName,
+              revision: result.revision,
+            });
+          }
+        }
+        json(response, 202, { requestId: result.requestId, revision: result.revision, accepted: result.accepted });
         return;
       }
       if (action === "follow/respond" && method === "POST") {
         requireMember(db, room, user);
         const body = await readJson(request);
         requireMember(db, room, user);
-        if (!isValidHandle(body.requester) || typeof body.accepted !== "boolean") invalid("요청 아이디와 동의 여부가 필요합니다.");
-        const requester = findUserByHandle(db, body.requester);
-        if (!requester || !isRoomMember(db, room.id, requester.id)) {
-          throw new HttpError(403, "NOT_ROOM_MEMBER", "요청자가 방 참여자가 아닙니다.");
+        if (typeof body.requestId !== "string" || typeof body.accepted !== "boolean") invalid("요청 ID와 동의 여부가 필요합니다.");
+        if (!locations.requestById(code, user.handle, body.requestId)) {
+          throw new HttpError(404, "FOLLOW_EXPIRED", "이미 끝난 따라가기 요청입니다.");
         }
-        const requesters = locations.respondFollow(code, user.handle, requester.handle, body.accepted);
-        if (!requesters) throw new HttpError(409, "FOLLOW_EXPIRED", "이미 끝난 따라가기 요청입니다.");
-        for (const handle of requesters) {
-          hub.followResponse(code, handle, user.handle, body.accepted);
-          hub.sendTo(code, user.handle, "follow-cancelled", { requester: handle });
+        requireFollowRate(code, user.handle);
+        const requests = locations.respondFollow(code, user.handle, body.requestId, body.accepted)!;
+        const revision = locations.revision(code);
+        for (const request of requests) {
+          if (body.accepted) sendTrail(code, request.requester, user.handle);
+          hub.followResponse(code, request.requestId, request.requester, user.handle, body.accepted, revision);
+          cancelRequest(code, request, body.accepted ? "accepted" : "declined");
         }
-        announceTrails(code);
-        json(response, 202, { accepted: true });
+        json(response, 202, { accepted: body.accepted, revision });
         return;
       }
       if (action === "follow" && method === "DELETE") {
         requireMember(db, room, user);
-        const target = locations.unfollow(code, user.handle);
-        if (target) {
-          hub.sendTo(code, target, "follow-cancelled", { requester: user.handle });
-          announceTrails(code);
-        }
-        json(response, 202, { accepted: true });
+        requireFollowRate(code, user.handle);
+        const relation = locations.unfollow(code, user.handle);
+        if (relation) cancelRequest(code, relation);
+        json(response, 202, { accepted: true, revision: locations.revision(code) });
         return;
       }
       if (method === "POST" && action === "location") {
@@ -395,7 +460,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         }
         countLocation(code, result.dropped ? "dropped" : "accepted");
         if (!result.dropped) {
-          hub.broadcastExcept(code, user.handle, "location", locations.position(code, user.handle));
+          hub.broadcastExcept(code, user.handle, "location", { ...locations.position(code, user.handle), revision: locations.revision(code) });
         }
         json(response, 202, { accepted: true, dropped: result.dropped });
         return;
@@ -403,24 +468,29 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       if (method === "GET" && action === "positions") {
         requireMember(db, room, user);
         response.setHeader("cache-control", "no-store");
-        json(response, 200, locations.snapshot(code));
+        expireLocations();
+        json(response, 200, { ...locations.snapshot(code, user.handle), revision: locations.revision(code) });
         return;
       }
       if (method === "DELETE" && action === "location") {
         requireMember(db, room, user);
-        removeLocation(code, user.handle, "stopped", true);
+        removeLocation(code, user.handle, "stopped");
         json(response, 202, { accepted: true });
         return;
       }
       if (method === "GET" && action === "events") {
         requireMember(db, room, user);
+        expireLocations();
         let unsubscribe = () => {};
         const stream = openEventStream(response, () => unsubscribe(), () => Boolean(lookupToken(db, token)));
         unsubscribe = hub.subscribe(code, user.handle, tokenHash(token), stream.send, stream.close);
         if (!stream.send("hello", {
           self: publicUser(user), members: listRoomMembers(db, room.id),
-          leader: room.createdBy, ...locations.snapshot(code),
+          leader: room.createdBy, ...locations.snapshot(code, user.handle),
+          revision: locations.revision(code),
           followTarget: locations.targetOf(code, user.handle),
+          pendingFollow: locations.pendingOf(code, user.handle),
+          followRequestId: locations.relationOf(code, user.handle)?.requestId ?? null,
           followRequests: locations.requestsFor(code, user.handle),
         })) {
           unsubscribe();
