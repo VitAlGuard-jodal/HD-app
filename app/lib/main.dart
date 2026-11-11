@@ -21,6 +21,7 @@ import 'screens/phone/rooms.dart';
 import 'ui/appearance.dart';
 import 'ui/theme.dart';
 import 'ui/widgets/bottom_nav.dart';
+import 'ui/widgets/driving_lock.dart';
 import 'ui/widgets/phone_frame.dart';
 
 Future<void> main() async {
@@ -76,6 +77,7 @@ class UnavoApp extends StatefulWidget {
 class _UnavoAppState extends State<UnavoApp> {
   final _appearance = AppearanceController();
   final _navigator = GlobalKey<NavigatorState>();
+  final _phoneTabs = GlobalKey<_PhoneTabsState>();
   bool _cover = true;
   bool _roomVisible = false;
   bool _carRoomVisible = false;
@@ -124,8 +126,15 @@ class _UnavoAppState extends State<UnavoApp> {
       _navigator.currentState!
           .push<void>(
             MaterialPageRoute(
-              builder: (_) =>
-                  RoomScreen(services: widget.services, mode: widget.mode),
+              builder: (_) => RoomScreen(
+                services: widget.services,
+                mode: widget.mode,
+                onHome: () {
+                  _phoneTabs.currentState?.showRooms();
+                  // 설정 위에 알림으로 연 방도 홈은 로비까지 돌아간다.
+                  _navigator.currentState?.popUntil((route) => route.isFirst);
+                },
+              ),
             ),
           )
           .whenComplete(() {
@@ -175,6 +184,13 @@ class _UnavoAppState extends State<UnavoApp> {
         theme: unavoTheme(Brightness.light),
         darkTheme: unavoTheme(Brightness.dark),
         themeMode: _appearance.themeMode,
+        builder: widget.mode == DeviceMode.car
+            ? (context, child) => DrivingLockOverlay(
+                mode: widget.mode,
+                driving: widget.services.driving,
+                child: child ?? const SizedBox.shrink(),
+              )
+            : null,
         home: _cover
             ? CoverScreen(mode: widget.mode, onContinue: _continue)
             : widget.services.store.session == null
@@ -195,8 +211,10 @@ class _UnavoAppState extends State<UnavoApp> {
                 services: widget.services,
                 showRoom: _carRoomVisible,
                 onRoom: _openRoom,
+                onHome: () => setState(() => _carRoomVisible = false),
               )
             : _PhoneTabs(
+                key: _phoneTabs,
                 services: widget.services,
                 mode: widget.mode,
                 onRoom: _openRoom,
@@ -208,6 +226,7 @@ class _UnavoAppState extends State<UnavoApp> {
 
 class _PhoneTabs extends StatefulWidget {
   const _PhoneTabs({
+    super.key,
     required this.services,
     required this.mode,
     required this.onRoom,
@@ -221,6 +240,11 @@ class _PhoneTabs extends StatefulWidget {
 
 class _PhoneTabsState extends State<_PhoneTabs> {
   int _index = 0;
+
+  void showRooms() {
+    if (_index != 0) setState(() => _index = 0);
+  }
+
   @override
   Widget build(BuildContext context) => PhoneFrame(
     mode: widget.mode,

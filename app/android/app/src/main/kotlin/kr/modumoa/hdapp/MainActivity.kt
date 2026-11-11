@@ -9,10 +9,12 @@ import io.flutter.plugin.common.MethodChannel
 import kr.modumoa.hdapp.audio.AudioChannel
 import kr.modumoa.hdapp.call.CallChannel
 import kr.modumoa.hdapp.call.CallForegroundService
+import kr.modumoa.hdapp.drive.DriveChannel
 
 class MainActivity : FlutterActivity() {
     private var audioChannel: AudioChannel? = null
     private var callChannel: CallChannel? = null
+    private var driveChannel: DriveChannel? = null
     private var deviceChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -32,6 +34,7 @@ class MainActivity : FlutterActivity() {
         app.pendingOpenRoom = intent?.getStringExtra(CallForegroundService.EXTRA_ROOM_CODE)
         audioChannel = AudioChannel(this, app, messenger)
         callChannel = CallChannel(app, messenger)
+        driveChannel = DriveChannel(this, messenger)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -62,9 +65,11 @@ class MainActivity : FlutterActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         audioChannel?.dispose()
         callChannel?.dispose()
+        driveChannel?.dispose()
         deviceChannel?.setMethodCallHandler(null)
         audioChannel = null
         callChannel = null
+        driveChannel = null
         deviceChannel = null
         super.cleanUpFlutterEngine(flutterEngine)
     }

@@ -12,8 +12,7 @@ import '../../ui/widgets/panel_scroll.dart';
 import '../../ui/widgets/room_code.dart';
 import '../../ui/widgets/panel_field.dart';
 import '../../ui/widgets/status_chip.dart';
-import 'map_credits.dart';
-import 'profile.dart';
+import 'settings.dart';
 
 class RoomsScreen extends StatefulWidget {
   const RoomsScreen({super.key, required this.services, required this.onRoom});
@@ -90,27 +89,6 @@ class _RoomsScreenState extends State<RoomsScreen> {
     }
   }
 
-  Future<void> _logout() async {
-    if (_busy) return;
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      await widget.services.logout();
-    } catch (error) {
-      if (mounted)
-        setState(() {
-          _error = errorMessage(error);
-        });
-    } finally {
-      if (mounted)
-        setState(() {
-          _busy = false;
-        });
-    }
-  }
-
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: widget.services.rooms,
@@ -129,9 +107,16 @@ class _RoomsScreenState extends State<RoomsScreen> {
               children: [
                 const StatusChip('방', icon: 'rooms'),
                 if (!ControlScale.isCar(context))
-                  ProfileAvatarButton(
-                    api: widget.services.api,
-                    store: widget.services.store,
+                  PanelButton(
+                    key: const ValueKey('open-settings'),
+                    label: '설정',
+                    icon: 'settings',
+                    onPressed: () => Navigator.of(context).push<void>(
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            SettingsScreen(services: widget.services),
+                      ),
+                    ),
                   ),
               ],
             ),
@@ -260,27 +245,6 @@ class _RoomsScreenState extends State<RoomsScreen> {
                 active: true,
               ),
             ],
-            const SizedBox(height: 24),
-            PanelButton(
-              label: '로그아웃',
-              icon: 'lock',
-              onPressed: _busy ? null : _logout,
-            ),
-            const SizedBox(height: 16),
-            Align(
-              alignment: Alignment.centerRight,
-              child: PanelButton(
-                label: '지도 출처',
-                icon: 'map',
-                iconOnly: true,
-                onPressed: () => Navigator.of(context).push<void>(
-                  MaterialPageRoute(
-                    builder: (_) =>
-                        MapCreditsScreen(provider: widget.services.mapProvider),
-                  ),
-                ),
-              ),
-            ),
           ],
         ),
       );

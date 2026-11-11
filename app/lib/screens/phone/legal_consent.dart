@@ -206,6 +206,73 @@ class _LegalConsentScreenState extends State<LegalConsentScreen> {
   );
 }
 
+/// 설정에서는 저장된 동의 여부를 바꾸지 않고 같은 원문 렌더러만 사용한다.
+class LegalDocumentsScreen extends StatefulWidget {
+  const LegalDocumentsScreen({super.key});
+
+  @override
+  State<LegalDocumentsScreen> createState() => _LegalDocumentsScreenState();
+}
+
+class _LegalDocumentsScreenState extends State<LegalDocumentsScreen> {
+  int _index = 0;
+  late final _texts = Future.wait([
+    for (final document in _documents) rootBundle.loadString(document.asset),
+  ]);
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                PanelButton(
+                  key: const ValueKey('legal-documents-back'),
+                  label: '뒤로',
+                  icon: 'back',
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+                const Spacer(),
+                for (var index = 0; index < _documents.length; index++) ...[
+                  if (index > 0) const SizedBox(width: 12),
+                  PanelButton(
+                    key: ValueKey('legal-document-$index'),
+                    label: _documents[index].title,
+                    icon: index == 0 ? 'user' : 'location',
+                    selected: _index == index,
+                    style: _index == index
+                        ? PanelButtonStyle.gold
+                        : PanelButtonStyle.neutral,
+                    onPressed: () => setState(() => _index = index),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: FutureBuilder<List<String>>(
+                future: _texts,
+                builder: (context, snapshot) => PanelScroll(
+                  key: ValueKey('legal-document-text-$_index'),
+                  child: snapshot.hasError
+                      ? const ErrorText('동의 문서를 불러오지 못했습니다. 다시 열어 주세요.')
+                      : snapshot.hasData
+                      ? _legalText(snapshot.data![_index])
+                      : const SizedBox.shrink(),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 Widget _legalText(String markdown) => Column(
   crossAxisAlignment: CrossAxisAlignment.stretch,
   children: [

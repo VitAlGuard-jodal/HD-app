@@ -12,6 +12,7 @@ import '../map/map_provider.dart';
 import '../net/api_client.dart';
 import '../room/room_session.dart';
 import 'device_mode.dart';
+import 'driving_state.dart';
 
 class AppServices {
   AppServices(
@@ -25,6 +26,7 @@ class AppServices {
     api = ApiClient(tokenStore: store);
     mic = MicRouter(store);
     calls = CallService();
+    driving = DrivingState(mode: deviceMode ?? DeviceMode.phone);
     rooms = RoomSession(
       api: api,
       mediaEngine:
@@ -49,6 +51,7 @@ class AppServices {
   late final ApiClient api;
   late final MicRouter mic;
   late final CallService calls;
+  late final DrivingState driving;
   late final RoomSession rooms;
 
   void setMapAuthError(String code) {
@@ -79,6 +82,7 @@ class AppServices {
   void dispose() {
     _disposed = true;
     mapAuthError.dispose();
+    driving.dispose();
     rooms.dispose();
     calls.dispose();
     mic.dispose();

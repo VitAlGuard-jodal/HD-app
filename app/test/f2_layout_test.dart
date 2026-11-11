@@ -26,6 +26,7 @@ import 'package:unavo/ui/widgets/bottom_nav.dart';
 import 'package:unavo/ui/widgets/member_tile.dart';
 import 'package:unavo/ui/widgets/panel_button.dart';
 
+import 'support/consent_fakes.dart';
 import 'support/icon_bundle.dart';
 
 void main() {
@@ -50,7 +51,7 @@ void main() {
           ),
         ),
       );
-      await tester.pumpAndSettle();
+      await pumpConsentUi(tester);
       expect(find.text('음소거'), findsNothing);
       expect(find.byTooltip('음소거'), findsOneWidget);
       final button = find.byType(OutlinedButton);
@@ -87,7 +88,7 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await pumpConsentUi(tester);
     for (final label in ['방', '친구', '마이크']) {
       expect(find.text(label), findsNothing);
       expect(find.byTooltip(label), findsOneWidget);
@@ -119,7 +120,7 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await pumpConsentUi(tester);
     double opacity() => tester
         .widget<AnimatedOpacity>(
           find.byKey(const ValueKey('floating-bar-opacity')),
@@ -184,7 +185,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('폰 음성·방 관리 버튼 4개·볼륨 확장, 차량은 80dp 버튼 3개', (tester) async {
+  testWidgets('폰 음성·방 관리 버튼 5개·볼륨 확장, 차량은 80dp 버튼 4개', (tester) async {
     final semantics = tester.ensureSemantics();
     SharedPreferences.setMockInitialValues({
       'token': 'test',
@@ -206,6 +207,7 @@ void main() {
       isActive: true,
     );
     for (final car in [false, true]) {
+      var homeTaps = 0;
       await tester.pumpWidget(
         MaterialApp(
           builder: testIconBuilder,
@@ -216,6 +218,7 @@ void main() {
                 services: services,
                 mode: car ? DeviceMode.car : DeviceMode.phone,
                 embedded: true,
+                onHome: () => homeTaps++,
               ),
             ),
           ),
@@ -226,13 +229,22 @@ void main() {
       final controls = find.byKey(const ValueKey('room-controls'));
       expect(
         find.descendant(of: controls, matching: find.byType(FloatingBarButton)),
-        findsNWidgets(car ? 3 : 4),
+        findsNWidgets(car ? 4 : 5),
       );
       expect(
         find.descendant(of: controls, matching: find.byType(Text)),
         findsNothing,
       );
       expect(find.byTooltip('방 나가기'), findsOneWidget);
+      final home = find.byKey(const ValueKey('room-home'));
+      expect(tester.widget<FloatingBarButton>(home).icon, 'home');
+      expect(
+        tester.getCenter(home).dx,
+        closeTo(tester.getCenter(controls).dx, .01),
+      );
+      await tester.tap(home);
+      expect(homeTaps, 1);
+      expect(services.rooms.state.code, 'ABC123');
       expect(find.byTooltip('통화 참여'), findsNothing);
       expect(find.byTooltip('통화 끊기'), findsNothing);
       expect(find.byType(RoomMap), findsNothing);
@@ -256,7 +268,7 @@ void main() {
         expect(find.byType(Slider), findsNothing);
         expect(find.byTooltip('통화 음량 100%'), findsOneWidget);
         expect(find.byTooltip(services.rooms.outputLabel), findsNothing);
-        for (final label in ['음소거', '방 나가기']) {
+        for (final label in ['음소거', '홈', '방 나가기']) {
           final button = find.byTooltip(label);
           expect(tester.getSize(button), const Size(80, 80));
         }
@@ -282,13 +294,20 @@ void main() {
             of: controls,
             matching: find.byType(FloatingBarButton),
           ),
-          findsNWidgets(3),
+          findsNWidgets(4),
         );
         expect(find.bySemanticsLabel(RegExp('다시 연결')), findsOneWidget);
         await tester.pump(const Duration(seconds: 10));
         expect(find.byType(FloatingBarOverlay), findsNothing);
         expect(find.byTooltip('방 나가기'), findsOneWidget);
         expect(tester.takeException(), isNull);
+        await tester.tap(find.byTooltip('통화 음량 100%'));
+        await tester.pump();
+        expect(home, findsNothing);
+        expect(
+          find.byKey(const ValueKey('call-volume-slider')),
+          findsOneWidget,
+        );
         await tester.pumpWidget(const SizedBox.shrink());
         continue;
       }
@@ -296,6 +315,7 @@ void main() {
       await tester.pump();
       final slider = find.byKey(const ValueKey('call-volume-slider'));
       expect(slider, findsOneWidget);
+      expect(home, findsNothing);
       expect(tester.widget<Slider>(slider).min, 0);
       expect(tester.widget<Slider>(slider).max, 100);
       expect(tester.widget<Slider>(slider).divisions, 100);
@@ -309,6 +329,7 @@ void main() {
       expect(slider, findsOneWidget);
       await tester.pump(const Duration(milliseconds: 1));
       expect(slider, findsNothing);
+      expect(home, findsOneWidget);
       await tester.pump(const Duration(seconds: 4));
       if (car) expect(find.byType(FloatingBarOverlay), findsNothing);
       expect(tester.takeException(), isNull);
@@ -455,7 +476,7 @@ void main() {
           ),
         ),
       );
-      await tester.pumpAndSettle();
+      await pumpConsentUi(tester);
       final name = find.text('R6C_Tester 아주 긴 이름');
       final paragraph = tester.renderObject<RenderParagraph>(name);
       expect(paragraph.didExceedMaxLines, isFalse);
@@ -505,7 +526,7 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await pumpConsentUi(tester);
     final primary = find.byKey(const ValueKey('car-primary'));
     final secondary = find.byKey(const ValueKey('car-secondary'));
     final beforeLeft = tester.getRect(primary);
@@ -514,7 +535,7 @@ void main() {
     expect(beforeLeft.width, greaterThan(beforeRight.width));
     await tester.tap(find.byType(TextField));
     tester.view.viewInsets = const FakeViewPadding(bottom: 360);
-    await tester.pumpAndSettle();
+    await pumpConsentUi(tester);
     expect(tester.getRect(primary).width, beforeLeft.width);
     expect(tester.getRect(secondary).left, beforeRight.left);
     expect(tester.getRect(primary).bottom, lessThanOrEqualTo(580));

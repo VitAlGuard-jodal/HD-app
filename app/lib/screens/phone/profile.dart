@@ -17,57 +17,6 @@ import '../../ui/widgets/member_avatar.dart';
 import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/unavo_dialog.dart';
 
-class ProfileAvatarButton extends StatelessWidget {
-  const ProfileAvatarButton({
-    super.key,
-    required this.api,
-    required this.store,
-  });
-  final ApiClient api;
-  final SessionStore store;
-
-  @override
-  Widget build(BuildContext context) {
-    final car = ControlScale.isCar(context);
-    return ListenableBuilder(
-      listenable: store,
-      builder: (context, _) => Semantics(
-        label: '내 프로필 편집',
-        button: true,
-        child: IconButton(
-          key: const ValueKey('open-profile'),
-          constraints: BoxConstraints.tightFor(
-            width: car ? 80 : 56,
-            height: car ? 80 : 56,
-          ),
-          padding: const EdgeInsets.all(8),
-          style: IconButton.styleFrom(shape: const CircleBorder()),
-          onPressed: store.handle == null
-              ? null
-              : () => Navigator.of(context).push<void>(
-                  MaterialPageRoute(
-                    builder: (_) =>
-                        ProfileScreen(api: api, store: store, car: car),
-                  ),
-                ),
-          icon: MemberAvatar(
-            member: Member(
-              store.handle ?? '',
-              store.displayName ?? store.handle ?? '',
-              '',
-              avatar: store.avatar,
-            ),
-            diameter: car ? 56 : 40,
-            showBorder: false,
-            defaultMascot: true,
-            api: api,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({
     super.key,

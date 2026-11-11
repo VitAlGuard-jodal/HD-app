@@ -29,10 +29,12 @@ class RoomScreen extends StatefulWidget {
     required this.services,
     required this.mode,
     this.embedded = false,
+    this.onHome,
   });
   final AppServices services;
   final DeviceMode mode;
   final bool embedded;
+  final VoidCallback? onHome;
   @override
   State<RoomScreen> createState() => _RoomScreenState();
 }
@@ -451,62 +453,61 @@ class _RoomScreenState extends State<RoomScreen> {
             selected: _volumeExpanded,
             onPressed: inCall ? _toggleVolume : null,
           );
-          final buttons = _volumeExpanded
-              ? <Widget>[
-                  volume,
-                  Expanded(
-                    child: Semantics(
-                      label: '통화 음량',
-                      child: Slider(
-                        key: const ValueKey('call-volume-slider'),
-                        value: session.callVolume.toDouble(),
-                        min: 0,
-                        max: 100,
-                        divisions: 100,
-                        activeColor: UnavoColors.gold,
-                        label: '${session.callVolume}',
-                        onChangeStart: (_) {
-                          _volumeTimer?.cancel();
-                          setState(() => _dragging = true);
-                        },
-                        onChanged: _changeVolume,
-                        onChangeEnd: (_) {
-                          setState(() => _dragging = false);
-                          _collapseVolumeLater();
-                        },
-                      ),
-                    ),
-                  ),
-                  exit,
-                ]
-              : [
-                  FloatingBarButton(
-                    label: session.muted ? '음소거 해제' : '음소거',
-                    icon: session.muted ? 'micoff' : 'mic',
-                    selected: session.muted,
-                    onPressed: inCall
-                        ? () => session.setMuted(!session.muted)
-                        : null,
-                  ),
-                  if (reconnect && !automotive)
-                    FloatingBarButton(
-                      label: '다시 연결',
-                      icon: 'refresh',
-                      onPressed: _busy || state.isLeaving
-                          ? null
-                          : () => _run(session.reconnect),
-                    ),
-                  volume,
-                  if (!automotive)
-                    FloatingBarButton(
-                      label: session.outputLabel,
-                      icon: session.outputRoute.icon,
-                      onPressed: inCall && !_busy
-                          ? () => _run(session.cycleOutputRoute)
-                          : null,
-                    ),
-                  exit,
-                ];
+          final volumeButtons = <Widget>[
+            volume,
+            Expanded(
+              child: Semantics(
+                label: '통화 음량',
+                child: Slider(
+                  key: const ValueKey('call-volume-slider'),
+                  value: session.callVolume.toDouble(),
+                  min: 0,
+                  max: 100,
+                  divisions: 100,
+                  activeColor: UnavoColors.gold,
+                  label: '${session.callVolume}',
+                  onChangeStart: (_) {
+                    _volumeTimer?.cancel();
+                    setState(() => _dragging = true);
+                  },
+                  onChanged: _changeVolume,
+                  onChangeEnd: (_) {
+                    setState(() => _dragging = false);
+                    _collapseVolumeLater();
+                  },
+                ),
+              ),
+            ),
+            exit,
+          ];
+          final leftButtons = <Widget>[
+            FloatingBarButton(
+              label: session.muted ? '음소거 해제' : '음소거',
+              icon: session.muted ? 'micoff' : 'mic',
+              selected: session.muted,
+              onPressed: inCall ? () => session.setMuted(!session.muted) : null,
+            ),
+            if (reconnect && !automotive)
+              FloatingBarButton(
+                label: '다시 연결',
+                icon: 'refresh',
+                onPressed: _busy || state.isLeaving
+                    ? null
+                    : () => _run(session.reconnect),
+              ),
+            volume,
+          ];
+          final rightButtons = <Widget>[
+            if (!automotive)
+              FloatingBarButton(
+                label: session.outputLabel,
+                icon: session.outputRoute.icon,
+                onPressed: inCall && !_busy
+                    ? () => _run(session.cycleOutputRoute)
+                    : null,
+              ),
+            exit,
+          ];
           final controls = FloatingBar(
             key: const ValueKey('room-controls'),
             child: _volumeExpanded
@@ -517,23 +518,51 @@ class _RoomScreenState extends State<RoomScreen> {
                         width: constraints.maxWidth < (car ? 320 : 200)
                             ? (car ? 320 : 200)
                             : constraints.maxWidth,
-                        child: Row(children: buttons),
+                        child: Row(children: volumeButtons),
                       ),
                     ),
                   )
                 : LayoutBuilder(
-                    builder: (context, constraints) => SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(
-                          minWidth: constraints.maxWidth,
+                    builder: (context, constraints) {
+                      // 재연결/출력 유무가 달라도 좌우 폭은 같게 확보한다.
+                      final sideCount = leftButtons.length > rightButtons.length
+                          ? leftButtons.length
+                          : rightButtons.length;
+                      final minWidth =
+                          (sideCount * 2 + 1) * (car ? 80.0 : 48.0);
+                      return SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: SizedBox(
+                          width: constraints.maxWidth < minWidth
+                              ? minWidth
+                              : constraints.maxWidth,
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceEvenly,
+                                  children: leftButtons,
+                                ),
+                              ),
+                              FloatingBarButton(
+                                key: const ValueKey('room-home'),
+                                label: '홈',
+                                icon: 'home',
+                                onPressed: widget.onHome,
+                              ),
+                              Expanded(
+                                child: Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceEvenly,
+                                  children: rightButtons,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: buttons,
-                        ),
-                      ),
-                    ),
+                      );
+                    },
                   ),
           );
           Widget dock(Widget child) => Stack(

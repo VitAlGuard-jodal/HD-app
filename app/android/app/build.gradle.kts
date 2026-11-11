@@ -57,6 +57,7 @@ flutter {
 
 // 기존 Kotlin 마이크 라우터/서비스에 이미 사용하던 네이티브 의존성.
 dependencies {
+    compileOnly(files("${android.sdkDirectory}/platforms/android-37.0/optional/android.car.jar"))
     implementation("androidx.core:core-ktx:1.19.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 }

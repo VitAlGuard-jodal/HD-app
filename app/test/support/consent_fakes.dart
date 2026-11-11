@@ -11,6 +11,7 @@ import 'package:unavo/call/call_state.dart';
 import 'package:unavo/call/media_engine.dart';
 import 'package:unavo/core/app_services.dart';
 import 'package:unavo/core/device_mode.dart';
+import 'package:unavo/core/driving_state.dart';
 import 'package:unavo/location/location_share.dart';
 import 'package:unavo/map/map_provider.dart';
 import 'package:unavo/net/api_client.dart';
@@ -61,11 +62,16 @@ class ConsentTestServices implements AppServices {
   ConsentTestServices(
     this.store, {
     DeviceMode mode = DeviceMode.phone,
+    Stream<Object?>? drivingEvents,
     DateTime Function()? locationNow,
   }) {
     _api = ConsentTestApi(store);
     mic = _Mic(store);
     calls = _Calls();
+    driving = DrivingState(
+      mode: mode,
+      events: drivingEvents ?? const Stream<Object?>.empty(),
+    );
     rooms = RoomSession(
       api: api,
       mediaEngine: media,
@@ -83,6 +89,7 @@ class ConsentTestServices implements AppServices {
     bool signedIn = true,
     String? savedVersion,
     DeviceMode mode = DeviceMode.phone,
+    Stream<Object?>? drivingEvents,
     String handle = 'bob',
   }) async {
     SharedPreferences.setMockInitialValues({
@@ -100,6 +107,7 @@ class ConsentTestServices implements AppServices {
     return ConsentTestServices(
       SessionStore(preferences, defaultBaseUrl: 'https://example.invalid'),
       mode: mode,
+      drivingEvents: drivingEvents,
       locationNow: tester.binding.clock.now,
     );
   }
@@ -113,6 +121,8 @@ class ConsentTestServices implements AppServices {
   late final MicRouter mic;
   @override
   late final CallService calls;
+  @override
+  late final DrivingState driving;
   @override
   late final RoomSession rooms;
   @override
@@ -155,6 +165,7 @@ class ConsentTestServices implements AppServices {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    driving.dispose();
     rooms.dispose();
     mapAuthError.dispose();
     calls.dispose();

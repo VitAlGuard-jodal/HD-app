@@ -21,10 +21,12 @@ class AuthScreen extends StatefulWidget {
     required this.api,
     required this.store,
     required this.mode,
+    this.serverSettingsOnly = false,
   });
   final ApiClient api;
   final SessionStore store;
   final DeviceMode mode;
+  final bool serverSettingsOnly;
   @override
   State<AuthScreen> createState() => _AuthScreenState();
 }
@@ -87,6 +89,11 @@ class _AuthScreenState extends State<AuthScreen> {
       _error = null;
     });
     try {
+      if (widget.serverSettingsOnly) {
+        await _saveServer();
+        if (mounted) Navigator.of(context).pop();
+        return;
+      }
       final id = _handle.text.trim();
       if (!HandleRules.isValid(id))
         throw const FormatException(HandleRules.help);
@@ -99,12 +106,7 @@ class _AuthScreenState extends State<AuthScreen> {
         if (password.runes.length < 8 || password.runes.length > 72)
           throw const FormatException('비밀번호는 8~72자로 입력해 주세요.');
       }
-      await widget.store.setBaseUrl(
-        ServerAddress.normalize(
-          _server.text,
-          allowPrivateCleartext: kDebugMode,
-        ),
-      );
+      await _saveServer();
       final result = _signup
           ? await widget.api.signup(id, password, name)
           : await widget.api.login(id, password);
@@ -129,8 +131,68 @@ class _AuthScreenState extends State<AuthScreen> {
     }
   }
 
+  Future<void> _saveServer() => widget.store.setBaseUrl(
+    ServerAddress.normalize(_server.text, allowPrivateCleartext: kDebugMode),
+  );
+
+  Widget _serverField() => PanelField(
+    controller: _server,
+    label: 'https://…',
+    icon: 'server',
+    enabled: !_busy,
+    keyboardType: TextInputType.url,
+    textInputAction: TextInputAction.done,
+    onSubmitted: (_) => _submit(),
+  );
+
   @override
-  Widget build(BuildContext context) => PhoneFrame(
+  Widget build(BuildContext context) =>
+      widget.serverSettingsOnly ? _serverSettings(context) : _authentication();
+
+  Widget _serverSettings(BuildContext context) => ControlScale(
+    car: widget.mode == DeviceMode.car,
+    child: Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: PanelButton(
+                  key: const ValueKey('server-settings-back'),
+                  label: '뒤로',
+                  icon: 'back',
+                  onPressed: _busy ? null : () => Navigator.of(context).pop(),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: PanelScroll(
+                  controller: _scroll,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [_serverField(), ErrorText(_error)],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              PanelButton(
+                key: const ValueKey('server-settings-save'),
+                label: '서버 주소 저장',
+                icon: 'check',
+                style: PanelButtonStyle.gold,
+                onPressed: _busy ? null : _submit,
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Widget _authentication() => PhoneFrame(
     mode: widget.mode,
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -233,15 +295,7 @@ class _AuthScreenState extends State<AuthScreen> {
                   ),
                   if (_serverExpanded) ...[
                     const SizedBox(height: 12),
-                    PanelField(
-                      controller: _server,
-                      label: 'https://…',
-                      icon: 'server',
-                      enabled: !_busy,
-                      keyboardType: TextInputType.url,
-                      textInputAction: TextInputAction.done,
-                      onSubmitted: (_) => _submit(),
-                    ),
+                    _serverField(),
                   ],
                   ErrorText(_error ?? _validationMessage),
                 ],

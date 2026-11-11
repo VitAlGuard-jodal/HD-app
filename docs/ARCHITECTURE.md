@@ -79,6 +79,12 @@ SSE 이벤트(`event:` 이름 / `data:` JSON): `hello{self}`, `member-joined{han
 
 Dart는 인증·서버 주소·HTTP/SSE·방 세션·미디어 엔진 인터페이스 및 화면 상태를 소유한다. 상태 관리는 ChangeNotifier, 화면 이동은 기본 Navigator다. HTTP/SSE는 dart:io HttpClient, 영속 저장은 shared_preferences, SVG 아이콘은 flutter_svg를 사용한다.
 
+**화면 구성(M8a).** 통화·방은 앱 수준의 `AppServices.rooms`·`calls`가 소유하며 화면 수명과 분리된다. `RoomScreen.onHome`은 폰에서는 방 route와 그 아래 설정 route를 루트까지 pop하고 홈 탭을 로비로 돌리며, 차량에서는 `_carRoomVisible=false`로 바꾼다. 방 나가기·통화 종료는 호출하지 않는다. 로비의 참여 중인 방 카드와 통화 중 상태 칩을 유지하고 카드에서 기존 `_openRoom`으로 복귀한다. 폰은 새 방 route를 push하고 차량은 `_carRoomVisible=true`로 전환한다.
+
+폰 로비 우상단과 차량 보조 패널 우상단의 `settings` 톱니바퀴가 공용 `SettingsScreen`을 연다. 위에서부터 프로필(`ProfileScreen`), 통화 음량(`RoomSession.setCallVolume`·기존 저장/미디어 경로), 마이크(`MicScreen`), 서버 주소, 약관·동의 문서, 지도 출처(`MapCreditsScreen`), 로그아웃을 둔다. 서버 주소는 현재 `store.baseUrl`을 표시하고 `AuthScreen(serverSettingsOnly: true)`의 기존 서버 필드·주소 검증·저장 경로로 연결한다. 이 경로에서는 로그인/가입을 제출하지 않는다. 약관은 `legal_consent.dart`의 `LegalDocumentsScreen`에서 같은 번들 Markdown 렌더러로 읽으며 동의 값을 변경하지 않는다. 로그아웃은 로비에 있던 `services.logout()`과 오류 처리를 그대로 이동한다. 로비에는 프로필·로그아웃·지도 출처 버튼을 두지 않는다. 모든 조작 버튼은 아이콘이고 `ControlScale`로 폰/차량 크기를 맞춘다.
+
+차량 `CarDashboard`는 주 패널 안에 중첩 `Navigator`를 둔다. 루트 page는 `RoomsScreen`이며 방 또는 설정 page를 그 위에 둔다. 설정에서 여는 프로필·마이크·서버·약관·지도 출처 route도 이 내비게이터에 push한다. 방에서 톱니바퀴를 누르면 방 표시를 내리고 설정을 열며, 프로필 → 뒤로 → 설정 → 뒤로 → 로비 순서로 돌아간다. 중첩 내비게이터의 시스템 뒤로 가기는 `NavigatorPopHandler`로 전달한다. 보조 패널의 마이크 레벨·친구/마이크 선택 상태·플로팅 바는 화면 전환 중에도 같은 위젯 상태로 유지한다.
+
 플랫폼 채널은 세 종류다. `unavo/device`는 automotive/마이크 기능을 조회한다. `unavo/audio`는 기존 Kotlin MicRouter의 장치 선택·자동 복귀·권한·입력 시험·스피커 출력을 연결하고 `unavo/audio/levels`에서 100ms 레벨 상태를 받는다. `unavo/call`은 microphone foreground service를 시작/종료하며 `unavo/call/events`에서 상태·알림 끊기·방 열기 이벤트를 받는다.
 
 Android 입력 시험은 앱 소유 MicRouter가 관리하고 화면 이탈·통화 시작 전에 중지한다. F3 통화 캡처는 WebRTC가 소유하며 FGS는 포커스와 microphone 서비스 수명을 관리한다. iOS도 AVAudioSession을 네이티브 채널이 관리하고 통화 중 AVAudioEngine 미터를 중지한다. 통화 끊기는 미디어·마이크·FGS만 정리하고 방 멤버십/SSE를 유지한다. 방 나가기는 서버 leave까지 수행한다. 알림의 비공개 브로드캐스트는 네이티브 통화 상태를 종료하고 Dart에 WebRTC 정리를 전달한다.
@@ -234,7 +240,7 @@ NAVER 로고는 왼쪽 아래에 상시 유지하고 플로팅 바 여백을 확
 
 **화면 연결(M5a).** 입장은 지도가 없는 통화 방이다. 다른 멤버 카드 동의 후만 지도를 표시한다. 폰 세로는 위 70% 지도·아래 30% 통화 방, 폰 가로와 차량 주 패널은 좌 70%·우 30%다. 플로팅 바의 위치 관련 버튼은 제거하고 지도 내부 버튼으로 옮긴다. 전체 화면에서는 통화 방 대신 참여자 아바타 인디케이터와 하단 음성·방 관리 바를 표시한다. 세부 흐름·워터마크·테마는 §15를 따른다.
 
-방 목록 하단 map 아이콘은 최종 공급원을 전달해 `MapCreditsScreen`을 연다. 네이버는 “지도: 네이버 지도 (NAVER Cloud Platform Maps)·지도 왼쪽 아래 NAVER 로고를 누르면 법적 고지와 오픈소스 정보”를, 브이월드는 기존 출처·국토교통부의 “브이월드 배경지도”·공공누리 제1유형·“수정·가공하지 않음”을 표시한다. 두 공급원 모두 “위치는 방이 있는 동안만 서버(국내 리전)에 남습니다” 안내와 chevron 아이콘의 `showLicensePage` 연결을 유지한다. 위치 SVG 7종은 Fable이 공급한 기존 자산을 사용한다. 동작 테스트는 메모리 아이콘 번들을 사용한다.
+설정의 map 아이콘은 최종 공급원을 전달해 `MapCreditsScreen`을 연다. 네이버는 “지도: 네이버 지도 (NAVER Cloud Platform Maps)·지도 왼쪽 아래 NAVER 로고를 누르면 법적 고지와 오픈소스 정보”를, 브이월드는 기존 출처·국토교통부의 “브이월드 배경지도”·공공누리 제1유형·“수정·가공하지 않음”을 표시한다. 두 공급원 모두 “위치는 방이 있는 동안만 서버(국내 리전)에 남습니다” 안내와 chevron 아이콘의 `showLicensePage` 연결을 유지한다. 위치 SVG 7종은 Fable이 공급한 기존 자산을 사용한다. 동작 테스트는 메모리 아이콘 번들을 사용한다.
 
 **seq stream.** LocationShare는 프로세스에서 한 번 생성한 암호학적 난수 8바이트를 16자 소문자 hex stream으로 보낸다. 같은 실행의 stop/start·방 변경에도 stream과 기존 세션 seq 증가를 유지한다. POST 본문·위치 응답·SSE·hello의 LocationFix에 stream이 추가된다. 서버는 16자 hex를 검증하고 lastSeq를 `(handle, stream)`별로 보관한다. 새 stream의 seq 0은 이전 stream의 큰 seq와 비교하지 않고, 현재 위치는 여전히 handle당 한 건으로 덮어쓴다. 기존 handle별 400ms 속도 제한은 유지하므로 stream 변경으로 우회할 수 없다. 앱도 stream이 바뀐 위치를 받아들이고 각 대상의 궤적은 handle/stream별 마지막 seq로 중복 제거한다. 나머지 궤적·수신 시각·방 삭제 규칙은 M1과 같다. 옛 hello의 stream 누락은 앱에서 빈 문자열로 읽지만 새 서버 POST에는 유효한 stream이 필수다.
 
@@ -270,7 +276,7 @@ M5a는 프로필의 따라가기·따라가기 요청·따라가기 중지에 �
 
 같은 대상 카드를 다시 탭하면 “따라가기 중지” 모달이다. check 선택 시 follow DELETE·지도 닫힘이며 내 공유는 계속한다. 공유 중인 내 카드와 지도 안 locationoff 버튼은 동일한 `showConsentDialog(title: '위치 공유 중지', lines: ['내 위치 공유를 중지합니다'])`를 연다. 선택 인자 `note`로 본문 아래에 “위치 공유를 중단하게 되면 그룹 안에 있는 파트너와 연결이 끊기게 됩니다. 그래도 하시겠습니까?”를 `UnavoType.caption` 회색 보조 스타일로 표시한다. check 선택은 내 공유·따라가기와 지도를 닫고, 나를 따르던 팔로워는 서버 종료 이벤트로 해제한다. back 선택은 상태를 유지한다. 방을 나가면 모두 종료한다. 동의 모달은 가운데·차단형·아이콘 버튼만 사용하는 M4 규칙을 유지한다.
 
-**배치.** 폰은 SafeArea 전체를 사용한다. 세로 지도:통화 방 7:3(상/하), 가로는 7:3(좌/우)다. 차량은 CarShell 주 패널을 7:3(좌/우)로 쓴다. 폰 세로의 작은 통화 영역에는 가로 멤버 띠, 옆 통화 영역에는 세로 목록을 둔다. 바는 폰 SafeArea 바닥 또는 차량 주 패널 바닥 +8dp에 고정한다. 마이크·출력 경로(폰)·필요 시 재연결(폰)·음량·나가기만 허용한다. 음량은 폰·차량 모두 표시하고 수신 이득 상한 100%와 기존 차량 시스템 음량 연동 스위치는 유지한다. 좁은 패널의 버튼과 확장 음량 조작은 가로 스크롤한다.
+**배치.** 폰은 SafeArea 전체를 사용한다. 세로 지도:통화 방 7:3(상/하), 가로는 7:3(좌/우)다. 차량은 CarShell 주 패널을 7:3(좌/우)로 쓴다. 폰 세로의 작은 통화 영역에는 가로 멤버 띠, 옆 통화 영역에는 세로 목록을 둔다. 바는 폰 SafeArea 바닥 또는 차량 주 패널 바닥 +8dp에 고정한다. M8a 일반 바는 왼쪽 [음소거·필요 시 재연결(폰)·음량], 가운데 [홈], 오른쪽 [출력 경로(폰)·나가기]다. 양쪽에 같은 폭을 배분해 홈을 기하학적 가운데에 두고, 부족한 폭은 가로 스크롤한다. 음량 펼침 모드는 [음량·슬라이더·나가기]를 유지하며 홈을 숨긴다. 음량은 폰·차량 모두 표시하고 수신 이득 상한 100%와 기존 차량 시스템 음량 연동 스위치는 유지한다. 좁은 패널의 버튼과 확장 음량 조작은 가로 스크롤한다.
 
 `UnavoWatermark`는 Rye의 “Una Vox”를 “UNAVO” 글자 크기의 1/2로 두고 행 높이 1로 바로 붙인다. `LayoutBuilder`로 통화 방 영역 폭의 80%·높이의 40%를 한계로 잡고, 영역 폭에 비례하는 두 줄을 `FittedBox(scaleDown)`으로 맞춰 중앙에 표시한다(M5a-e). IgnorePointer·ExcludeSemantics를 유지하고 Stack에서 멤버 카드가 워터마크 위에 그려진다. `Theme.of(context).brightness`에 따라 다크는 크림색 `UnavoColors.text`·opacity 0.16, 라이트는 금색 `UnavoColors.gold`·opacity 0.18을 쓰며 M5a-d의 테마별 색상은 유지한다. 통화 패널 배경은 두 테마 모두 불투명 `UnavoColors.ink`다. 지도에는 배치하지 않는다. 전체 화면은 같은 지도 상태를 GlobalKey로 이동시켜 통화를 유지하고 통화 방은 숨긴다. 하단 바는 계속 보이며 좌상단에는 최대 6명 원형 아바타(폰 40·차량 56dp)를 가로로 놓는다. 말할 때 테두리 3dp와 바깥 글로우는 새 토큰 `UnavoColors.speaking = #7CFF5B`다. 자기 발화는 localSpeaking, 원격 발화는 speaking 집합을 따른다.
 
@@ -316,7 +322,7 @@ hello는 `{self,members,leader,positions,trails,revision,followTarget,pendingFol
 
 `ui/member_colors.dart`의 순수 함수 `rainbowColor(order)`는 빨 `#FF4D4D`, 주 `#FF9A3C`, 노 `#FFD93C`, 초 `#4CD964`, 파 `#3C8CFF`, 남 `#4B5BD6`, 보 `#B36BFF`를 7명마다 반복한다. `MemberAvatar`는 3dp 테두리를 이 색으로 유지하고 발화는 바깥의 `UnavoColors.speaking` 글로우로 나타낸다. 02·05 마스코트만 원형 마스크 안에서 0.82배로 줄여 모자·콘을 보존한다. null의 기본 렌더와 사진 로딩 실패는 이름 첫 글자다. C-1에 따라 방 카드·전체 화면 인디케이터에서는 미설정(null)을 `mascot-01`로 표시한다. 카드의 사람 상태 아이콘은 제거하고 발화·연결·기기 아이콘만 유지한다. 좁은 카드에서도 아바타는 이름·아이디 영역의 왼쪽 세로 중앙이며 폰 이름 두 줄 규칙을 유지한다.
 
-**프로필 편집.** 폰 `RoomsScreen` 우상단과 차량 `CarShell` 보조 패널 우상단의 현재 아바타 원형 버튼으로 `ProfileScreen`을 연다. 큰 미리보기는 폰 120dp·차량 160dp이고 무지개 테두리가 없다. 기본 5종은 번들 PNG 격자로 표시하고 선택 항목에만 금색 테두리를 준다. `plus`는 사진첩, `check`는 서버 저장, `back`은 저장하지 않고 돌아가기다. 버튼에 글자를 표시하지 않는다. 서버 저장 전에는 선택·사진 미리보기만 바뀐다.
+**프로필 편집.** 폰 로비와 차량 보조 패널의 톱니바퀴 → `SettingsScreen`의 프로필 아이콘으로 `ProfileScreen`을 연다(M8a). 차량에서는 주 패널의 중첩 내비게이터 안에서만 전환한다. 이전 `ProfileAvatarButton`은 제거한다. 큰 미리보기는 폰 120dp·차량 160dp이고 무지개 테두리가 없다. 기본 5종은 번들 PNG 격자로 표시하고 선택 항목에만 금색 테두리를 준다. `plus`는 사진첩, `check`는 서버 저장, `back`은 저장하지 않고 돌아가기다. 버튼에 글자를 표시하지 않는다. 서버 저장 전에는 선택·사진 미리보기만 바뀐다.
 
 설치된 `image_picker 1.2.4`의 `pickImage(source: ImageSource.gallery,maxWidth:1024,maxHeight:1024,imageQuality:90)`를 사용한다. 설치된 Android 구현의 `useAndroidPhotoPicker`를 켜 Android 16 미만에서도 Photo Picker 계약을 사용하며 권한을 추가하지 않는다. 기존 image_picker의 설치된 전이 구현만 사용하고 pubspec 의존성은 추가하지 않는다. iOS Info.plist의 `NSPhotoLibraryUsageDescription`은 “프로필 사진으로 쓸 이미지를 고르기 위해 사진첩에 접근합니다”다.
 
@@ -327,3 +333,13 @@ hello는 `{self,members,leader,positions,trails,revision,followTarget,pendingFol
 `ApiClient.avatarPhoto`는 인증 헤더를 포함한 version URL로 가져오며 서버 주소·로그인 토큰·handle·version별 메모리 캐시를 사용한다. 새 버전은 재요청하고 실패한 요청은 캐시에서 제거한다. 네이버 `NOverlayImage.fromWidget` 키에는 handle·표시 이름·나 여부·heading 유무·밝기·차량 여부와 avatar kind·version·색을 포함한다. 사진/마스코트는 `ui.Image`로 완전히 디코딩한 후 `RawImage`로 캡처하므로 비어 있는 첫 프레임을 저장하지 않는다. 로딩 실패 시 임시 차 마커를 사용하고 이후 성공하면 동일 버전이어도 아이콘을 교체한다. SDK alpha와 위젯 opacity를 중복 적용하지 않는다. 앱 수동 디스크 캐시는 없으며 SDK의 캡처용 임시 캐시는 §13과 같다. 브이월드도 facade로 전달된 avatar·order·API와 공통 마커 위젯을 사용한다.
 
 **동의·검증.** M5b 당시 개인정보 `legalVersion='2'`, 위치 문서 `locationLegalVersion='1'`과 M6의 항목별 동의 저장을 유지했고 법률 Markdown은 변경하지 않았다. 이후 M7의 위치 문서 버전 2·배경 전송 동의는 §12를 따른다. 추가 검증은 `member_colors_test.dart`, `member_avatar_test.dart`, `profile_screen_test.dart`, 지도 캐시 키·내 GPS 색 테스트, 개인정보 버전 2 재동의 테스트, 서버 `avatars.test.ts`이다. 서버 테스트에는 마이그레이션, 300KB/PNG/IHDR 검사, 버전 증가·사진 삭제, 인증·캐시 헤더, 첫 입장 순서와 재입장, 공개 직렬화·참여 방 SSE를 포함한다. 새 테스트는 30초 timeout과 유한 pump를 사용하고 비동기 핸들러 밖에서 검증한다. 이 작업에서는 정적 분석·구문·포맷만 검사하며 테스트 실행과 빌드는 Fable이 담당한다. 실제 갤러리·네이티브 지도 캡처와 폰/차량 배치는 기기 확인 대상이다.
+
+## 17. 차량 모드 주행 중 조작 잠금(M8b)
+
+**기준·플랫폼.** `DeviceCapabilities`가 Android `FEATURE_AUTOMOTIVE`로 판별한 차량에서만 `DrivingState`가 `EventChannel('unavo/drive')`를 구독한다. 네이티브 `DriveChannel`은 `Car.createCar(context)`와 `CarUxRestrictionsManager`를 연결하고 구독 직후 현재 값, 이후 리스너 변경 값을 전송한다. 잠금 기준은 `CarUxRestrictions.isRequiresDistractionOptimization()`이며 `activeRestrictions` 비트 값이나 GPS 속도로 추정하지 않는다. 예를 들어 requiresDO가 true이면 비트 값이 0이어도 잠근다. `CAR_SPEED`·`CAR_DRIVING_STATE` 권한은 요청하지 않는다. 기존 `distractionOptimized=true`를 유지하고 `android.car`는 optional uses-library와 compileSdk 37의 로컬 jar compileOnly로 연결한다. 새 Maven/pub 패키지는 없다.
+
+**범위·수명.** `MaterialApp.builder`의 `DrivingLockOverlay`가 Navigator 위 Stack에 반투명 스크림, Tabler outline 핸들·자물쇠 아이콘, “주행 중에는 조작할 수 없습니다” 한 줄을 표시한다. `AbsorbPointer`는 주 패널·보조 패널·모든 route·다이얼로그를 포함한 앱 전체 터치를 차단한다. 터치를 허용하는 버튼이나 화면 예외는 없다. 제한이 false가 되는 즉시 오버레이를 제거하며 기존 화면과 다이얼로그를 유지한다. 잠금 중 들어오는 따라가기 요청과 동의 모달은 기존 큐·내비게이터 흐름을 그대로 따르고 해제 뒤 응답할 수 있다. 통화·위치 공유·SSE와 세션에는 손대지 않는다. §12의 위치 공유 최초 이동 판정은 기존 기능 내부 규칙으로 유지하며 전역 잠금의 입력으로 사용하지 않는다.
+
+**폰·사용 불가.** 폰은 이동 여부와 무관하게 주행 이벤트를 구독하지 않고 항상 `restricted=false`다. UI도 차량 모드를 재확인하므로 제한 상태를 잘못 전달해도 폰을 잠그지 않는다. 자동차가 아니거나 `android.car`가 없거나 Car 연결·조회에 실패하면 네이티브는 `{restricted:false, available:false}`를 한 번 보내고 스트림을 끝낸다. Flutter는 unavailable·잘못된 이벤트·채널 오류·스트림 종료 시 잠금을 해제한다. 구독 cancel과 Activity의 엔진 정리 경로에서 리스너와 Car 연결을 해제하고 `AppServices.dispose()`에서 Dart 구독도 해제한다.
+
+**근거·검증.** [Pleos SDK 안내](https://document.pleos.ai/docs/pleos-only/vehicle-app-planning-guide/pleos-connect-sdk-api)는 차속·기어 등의 표준 데이터를 AAOS Car API로 안내한다. [Pleos 주행 규제 개발 가이드](https://document.pleos.ai/docs/pleos-only/vehicle-app-developer-guide/driving-restriction-development-guide)는 DO 선언 앱도 CarUxRestrictions와 ActiveRestrictions에 따라 UX 제한을 직접 적용하도록 한다. [Android CarUxRestrictionsManager](https://developer.android.com/reference/android/car/drivingstate/CarUxRestrictionsManager)의 현재 값·리스너 API를 사용한다. 로컬 근거는 `pleos-sdk-inventory.md` §0.3, `contest-recheck-2026-10-23.md` §4(h), `emulator-handson-modumoa.md` §4.1이다. 상태 파싱·오류·폰 미구독·구독 해제는 `driving_state_test.dart`, 전체 터치 차단·즉시 해제·폰 예외·다이얼로그 보존은 `driving_lock_test.dart`로 검사한다. Pleos 에뮬레이터의 Drive/40 km/h → Park/0 km/h 및 실제 기기의 터치·통화·위치 전송 유지는 별도 확인 대상이다.
