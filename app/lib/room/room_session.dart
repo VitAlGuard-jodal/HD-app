@@ -10,6 +10,8 @@ import '../call/media_engine.dart';
 import '../call/mesh_coordinator.dart';
 import '../core/errors.dart';
 import '../core/device_mode.dart';
+import '../location/location_share.dart';
+import '../location/location_source.dart';
 import '../net/api_client.dart';
 import '../net/models.dart';
 
@@ -54,7 +56,20 @@ class RoomSession extends ChangeNotifier {
     required this.store,
     required this.callService,
     required this.micRouter,
+    this.deviceMode,
+    LocationSource? locationSource,
+    DateTime Function()? locationNow,
   }) {
+    locationShare = LocationShare(
+      api: api,
+      source: locationSource,
+      roomCode: () => state.isLeaving ? null : state.code,
+      selfHandle: () => store.handle,
+      preferences: store.preferences,
+      now: locationNow,
+    );
+    _lastLocationState = _locationState();
+    locationShare.addListener(_locationChanged);
     callService.onLeaveCall = leave;
     callService.onToggleMute = () {
       if (call.isActive || joiningCall) setMuted(!muted);
@@ -97,9 +112,31 @@ class RoomSession extends ChangeNotifier {
   final SessionStore store;
   final CallService callService;
   final MicRouter micRouter;
+  final DeviceMode? deviceMode;
+  late final LocationShare locationShare;
   late final StreamSubscription<Map<String, MeshPeerState>> _peerSubscription;
   Map<String, MeshPeerState> get peerStates => mediaEngine.peerStates;
-  RoomState state = const RoomState();
+  RoomState _state = const RoomState();
+  RoomState get state => _state;
+  set state(RoomState value) {
+    final changedRoom = _state.code != value.code;
+    _state = value;
+    if (changedRoom) _clearLocations();
+    locationShare.roomChanged();
+  }
+
+  final Map<String, LocationFix> _positions = {};
+  Map<String, LocationFix> get positions => Map.unmodifiable(_positions);
+  String? _leaderHandle;
+  String? get leaderHandle => _leaderHandle;
+  final List<LocationFix> _leaderTrail = [];
+  List<LocationFix> get leaderTrail => List.unmodifiable(_leaderTrail);
+  int _lastLeaderSeq = -1;
+  bool _followLeader = false;
+  bool get followLeader => _followLeader;
+  String? _followError;
+  String? get followError => _followError;
+  late List<Object?> _lastLocationState;
   Room? _restorableRoom;
   Room? get restorableRoom => _restorableRoom;
 
@@ -232,6 +269,12 @@ class RoomSession extends ChangeNotifier {
 
   Future<void> _onEvent(String code, RoomEvent event, int generation) async {
     switch (event) {
+      case LocationUpdated():
+        if (_updateLocation(event.fix)) _notify();
+        return;
+      case LocationStopped():
+        if (_positions.remove(event.handle) != null) _notify();
+        return;
       case Signal():
         await mediaEngine.onSignal(event.from, event.kind, event.payload);
       case Disconnected():
@@ -258,6 +301,7 @@ class RoomSession extends ChangeNotifier {
           }
         }
       case Hello():
+        _setLocationSnapshot(event);
         await _setMembers(event.members);
         if (!_current(generation)) return;
         // Keep live peers; repair only offers lost while SSE was unavailable.
@@ -272,6 +316,7 @@ class RoomSession extends ChangeNotifier {
       case MemberJoined():
         await _refresh(code, generation);
       case MemberLeft():
+        _positions.remove(event.handle);
         // Close immediately, even if the subsequent HTTP refresh fails.
         await _setMembers(
           state.members.where((m) => m.handle != event.handle).toList(),
@@ -289,6 +334,7 @@ class RoomSession extends ChangeNotifier {
       final details = await api.getRoom(code);
       if (_current(generation) && state.code == code) {
         state = state.copyWith(room: details.room, error: null);
+        _setLeader(details.room.leader);
         await _setMembers(details.members);
         _notify();
       }
@@ -316,6 +362,99 @@ class RoomSession extends ChangeNotifier {
       await mediaEngine.leave();
       mediaError = meshCapacityReason;
     }
+  }
+
+  void _setLeader(String? handle) {
+    if (_leaderHandle == handle) return;
+    _leaderHandle = handle;
+    _leaderTrail.clear();
+    _lastLeaderSeq = -1;
+    _followLeader = false;
+    _followError = null;
+  }
+
+  void _setLocationSnapshot(Hello event) {
+    _setLeader(event.leader ?? state.room?.leader);
+    _positions.clear();
+    for (final fix in event.positions) {
+      if (fix.seq > (_positions[fix.handle]?.seq ?? -1))
+        _positions[fix.handle] = fix;
+    }
+    _leaderTrail.clear();
+    _lastLeaderSeq = -1;
+    if (event.trail?.handle == leaderHandle) {
+      for (final fix in event.trail?.points ?? const <LocationFix>[]) {
+        _appendTrail(fix);
+      }
+    }
+  }
+
+  bool _appendTrail(LocationFix fix) {
+    if (fix.handle != leaderHandle || fix.seq <= _lastLeaderSeq) return false;
+    _lastLeaderSeq = fix.seq;
+    _leaderTrail.add(fix);
+    if (_leaderTrail.length > 7200)
+      _leaderTrail.removeRange(0, _leaderTrail.length - 7200);
+    return true;
+  }
+
+  bool _updateLocation(LocationFix fix) {
+    if (fix.seq <= (_positions[fix.handle]?.seq ?? -1)) return false;
+    _positions[fix.handle] = fix;
+    _appendTrail(fix);
+    return true;
+  }
+
+  void setFollowLeader(bool value) {
+    if (_disposed || leaderHandle == null || leaderHandle == store.handle)
+      return;
+    if (value == _followLeader && _followError == null) return;
+    final car =
+        (deviceMode ??
+            (micRouter.isAutomotive ? DeviceMode.car : DeviceMode.phone)) ==
+        DeviceMode.car;
+    final blocked = value && car && !locationShare.isStationary;
+    final next = blocked ? _followLeader : value;
+    final message = blocked ? '정차 후 설정할 수 있습니다' : null;
+    if (_followLeader == next && _followError == message) return;
+    _followLeader = next;
+    _followError = message;
+    _notify();
+  }
+
+  List<Object?> _locationState() => [
+    locationShare.available,
+    locationShare.consented,
+    locationShare.sharing,
+    locationShare.permission,
+    locationShare.error,
+    locationShare.lastSent,
+    locationShare.isStationary,
+  ];
+
+  void _locationChanged() {
+    final next = _locationState();
+    if (listEquals(next, _lastLocationState)) return;
+    final previousFix = _lastLocationState[5];
+    final wasSharing = _lastLocationState[2] as bool;
+    _lastLocationState = next;
+    final fix = locationShare.lastSent;
+    if (locationShare.sharing && fix != null && fix != previousFix) {
+      // 서버는 송신자에게 반사하지 않으므로 성공한 로컬 표본을 반영한다.
+      _updateLocation(fix);
+    } else if (wasSharing && !locationShare.sharing) {
+      _positions.remove(store.handle);
+    }
+    _notify();
+  }
+
+  void _clearLocations() {
+    _positions.clear();
+    _leaderHandle = null;
+    _leaderTrail.clear();
+    _lastLeaderSeq = -1;
+    _followLeader = false;
+    _followError = null;
   }
 
   void _maybeAutoJoin() {
@@ -652,6 +791,7 @@ class RoomSession extends ChangeNotifier {
     ++_generation;
     _notify();
     try {
+      await locationShare.stop();
       await _subscription?.cancel();
       _subscription = null;
       await leaveCall();
@@ -669,6 +809,7 @@ class RoomSession extends ChangeNotifier {
   Future<void> forget() async {
     ++_generation;
     _restorableRoom = null;
+    await locationShare.stop();
     await _subscription?.cancel();
     _subscription = null;
     await leaveCall();
@@ -700,6 +841,8 @@ class RoomSession extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    locationShare.removeListener(_locationChanged);
+    locationShare.dispose();
     ++_generation;
     ++_callGeneration;
     unawaited(_subscription?.cancel());

@@ -2,11 +2,12 @@ import type { IncomingMessage, RequestListener, ServerResponse } from "node:http
 import type { DatabaseSync } from "node:sqlite";
 import { hashPassword, issueToken, lookupToken, revokeToken, tokenHash, verifyPassword } from "./auth.ts";
 import { isValidDisplayName, isValidHandle, isValidPassword } from "./handles.ts";
+import { RoomLocationStore } from "./locations.ts";
 import { generateRoomCode, RoomEventHub } from "./rooms.ts";
 import { openEventStream } from "./sse.ts";
 import { issueIceServers } from "./turn.ts";
 import {
-  addContact, createRoom, createUser, deleteContact, findCurrentRoom, findRoomByCode, findUserByHandle,
+  addContact, createRoom, createUser, deleteContact, deleteEmptyRoom, findCurrentRoom, findRoomByCode, findUserByHandle,
   isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicRoomDetails, publicUser,
   updateDisplayName,
 } from "./store.ts";
@@ -132,7 +133,36 @@ function requireMember(db: DatabaseSync, room: StoredRoom, user: StoredUser): vo
   }
 }
 
-export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; hub?: RoomEventHub }): RequestListener {
+export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLocationStore() }: {
+  db: DatabaseSync; hub?: RoomEventHub; locations?: RoomLocationStore;
+}): RequestListener {
+  const locationCounts = new Map<string, { accepted: number; dropped: number; rate: number }>();
+  let locationLogTimer: ReturnType<typeof setTimeout> | undefined;
+  function countLocation(code: string, outcome: "accepted" | "dropped" | "rate"): void {
+    const counts = locationCounts.get(code) ?? { accepted: 0, dropped: 0, rate: 0 };
+    counts[outcome] += 1;
+    locationCounts.set(code, counts);
+    locationLogTimer ??= setTimeout(() => {
+      for (const [roomCode, totals] of locationCounts) {
+        process.stdout.write(`location: code=${roomCode} accepted=${totals.accepted} dropped=${totals.dropped} rate=${totals.rate}\n`);
+      }
+      locationCounts.clear();
+      locationLogTimer = undefined;
+    }, 60_000).unref();
+  }
+
+  function removeLocation(code: string, handle: string, announce = false): void {
+    if (locations.remove(code, handle) || announce) {
+      hub.broadcastExcept(code, handle, "location-stopped", { handle });
+    }
+  }
+
+  hub.on("unsubscribed", ({ code, handle }: { code: string; handle: string }) => {
+    // 다른 기기/재접속 소켓이 남아 있으면 그 사용자의 공유를 유지한다.
+    // 터널 복귀를 위해 DB 멤버십과 그룹장 궤적은 연결 수명과 분리한다.
+    if (hub.subscriberCount(code, handle) === 0) removeLocation(code, handle);
+  });
+
   async function route(request: IncomingMessage, response: ServerResponse, path: string): Promise<void> {
     const method = request.method;
 
@@ -261,7 +291,7 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
       throw new HttpError(409, "ROOM_CODE_CONFLICT", "방 코드를 발급하지 못했습니다. 다시 시도해 주세요.");
     }
 
-    const roomMatch = /^\/v1\/rooms\/([^/]+)(?:\/(join|leave|events|signal))?$/.exec(path);
+    const roomMatch = /^\/v1\/rooms\/([^/]+)(?:\/(join|leave|events|signal|location|positions))?$/.exec(path);
     if (roomMatch) {
       const rawCode = pathValue(roomMatch[1]);
       if (!/^[A-Za-z0-9]+$/.test(rawCode)) {
@@ -285,9 +315,43 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
       if (method === "POST" && action === "leave") {
         await readJson(request, true);
         if (leaveRoom(db, room.id, user.id)) hub.broadcast(code, "member-left", { handle: user.handle });
+        removeLocation(code, user.handle);
         hub.disconnectUser(code, user.handle);
         hub.clearSignals(code, user.handle);
+        if (deleteEmptyRoom(db, room.id)) {
+          locations.clear(code);
+          hub.clearSignals(code);
+        }
         json(response, 204);
+        return;
+      }
+      if (method === "POST" && action === "location") {
+        requireMember(db, room, user);
+        const body = await readJson(request);
+        requireMember(db, room, user);
+        const result = locations.accept(code, { ...body, handle: user.handle }, room.createdBy);
+        if (!result.ok) {
+          if (result.reason === "invalid") invalid("위치 표본이 올바르지 않습니다.");
+          countLocation(code, "rate");
+          throw new HttpError(429, "LOCATION_RATE_LIMIT", "위치를 너무 자주 보내고 있습니다.");
+        }
+        countLocation(code, result.dropped ? "dropped" : "accepted");
+        if (!result.dropped) {
+          hub.broadcastExcept(code, user.handle, "location", locations.position(code, user.handle));
+        }
+        json(response, 202, { accepted: true, dropped: result.dropped });
+        return;
+      }
+      if (method === "GET" && action === "positions") {
+        requireMember(db, room, user);
+        response.setHeader("cache-control", "no-store");
+        json(response, 200, locations.snapshot(code));
+        return;
+      }
+      if (method === "DELETE" && action === "location") {
+        requireMember(db, room, user);
+        removeLocation(code, user.handle, true);
+        json(response, 202, { accepted: true });
         return;
       }
       if (method === "GET" && action === "events") {
@@ -295,7 +359,10 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
         let unsubscribe = () => {};
         const stream = openEventStream(response, () => unsubscribe(), () => Boolean(lookupToken(db, token)));
         unsubscribe = hub.subscribe(code, user.handle, tokenHash(token), stream.send, stream.close);
-        if (!stream.send("hello", { self: publicUser(user), members: listRoomMembers(db, room.id) })) {
+        if (!stream.send("hello", {
+          self: publicUser(user), members: listRoomMembers(db, room.id),
+          leader: room.createdBy, ...locations.snapshot(code),
+        })) {
           unsubscribe();
         } else {
           // 재전송 중 전송에 실패해도 스트림의 onClose에서 구독을 해제한다.
@@ -339,6 +406,7 @@ export function createApp({ db, hub = new RoomEventHub() }: { db: DatabaseSync; 
     const log = () => {
       if (logged) return;
       logged = true;
+      if (request.method === "POST" && /^\/v1\/rooms\/[^/]+\/location$/.test(path)) return;
       const actor = actors.get(response);
       process.stdout.write(`${request.method ?? "UNKNOWN"} ${path} ${response.statusCode} ${Date.now() - started}${actor ? ` ${actor}` : ""}\n`);
     };

@@ -3,11 +3,19 @@ import '../auth/session_store.dart';
 import '../call/call_service.dart';
 import '../call/media_engine.dart';
 import '../call/webrtc_media_engine.dart';
+import '../location/location_share.dart';
+import '../location/location_source.dart';
 import '../net/api_client.dart';
 import '../room/room_session.dart';
+import 'device_mode.dart';
 
 class AppServices {
-  AppServices(this.store, {MediaEngine? mediaEngine}) {
+  AppServices(
+    this.store, {
+    MediaEngine? mediaEngine,
+    this.locationSource,
+    DeviceMode? deviceMode,
+  }) {
     api = ApiClient(tokenStore: store);
     mic = MicRouter(store);
     calls = CallService();
@@ -21,9 +29,13 @@ class AppServices {
       store: store,
       callService: calls,
       micRouter: mic,
+      locationSource: locationSource,
+      deviceMode: deviceMode,
     );
   }
   final SessionStore store;
+  final LocationSource? locationSource;
+  LocationShare get locationShare => rooms.locationShare;
   late final ApiClient api;
   late final MicRouter mic;
   late final CallService calls;

@@ -140,3 +140,31 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 **기본 체인** = WebRTC 내장 처리(에코 제거·잡음 억제·자동 이득). 완료 기준은 블루투스 핸즈프리 통화급(상대 말소리 지연·끊김 없음, 말 안 할 때 거슬리는 소리 없음). 기준을 넘으면 잡음 트랙은 종료하고, 새 잡음 변수가 떠올라도 소거법으로 확장하지 않는다. 부족하다고 판단될 때만 ① 캡처 A(WebRTC 처리 끔 + RNNoise)로 이중 처리 가설 확인 → ② 같은 훅에서 GTCRN(초소형·MIT) / DeepFilterNet3(지연 +40 ms·연산 9배) 를 캡처 도구로 "목소리 보존 0 dB·바닥 감쇠" 수치 비교해 이기는 것만 채택. 기획서 문구는 "WebRTC 표준 잡음 억제 적용, 학습형 모델은 실험 모듈로 탑재".
 
 **시연 환경(결정 6-A).** 찌지직의 실제 음원은 맥북 키보드·손·쿨링팬 충격음이 몸체를 타고 내장 마이크로 들어간 것. 시연·녹화 중 맥에 손을 대지 않고 맥 입력 음량을 낮춰 피크(실측 0 dBFS)에 여유를 둔다. 같은 방에 폰과 차를 두면 에코 제거기가 자기 목소리를 에코로 지워(26~43 dB) 음질 판단이 왜곡되므로, 음질 시험은 폰 마이크 음소거 또는 다른 방에서 한다.
+
+## 12. 위치 공유·그룹장 궤적(M1)
+
+**범위.** 지도 위젯과 실제 GPS 없이 방의 위치 데이터 통로와 앱 세션 상태를 구현한다. `AppServices.locationSource`는 기본 `null`이며 이때 공유는 사용 불가다. `LocationSource.requestPermission()`과 `watch()`만 정의하고, 테스트는 구독 해제를 기록하는 가짜 소스와 가짜 HTTP·시계를 사용한다. 실제 소스는 스트림 구독을 취소할 때 하드웨어 구독도 해제해야 한다.
+
+**그룹장.** 방을 만든 사람의 handle을 `leader`로 노출한다. 생성·조회·참여 응답, `/v1/me.room`, SSE `hello.leader`가 같은 값을 사용한다. SQLite의 `rooms.created_by`는 사용자 ID지만 기존 조회 쿼리가 `createdBy`를 이미 handle로 변환하므로 추가 사용자 조회는 하지 않는다. 그룹장이 잠시 끊기거나 나가도 남은 참여자가 기존 궤적을 볼 수 있다.
+
+| 메서드·경로 | 본문 / 응답 | 규칙 |
+|---|---|---|
+| `POST /v1/rooms/:code/location` | `{lat,lng,acc?,speed?,heading?,at,seq}` → `202 {accepted:true,dropped}` | 방 멤버만. handle은 인증 사용자, receivedAt은 서버 시각으로 정한다. 잘못된 표본 400, 속도 제한 429 |
+| `GET /v1/rooms/:code/positions` | `{positions:[LocationFix],trail:{handle,points:[LocationFix]} 또는 null}` | 방 멤버만, `Cache-Control: no-store` |
+| `DELETE /v1/rooms/:code/location` | `202 {accepted:true}` | 방 멤버만, 자신의 현재 위치만 제거 |
+
+`LocationFix`는 `{handle,lat,lng,acc?,speed?,heading?,at,seq,receivedAt}`다. acc는 m, speed는 m/s, heading은 0~360도, at/receivedAt은 epoch ms다. SSE `location`은 저장된 전체 표본, `location-stopped`는 `{handle}`을 보내며 **송신 handle의 모든 연결은 제외**한다. `hello`는 기존 `self`·`members`와 함께 `leader`·`positions`·`trail`을 보내 재접속 즉시 스냅샷을 복원한다. 앱은 송신자에게 반사되지 않는 자신의 성공한 표본을 세션에 직접 반영한다(서버 수신 시각을 모르는 로컬 표본의 receivedAt은 0).
+
+**메모리 저장소.** `RoomLocationStore`는 방별 최신 위치 1건/handle, 그룹장 궤적, 마지막 seq·수신 시각을 보관한다. 위도 −90~90, 경도 −180~180, acc/speed ≥ 0, heading 0~360, 유한한 at, 정수 seq ≥ 0을 검증한다. 같은 방·handle의 처리 간격은 최소 400ms이며, 그 뒤 seq가 이전 이하이면 성공 응답의 `dropped:true`로 버린다. 유효한 드롭도 수신 간격에 포함한다. 그룹장 궤적은 최대 7,200점이며 초과분은 앞에서 버린다. 스냅샷은 내부 저장소와 분리된 사본이다.
+
+명시적 중지·leave·해당 handle의 마지막 SSE 연결 해제는 현재 위치를 제거한다. 실제 위치가 제거된 leave/연결 해제와 명시적 DELETE는 `location-stopped`를 전파한다. 다른 기기의 SSE 연결이 남아 있으면 연결 해제만으로 위치를 지우지 않는다. SSE 단절 시 DB 멤버십을 보존하는 기존 터널 복귀 정책도 유지한다. 마지막 멤버가 `/leave`하면 빈 방을 삭제하고 위치·궤적·순번·시그널 백로그를 모두 비운다. 위치는 SQLite에 쓰지 않으며 서버 프로세스 재시작으로도 사라진다. 위치 POST는 기존 개별 액세스 로그를 생략하고, 트래픽이 있는 방마다 분당 `location: code=… accepted=… dropped=… rate=…` 한 줄로 집계한다.
+
+**앱 전송·수명.** `LocationShare`는 이번 실행의 `consent()`와 명시적인 `start()`를 분리한다. 동의 이력은 `location.consent.v1`에 저장하지만 새 실행에서 동의 상태나 공유 시작으로 복원하지 않는다. 시작 시 권한을 요청하고 거부/영구 거부는 “위치 권한이 없습니다”, 서비스 꺼짐은 “위치 서비스가 꺼져 있습니다”로 표시한다. 평상시 전송 간격은 1초이며 그 사이에는 최신 표본 하나만 남겨 시한에 보낸다. speed < 0.5m/s이면서 직전 전송 지점에서 3m 미만이면 5초 간격이다. seq는 0부터 전송 시도마다 증가하며 같은 세션에서 중지·재시작해도 이어진다. 전송 실패는 상태 오류로 표시하면서 공유를 유지하고, 3회 연속 실패하면 다음 성공까지 5초 간격으로 보낸다.
+
+방 나가기·코드 변경·세션 해제는 구독과 보류 타이머를 중지한다. 진행 중 POST가 끝난 다음 이전 방에 DELETE를 보내 늦은 응답이 중지한 위치를 되살리지 않게 한다. DELETE 실패는 로컬 중지를 막지 않는다. 권한 응답이나 중지 완료를 기다리던 시작 요청도 뒤이은 중지로 취소된다. 이번 구현은 Dart 스트림의 포그라운드 수명만 다루며, 백그라운드에서 살아 있는 동안만 계속 동작한다.
+
+**세션·정차 규칙.** `RoomSession`은 현재 위치 맵, leaderHandle, 최대 7,200점의 leaderTrail, followLeader/followError를 가진다. hello로 위치·궤적을 교체하고, 위치 이벤트는 seq가 증가한 경우에만 반영한다. 중복·역순 seq는 궤적에 다시 쌓지 않는다. 중지·member-left는 현재 위치만 제거하고 방을 떠나면 전체 상태를 초기화한다. 위치 중복 이벤트와 같은 설정의 반복 호출은 알림을 만들지 않는다.
+
+정차 판정은 3초 동안 모은 표본의 speed가 모두 1m/s 미만이거나 이동이 3m 미만인 경우다. 관측 초기 3초와 표본이 3초 이상 끊긴 상태는 정차로 보지 않는다. 차량 모드에서 따라가기 **켜기**는 `LocationShare.isStationary`가 참일 때만 가능하며, 불가능하면 “정차 후 설정할 수 있습니다”를 표시한다. 끄기는 언제나 가능하고 폰에는 정차 제한이 없다. 그룹장 자신에게는 따라가기 설정이 no-op이다.
+
+**동의 시트·M2.** `showLocationConsentSheet(context, recipients)`는 현재 참여자 표시 이름, “같은 방 참여자에게 내 차 위치를 보여 줍니다”, “방을 나가거나 중지 아이콘을 누르면 끝납니다”, “위치는 방이 있는 동안만 서버에 남습니다”를 보여 준다. 확인/check와 취소/back은 기존 SVG 아이콘만 사용하며 결과를 bool로 돌려준다. 시트는 아직 화면에 연결하지 않는다. M2에서 지도(`flutter_map`), 실제 GPS(`geolocator`), 위치 아이콘·플로팅 바 연결을 구현하며, Android 위치 포그라운드 서비스는 M2 이후에 다룬다.

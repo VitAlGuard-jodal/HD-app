@@ -107,6 +107,23 @@ class ApiClient {
     await _request('POST', '/v1/rooms/${_segment(code)}/leave');
   }
 
+  Future<bool> sendLocation(String code, LocationFix fix) async =>
+      (await _response(
+            'POST',
+            '/v1/rooms/${_segment(code)}/location',
+            fix.toJson(),
+          ))['dropped']
+          as bool;
+
+  Future<LocationSnapshot> positions(String code) async =>
+      LocationSnapshot.fromJson(
+        await _response('GET', '/v1/rooms/${_segment(code)}/positions'),
+      );
+
+  Future<void> stopLocation(String code) async {
+    await _request('DELETE', '/v1/rooms/${_segment(code)}/location');
+  }
+
   Future<void> sendSignal(
     String code,
     String to,
@@ -345,20 +362,18 @@ class ApiClient {
       'member-joined',
       'member-left',
       'signal',
+      'location',
+      'location-stopped',
     }.contains(event.name))
       return null;
     final data = jsonDecode(event.data) as JsonMap;
     switch (event.name) {
       case 'hello':
-        final self = data['self'];
-        return Hello(
-          self is JsonMap
-              ? self['handle'] as String? ?? ''
-              : self as String? ?? '',
-          (data['members'] as List<dynamic>? ?? [])
-              .map((value) => Member.fromJson(value as JsonMap))
-              .toList(),
-        );
+        return Hello.fromJson(data);
+      case 'location':
+        return LocationUpdated(LocationFix.fromJson(data));
+      case 'location-stopped':
+        return LocationStopped(data['handle'] as String);
       case 'member-joined':
         return MemberJoined(data['handle'] as String);
       case 'member-left':

@@ -80,7 +80,7 @@ test("방 생성자는 자동 참여하고 방의 공개 정보에는 코드와 
   const { db, alice } = fixture(t);
   const now = "2026-01-01T00:00:00.000Z";
   const room = createRoom(db, { code: "ABC234", name: "같이 출발", createdBy: alice.id }, now)!;
-  assert.deepEqual(publicRoom(room), { code: "ABC234", name: "같이 출발", createdBy: "alice", createdAt: now });
+  assert.deepEqual(publicRoom(room), { code: "ABC234", name: "같이 출발", createdBy: "alice", createdAt: now, leader: "alice" });
   assert.deepEqual(listRoomMembers(db, room.id), [{ ...publicUser(alice), joinedAt: now }]);
   assert.equal(isRoomMember(db, room.id, alice.id), true);
   assert.deepEqual(findRoomByCode(db, room.code), room);

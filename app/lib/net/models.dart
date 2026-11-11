@@ -28,16 +28,18 @@ class MeResult {
 }
 
 class Room {
-  const Room(this.code, this.name);
+  const Room(this.code, this.name, {this.leader});
   factory Room.fromJson(JsonMap json) {
     final name = json['name'] as String?;
     return Room(
       json['code'] as String,
       name == null || name.trim().isEmpty ? null : name,
+      leader: json['leader'] as String?,
     );
   }
   final String code;
   final String? name;
+  final String? leader;
 }
 
 class Member {
@@ -56,6 +58,82 @@ class RoomDetails {
   const RoomDetails(this.room, this.members);
   final Room room;
   final List<Member> members;
+}
+
+class LocationFix {
+  const LocationFix({
+    required this.handle,
+    required this.lat,
+    required this.lng,
+    this.acc,
+    this.speed,
+    this.heading,
+    required this.at,
+    required this.seq,
+    this.receivedAt = 0,
+  });
+  factory LocationFix.fromJson(JsonMap json) => LocationFix(
+    handle: json['handle'] as String,
+    lat: (json['lat'] as num).toDouble(),
+    lng: (json['lng'] as num).toDouble(),
+    acc: (json['acc'] as num?)?.toDouble(),
+    speed: (json['speed'] as num?)?.toDouble(),
+    heading: (json['heading'] as num?)?.toDouble(),
+    at: json['at'] as num,
+    seq: json['seq'] as int,
+    receivedAt: json['receivedAt'] as num,
+  );
+  final String handle;
+  final double lat, lng;
+  final double? acc, speed, heading;
+  final num at;
+  final int seq;
+  // 송신 쪽은 서버 수신 시각을 아직 모르므로 0으로 둔다.
+  final num receivedAt;
+
+  JsonMap toJson() => {
+    'lat': lat,
+    'lng': lng,
+    if (acc != null) 'acc': acc,
+    if (speed != null) 'speed': speed,
+    if (heading != null) 'heading': heading,
+    'at': at,
+    'seq': seq,
+  };
+
+  Object get _values =>
+      (handle, lat, lng, acc, speed, heading, at, seq, receivedAt);
+  @override
+  bool operator ==(Object other) =>
+      other is LocationFix && _values == other._values;
+  @override
+  int get hashCode => _values.hashCode;
+}
+
+class LocationTrail {
+  const LocationTrail(this.handle, this.points);
+  factory LocationTrail.fromJson(JsonMap json) => LocationTrail(
+    json['handle'] as String,
+    (json['points'] as List<dynamic>)
+        .map((value) => LocationFix.fromJson(value as JsonMap))
+        .toList(),
+  );
+  final String handle;
+  final List<LocationFix> points;
+}
+
+class LocationSnapshot {
+  const LocationSnapshot(this.positions, this.trail);
+  factory LocationSnapshot.fromJson(JsonMap json) => LocationSnapshot(
+    (json['positions'] as List<dynamic>? ?? [])
+        .map((value) => LocationFix.fromJson(value as JsonMap))
+        .toList(),
+    json['trail'] == null
+        ? null
+        : LocationTrail.fromJson(json['trail'] as JsonMap),
+  );
+  final List<LocationFix> positions;
+  final LocationTrail? trail;
 }
 
 class IceServerCredentials {
@@ -89,9 +167,41 @@ sealed class RoomEvent {
 }
 
 final class Hello extends RoomEvent {
-  const Hello(this.self, [this.members = const []]);
+  const Hello(
+    this.self, [
+    this.members = const [],
+    this.leader,
+    this.positions = const [],
+    this.trail,
+  ]);
+  factory Hello.fromJson(JsonMap json) {
+    final self = json['self'];
+    final snapshot = LocationSnapshot.fromJson(json);
+    return Hello(
+      self is JsonMap ? self['handle'] as String? ?? '' : self as String? ?? '',
+      (json['members'] as List<dynamic>? ?? [])
+          .map((value) => Member.fromJson(value as JsonMap))
+          .toList(),
+      json['leader'] as String?,
+      snapshot.positions,
+      snapshot.trail,
+    );
+  }
   final String self;
   final List<Member> members;
+  final String? leader;
+  final List<LocationFix> positions;
+  final LocationTrail? trail;
+}
+
+final class LocationUpdated extends RoomEvent {
+  const LocationUpdated(this.fix);
+  final LocationFix fix;
+}
+
+final class LocationStopped extends RoomEvent {
+  const LocationStopped(this.handle);
+  final String handle;
 }
 
 final class MemberJoined extends RoomEvent {

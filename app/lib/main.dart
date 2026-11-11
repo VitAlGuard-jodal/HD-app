@@ -31,8 +31,8 @@ Future<void> main() async {
     ),
   );
   final store = SessionStore(await SharedPreferences.getInstance());
-  final services = AppServices(store);
   final capabilities = await DeviceCapabilities.detect();
+  final services = AppServices(store, deviceMode: capabilities.mode);
   try {
     await services.initialize();
   } catch (error) {

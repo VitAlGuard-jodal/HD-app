@@ -36,12 +36,18 @@ export class RoomEventHub extends EventEmitter {
     return () => this.#remove(code, subscriber);
   }
 
-  subscriberCount(code: string): number {
-    return this.#subscribers.get(code)?.size ?? 0;
+  subscriberCount(code: string, handle?: string): number {
+    const subscribers = this.#subscribers.get(code);
+    return handle === undefined ? subscribers?.size ?? 0
+      : [...(subscribers ?? [])].filter((subscriber) => subscriber.handle === handle).length;
   }
 
   broadcast(code: string, name: string, data: unknown): number {
     return this.#deliver(code, () => true, name, data);
+  }
+
+  broadcastExcept(code: string, handle: string, name: string, data: unknown): number {
+    return this.#deliver(code, (subscriber) => subscriber.handle !== handle, name, data);
   }
 
   sendTo(code: string, handle: string, name: string, data: unknown): boolean {

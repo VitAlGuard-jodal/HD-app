@@ -16,9 +16,10 @@ export interface PublicRoom {
   name: string;
   createdBy: string;
   createdAt: string;
+  leader: string;
 }
 
-export interface StoredRoom extends PublicRoom {
+export interface StoredRoom extends Omit<PublicRoom, "leader"> {
   id: number;
 }
 
@@ -74,12 +75,13 @@ export function publicUser(user: PublicUser): PublicUser {
   return { handle: user.handle, displayName: user.displayName };
 }
 
-export function publicRoom(room: PublicRoom): PublicRoom {
+export function publicRoom(room: Omit<PublicRoom, "leader">): PublicRoom {
   return {
     code: room.code,
     name: room.name,
     createdBy: room.createdBy,
     createdAt: room.createdAt,
+    leader: room.createdBy,
   };
 }
 
@@ -256,6 +258,14 @@ export function isRoomMember(db: DatabaseSync, roomId: number, userId: number): 
   return Boolean(db.prepare(`
     SELECT 1 FROM room_members WHERE room_id = ? AND user_id = ? AND left_at IS NULL
   `).get(roomId, userId));
+}
+
+export function deleteEmptyRoom(db: DatabaseSync, roomId: number): boolean {
+  return Boolean(db.prepare(`
+    DELETE FROM rooms WHERE id = ? AND NOT EXISTS (
+      SELECT 1 FROM room_members WHERE room_id = rooms.id AND left_at IS NULL
+    )
+  `).run(roomId).changes);
 }
 
 export function findRoomMembership(db: DatabaseSync, roomId: number, userId: number): {
