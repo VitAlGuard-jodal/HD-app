@@ -67,7 +67,7 @@ class RoomCarMarker extends StatelessWidget {
               : Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (position.avatar.kind != null && !avatarLoadFailed)
+                    if (!avatarLoadFailed)
                       MemberAvatar(
                         member: Member(
                           position.fix.handle,
@@ -78,6 +78,7 @@ class RoomCarMarker extends StatelessWidget {
                         ),
                         diameter: style.diameter,
                         api: api,
+                        defaultMascot: true,
                         decodedImage: avatarImage,
                         imageResolved: avatarImage != null,
                       )

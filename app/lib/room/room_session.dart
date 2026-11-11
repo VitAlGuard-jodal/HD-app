@@ -128,9 +128,34 @@ class RoomSession extends ChangeNotifier {
   RoomState get state => _state;
   set state(RoomState value) {
     final changedRoom = _state.code != value.code;
+    final changedMembers = !identical(_state.members, value.members);
     _state = value;
-    if (changedRoom) _clearLocations();
+    if (changedRoom) {
+      _displayNames.clear();
+      _clearLocations();
+    }
+    if (changedRoom || changedMembers) {
+      for (final member in value.members) {
+        _rememberDisplayName(member.handle, member.displayName);
+      }
+    }
     locationShare.roomChanged();
+  }
+
+  final Map<String, String> _displayNames = {};
+
+  String displayNameOf(String handle) {
+    final name = state.members
+        .where((member) => member.handle == handle)
+        .firstOrNull
+        ?.displayName;
+    return name != null && name.trim().isNotEmpty
+        ? name
+        : _displayNames[handle] ?? handle;
+  }
+
+  void _rememberDisplayName(String handle, String? name) {
+    if (name != null && name.trim().isNotEmpty) _displayNames[handle] = name;
   }
 
   final Map<String, LocationFix> _positions = {};
@@ -356,6 +381,7 @@ class RoomSession extends ChangeNotifier {
         if (event.requester == store.handle || event.revision < _serverRevision)
           return;
         _serverRevision = event.revision;
+        _rememberDisplayName(event.requester, event.displayName);
         _followRequests[event.requestId] = event;
         if (!state.members.any((m) => m.handle == event.requester)) {
           // 이벤트 큐를 HTTP 뒤에 묶지 않아 그 사이의 취소를 먼저 적용할 수 있다.
@@ -619,6 +645,9 @@ class RoomSession extends ChangeNotifier {
     final incomingIds = event.followRequests
         .map((request) => request.requestId)
         .toSet();
+    for (final request in event.followRequests) {
+      _rememberDisplayName(request.requester, request.displayName);
+    }
     for (final id in _followRequests.keys.toList()) {
       if (!incomingIds.contains(id) && !_respondingRequests.contains(id))
         _cancelStarts(requestId: id);

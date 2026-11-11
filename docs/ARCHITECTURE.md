@@ -314,7 +314,7 @@ hello는 `{self,members,leader,positions,trails,revision,followTarget,pendingFol
 
 `ui/avatar_images.dart`는 `ImageDescriptor`로 원본 비율을 읽고 `instantiateImageCodec(targetWidth/targetHeight)`로 긴 변 최대 1024px를 디코딩한다. `Canvas`·`PictureRecorder`로 중앙 정사각형을 256×256에 그린 뒤 `toByteData(png)`로 새 PNG를 만든다. 원본 경로·PNG는 앱 저장소에 쓰지 않는다. 크기·디코딩·네트워크 오류는 M4 `showNoticeDialog`로 표시하며 차량 모달에도 80dp 조작부를 전달한다. 저장·사진 처리 중 중복 조작을 막는다. 저장 성공은 로컬 세션 메타데이터와 내 방 카드에 즉시 반영되고, 다른 참여자는 SSE로 갱신된다. 늦은 HTTP/hello가 더 높은 avatar version을 덮지 않는다.
 
-**마커·캐시.** 이 절의 규칙이 §13·§15의 이전 파란 점/차 아이콘 크기를 갱신한다. 상대는 프로필이 있으면 같은 `MemberAvatar`, 없으면 원형 차 아이콘을 사용한다. 폰 36dp·차량 48dp, 3dp 입장 색 테두리, alpha 0.55와 이름 배지를 유지한다. 나는 프로필 유무와 무관하게 GPS 점·흰 테두리·heading 부채꼴이며 색만 내 입장 색으로 바뀐다. 내 alpha 1과 최상위 z-index를 유지한다. 프로필 마커의 얼굴은 heading으로 회전시키지 않는다.
+**마커·캐시.** 이 절의 규칙이 §13·§15의 이전 파란 점/차 아이콘 크기를 갱신한다. 상대는 같은 `MemberAvatar`를 사용하며, 프로필 미설정(null)이면 카드와 같은 기본 마스코트 1번(`mascot-01`)을 표시한다. 폰 36dp·차량 48dp, 3dp 입장 순서 무지개 테두리, alpha 0.55와 이름 배지를 유지한다. 나는 프로필 유무와 무관하게 GPS 점·흰 테두리·heading 부채꼴이며 색만 내 입장 색으로 바뀐다. 내 alpha 1과 최상위 z-index를 유지한다. 상대 마커는 기본 마스코트를 포함해 heading 회전이 없으며 이름표도 회전하지 않는다. 네이버 사진 로드 실패의 임시 차 아이콘도 angle 0을 유지한다.
 
 `ApiClient.avatarPhoto`는 인증 헤더를 포함한 version URL로 가져오며 서버 주소·로그인 토큰·handle·version별 메모리 캐시를 사용한다. 새 버전은 재요청하고 실패한 요청은 캐시에서 제거한다. 네이버 `NOverlayImage.fromWidget` 키에는 handle·표시 이름·나 여부·heading 유무·밝기·차량 여부와 avatar kind·version·색을 포함한다. 사진/마스코트는 `ui.Image`로 완전히 디코딩한 후 `RawImage`로 캡처하므로 비어 있는 첫 프레임을 저장하지 않는다. 로딩 실패 시 임시 차 마커를 사용하고 이후 성공하면 동일 버전이어도 아이콘을 교체한다. SDK alpha와 위젯 opacity를 중복 적용하지 않는다. 앱 수동 디스크 캐시는 없으며 SDK의 캡처용 임시 캐시는 §13과 같다. 브이월드도 facade로 전달된 avatar·order·API와 공통 마커 위젯을 사용한다.
 

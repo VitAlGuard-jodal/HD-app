@@ -11,6 +11,7 @@ import 'package:unavo/map/room_map_widgets.dart';
 import 'package:unavo/net/models.dart';
 import 'package:unavo/ui/icons.dart';
 import 'package:unavo/ui/theme.dart';
+import 'package:unavo/ui/widgets/member_avatar.dart';
 
 import 'support/icon_bundle.dart';
 
@@ -126,7 +127,7 @@ void main() {
     controller.dispose();
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  testWidgets('키 없는 지도는 GPS 점·상대 차량·상대 이름·궤적·출처를 표시한다', (tester) async {
+  testWidgets('키 없는 지도는 GPS 점·상대 기본 마스코트·상대 이름·궤적·출처를 표시한다', (tester) async {
     final controller = RoomMapController();
     final trail = [_fix('alice', 37.5, 127.0002), _leader];
     await _pumpMap(tester, controller, trail: trail);
@@ -144,7 +145,14 @@ void main() {
     final stars = find.byWidgetPredicate(
       (widget) => widget is UnavoIcon && widget.name == 'star',
     );
-    expect(cars, findsOneWidget);
+    expect(cars, findsNothing, reason: '프로필 미설정 상대도 차 아이콘 대신 기본 마스코트를 쓴다');
+    final avatar = tester.widget<MemberAvatar>(find.byType(MemberAvatar));
+    expect(avatar.defaultMascot, isTrue, reason: '브이월드도 공통 마커의 기본 마스코트를 사용한다');
+    expect(
+      avatar.member.avatar.kind,
+      isNull,
+      reason: '기본 렌더링은 저장된 프로필을 바꾸지 않는다',
+    );
     expect(stars, findsNothing);
     expect(find.byKey(const ValueKey('gps-marker')), findsOneWidget);
     expect(find.text('보비'), findsNothing);

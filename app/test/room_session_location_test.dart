@@ -36,6 +36,75 @@ LocationFix _fix(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('멤버가 퇴장해도 종료 알림은 마지막 스냅샷의 표시 이름을 조회한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      f.api.members = const [
+        Member('alice', '새 앨리스', '1'),
+        Member('bob', '보비', '2'),
+      ];
+      f.event(Hello('bob', f.api.members));
+      f.event(
+        const MemberUpdated('alice', Avatar(kind: 'mascot-02', version: 1)),
+      );
+      f.startSharing();
+      _finish(clock, f.session.startFollowing('alice'));
+      f.api.members = const [Member('bob', '보비', '2')];
+      f.event(const MemberLeft('alice', revision: 2));
+      expect(
+        f.session.state.members.any((member) => member.handle == 'alice'),
+        isFalse,
+        reason: '퇴장한 상대는 현재 멤버 명단에 없어야 한다',
+      );
+      final notice = f.session.takeFollowNotice();
+      expect(
+        notice?.reason,
+        'left',
+        reason: '실제 member-left 경로로 종료 알림이 생성되어야 한다',
+      );
+      expect(
+        f.session.displayNameOf(notice!.target),
+        '새 앨리스',
+        reason: 'hello와 member-updated 뒤의 표시 이름을 퇴장 후에도 보존한다',
+      );
+      expect(
+        f.session.displayNameOf('unknown'),
+        'unknown',
+        reason: '어느 경로에서도 모르는 이름만 handle로 대체한다',
+      );
+      f.dispose();
+    });
+  }, timeout: _timeout);
+
+  test('hello 의 따라가기 요청 이름은 명단에서 빠져도 보존한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      f.event(
+        Hello('bob', f.api.members, 'alice', const [], const {}, null, const [
+          FollowRequest(
+            'request-only',
+            requestId: 'snapshot',
+            displayName: '요청 이름',
+          ),
+        ]),
+      );
+      f.event(Hello('bob', const []));
+      expect(
+        f.session.displayNameOf('alice'),
+        '앨리스',
+        reason: '새 hello에서 멤버가 사라져도 이전 이름을 유지한다',
+      );
+      expect(
+        f.session.displayNameOf('request-only'),
+        '요청 이름',
+        reason: 'hello에서 요청이 사라져도 표시 이름 캐시는 유지한다',
+      );
+      f.dispose();
+    });
+  }, timeout: _timeout);
+
   test('새 stream의 seq 0과 교차 stream 궤적을 받되 같은 stream 중복은 버린다', () {
     fakeAsync((clock) {
       final f = _Fixture.create(clock);
@@ -442,6 +511,24 @@ void main() {
         f.startSharing();
         _finish(clock, f.session.startFollowing('alice'));
         f.sample();
+        f.event(
+          const FollowRequest(
+            'request-only',
+            requestId: 'request-name',
+            displayName: '요청 이름',
+            revision: 2,
+          ),
+        );
+        expect(
+          f.session.displayNameOf('alice'),
+          '앨리스',
+          reason: '퇴장 전에는 멤버 이름을 알고 있다',
+        );
+        expect(
+          f.session.displayNameOf('request-only'),
+          '요청 이름',
+          reason: '퇴장 전에는 요청에서 받은 이름을 알고 있다',
+        );
         switch (action) {
           case 'leave':
             _finish(clock, f.session.leave());
@@ -459,6 +546,13 @@ void main() {
         expect(f.session.leaderHandle, isNull);
         expect(f.session.followTarget, isNull);
         expect(f.session.followError, isNull);
+        for (final handle in ['alice', 'request-only']) {
+          expect(
+            f.session.displayNameOf(handle),
+            handle,
+            reason: '$action 뒤에는 어떤 출처의 이름도 다음 방으로 넘어가지 않는다',
+          );
+        }
         expect(f.source.watches, 1);
         if (action == 'leave') expect(f.api.leaves, 1);
         f.dispose();
@@ -621,6 +715,11 @@ void main() {
         '이벤트 이름',
       );
       expect(f.session.readyFollowRequests, isEmpty);
+      expect(
+        f.session.displayNameOf('charlie'),
+        '이벤트 이름',
+        reason: '멤버 조회 대기 중에도 따라가기 요청의 이름을 기억한다',
+      );
       f.event(
         const FollowCancelled(
           'charlie',
@@ -633,6 +732,11 @@ void main() {
       gate.complete();
       clock.flushMicrotasks();
       expect(f.session.readyFollowRequests, isEmpty);
+      expect(
+        f.session.displayNameOf('charlie'),
+        '찰리',
+        reason: '현재 멤버 표시 이름은 요청 캐시보다 우선한다',
+      );
       f.event(
         const FollowRequest(
           'charlie',
@@ -642,6 +746,11 @@ void main() {
         ),
       );
       expect(f.session.readyFollowRequests.single.requestId, 'new-request');
+      expect(
+        f.session.displayNameOf('charlie'),
+        '찰리',
+        reason: '요청으로 캐시가 갱신되어도 members 조회가 우선이다',
+      );
       f.dispose();
     });
   });

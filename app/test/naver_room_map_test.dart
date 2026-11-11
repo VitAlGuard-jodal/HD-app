@@ -1,10 +1,13 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:unavo/map/naver_room_map.dart';
 import 'package:unavo/map/room_map_widgets.dart';
 import 'package:unavo/map/room_map_geometry.dart';
 import 'package:unavo/net/models.dart';
+import 'package:unavo/ui/avatar_images.dart';
+import 'package:unavo/ui/icons.dart';
 import 'package:unavo/ui/member_colors.dart';
 import 'package:unavo/ui/widgets/member_avatar.dart';
 
@@ -25,17 +28,18 @@ void main() {
     for (final car in [false, true]) {
       final self = roomNaverMarker(
         handle: 'bob',
-        fix: _fix('bob', 37, 127),
+        fix: _fix('bob', 37, 127, heading: 90),
         icon: const NOverlayImage.fromAssetImage('test-only.png'),
         self: true,
         car: car,
       );
       final other = roomNaverMarker(
         handle: 'alice',
-        fix: _fix('alice', 37, 127),
+        fix: _fix('alice', 37, 127, heading: 90),
         icon: const NOverlayImage.fromAssetImage('test-only.png'),
         self: false,
         car: car,
+        profile: true,
       );
       expect(self.alpha, 1);
       expect(other.alpha, .55);
@@ -44,6 +48,172 @@ void main() {
       expect(other.size, RoomMarkerStyle(self: false, car: car).size);
       expect(self.anchor, NPoint.relativeCenter);
       expect(self.isFlat, isTrue);
+      expect(self.angle, 90, reason: '내 GPS 마커는 기존 heading 회전을 유지한다');
+      expect(other.angle, 0, reason: '모든 상대는 profile 정책으로 아이콘과 이름표를 회전시키지 않는다');
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('프로필 미설정 상대는 회전 없는 기본 마스코트 1번과 입장 색 테두리를 쓴다', (tester) async {
+    final position = RoomMapPosition(
+      _fix('alice', 37, 127, heading: 123),
+      displayName: '앨리스',
+      order: 4,
+    );
+    for (final car in [false, true]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: testIconBuilder,
+          home: Scaffold(
+            body: Center(
+              child: RoomCarMarker(position: position, self: false, car: car),
+            ),
+          ),
+        ),
+      );
+      expect(
+        find.byType(MemberAvatar),
+        findsOneWidget,
+        reason: 'null 프로필도 공통 아바타로 렌더링한다',
+      );
+      expect(
+        find.byWidgetPredicate(
+          (widget) => widget is UnavoIcon && widget.name == 'car',
+        ),
+        findsNothing,
+        reason: '프로필 미설정은 사진 로드 실패가 아니다',
+      );
+      final avatar = tester.widget<MemberAvatar>(find.byType(MemberAvatar));
+      expect(avatar.defaultMascot, isTrue, reason: '기본 마스코트 옵션이 켜져야 한다');
+      expect(avatar.diameter, car ? 48 : 36, reason: '폰·차량 마커 크기를 유지한다');
+      final image = tester.widget<Image>(find.byType(Image));
+      expect(
+        (image.image as AssetImage).assetName,
+        'assets/avatars/mascot-01.png',
+        reason: '카드와 같은 1번 마스코트를 쓴다',
+      );
+      final decoration =
+          tester
+                  .widget<Container>(
+                    find
+                        .descendant(
+                          of: find.byType(MemberAvatar),
+                          matching: find.byType(Container),
+                        )
+                        .first,
+                  )
+                  .decoration!
+              as BoxDecoration;
+      expect(
+        (decoration.border! as Border).top.color,
+        rainbowColor(4),
+        reason: '입장 순서의 무지개 색을 유지한다',
+      );
+      expect(
+        (decoration.border! as Border).top.width,
+        3,
+        reason: '테두리는 기존 3dp다',
+      );
+      for (final transform in tester.widgetList<Transform>(
+        find.descendant(
+          of: find.byType(RoomCarMarker),
+          matching: find.byType(Transform),
+        ),
+      )) {
+        expect(
+          transform.transform.entry(1, 0),
+          0,
+          reason: '기본 마스코트와 이름표는 heading 123도에도 회전하지 않는다',
+        );
+      }
+      expect(find.text('앨리스'), findsOneWidget, reason: '표시 이름 배지를 유지한다');
+      expect(tester.takeException(), isNull, reason: '폰·차량 마커 렌더링에 예외가 없어야 한다');
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('사진 디코딩 실패 시 네이버 캡처의 차 아이콘 fallback을 유지한다', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: testIconBuilder,
+        home: Scaffold(
+          body: Center(
+            child: RoomCarMarker(
+              position: RoomMapPosition(
+                _fix('alice', 37, 127, heading: 123),
+                displayName: '앨리스',
+                avatar: const Avatar(kind: 'photo', version: 2),
+              ),
+              self: false,
+              avatarLoadFailed: true,
+              rotateHeading: false,
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(find.byType(MemberAvatar), findsNothing, reason: '실패한 사진은 캡처하지 않는다');
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is UnavoIcon && widget.name == 'car',
+      ),
+      findsOneWidget,
+      reason: '사진 로드 실패에 한해 기존 차 아이콘 fallback을 쓴다',
+    );
+    final transform = tester.widget<Transform>(
+      find.descendant(
+        of: find.byType(RoomCarMarker),
+        matching: find.byType(Transform),
+      ),
+    );
+    expect(
+      transform.transform.entry(1, 0),
+      0,
+      reason: '네이버 fallback 캡처에도 heading을 중복 적용하지 않는다',
+    );
+    expect(find.text('앨리스'), findsOneWidget, reason: '사진 실패에도 이름표를 유지한다');
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('기본 마스코트는 네이버 캡처 전에 디코딩하고 기존 null 디코딩은 유지한다', (tester) async {
+    const member = Member('alice', '앨리스', '');
+    final unchanged = await decodeAvatar(member, bundle: rootBundle);
+    expect(unchanged, isNull, reason: '옵션을 켜지 않은 기존 호출자는 null 프로필을 디코딩하지 않는다');
+    final decoded = await tester.runAsync(
+      () => decodeAvatar(member, bundle: rootBundle, defaultMascot: true),
+    );
+    try {
+      expect(decoded, isNotNull, reason: '미설정 프로필도 네이버 캡처 전에 마스코트 픽셀을 준비한다');
+      expect(decoded!.width, 256, reason: '기존 아바타 디코딩 크기를 유지한다');
+      expect(decoded.height, 256, reason: '기존 아바타 디코딩 크기를 유지한다');
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: RoomCarMarker(
+                position: RoomMapPosition(
+                  _fix('alice', 37, 127),
+                  displayName: '앨리스',
+                ),
+                self: false,
+                avatarImage: decoded,
+                rotateHeading: false,
+              ),
+            ),
+          ),
+        ),
+      );
+      final avatar = tester.widget<MemberAvatar>(find.byType(MemberAvatar));
+      expect(
+        avatar.imageResolved,
+        isTrue,
+        reason: '완성된 이미지로 캡처해야 빈 첫 프레임을 저장하지 않는다',
+      );
+      expect(
+        tester.widget<RawImage>(find.byType(RawImage)).image,
+        same(decoded),
+        reason: '기본 마스코트의 디코딩 결과를 그대로 캡처한다',
+      );
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      decoded?.dispose();
     }
   }, timeout: const Timeout(Duration(seconds: 30)));
 

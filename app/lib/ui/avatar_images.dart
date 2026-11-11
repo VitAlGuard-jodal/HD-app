@@ -85,8 +85,11 @@ Future<ui.Image?> decodeAvatar(
   Member member, {
   ApiClient? api,
   required AssetBundle bundle,
+  bool defaultMascot = false,
 }) async {
-  final avatar = member.avatar;
+  final avatar = member.avatar.kind == null && defaultMascot
+      ? const Avatar(kind: 'mascot-01')
+      : member.avatar;
   Uint8List bytes;
   if (avatar.isMascot) {
     final data = await bundle.load('assets/avatars/${avatar.kind}.png');

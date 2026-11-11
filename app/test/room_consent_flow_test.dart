@@ -25,6 +25,40 @@ import 'support/icon_bundle.dart';
 const _timeout = Timeout(Duration(seconds: 30));
 
 void main() {
+  for (final car in [false, true]) {
+    testWidgets('상대 퇴장 뒤 종료 모달은 아이디 대신 마지막 표시 이름을 쓴다 (차량 $car)', (
+      tester,
+    ) async {
+      final f = await _Fixture.create(tester, car: car);
+      try {
+        await _member(tester, 'alice');
+        await _tap(tester, '동의');
+        f.services.api.members = const [Member('bob', '보비', '2')];
+        f.services.api.events.add(const MemberLeft('alice', revision: 2));
+        await pumpConsentUi(tester);
+        expect(
+          f.services.rooms.state.members.any(
+            (member) => member.handle == 'alice',
+          ),
+          isFalse,
+          reason: '종료 모달을 표시할 때 대상은 이미 멤버 목록에서 빠져 있어야 한다',
+        );
+        expect(
+          find.text('앨리스 님이 연결을 종료하여 따라가기가 끝났습니다'),
+          findsOneWidget,
+          reason: '폰·차량의 퇴장 안내에는 캐시된 표시 이름을 사용한다',
+        );
+        expect(
+          find.text('alice 님이 연결을 종료하여 따라가기가 끝났습니다'),
+          findsNothing,
+          reason: '알고 있던 표시 이름을 아이디로 대체하지 않는다',
+        );
+      } finally {
+        await f.dispose(tester);
+      }
+    }, timeout: _timeout);
+  }
+
   testWidgets('C3/C8 중지는 과거 위치 오류를 지우고 삭제 대기와 현재 음성 오류를 따로 표시한다', (
     tester,
   ) async {

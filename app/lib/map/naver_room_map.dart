@@ -267,10 +267,8 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     final cached = _icons[key];
     if (cached != null) return cached;
     final style = RoomMarkerStyle(self: key.$3, car: key.$6);
-    final avatar = key.$3 || position.avatar.kind == null
-        ? null
-        : await _markerAvatar(position);
-    final failed = !key.$3 && position.avatar.kind != null && avatar == null;
+    final avatar = key.$3 ? null : await _markerAvatar(position);
+    final failed = !key.$3 && avatar == null;
     final car = key.$3 || avatar != null
         ? null
         : await _markerAsset('car', style.diameter);
@@ -315,6 +313,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
         Member(position.fix.handle, position.name, '', avatar: avatar),
         api: widget.api,
         bundle: DefaultAssetBundle.of(context),
+        defaultMascot: true,
       );
       if (image == null) return null;
       if (!mounted) {
@@ -391,7 +390,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
           icon: icon,
           self: entry.key == widget.selfHandle,
           car: widget.car,
-          profile: current.avatar.kind != null,
+          profile: entry.key != widget.selfHandle,
         );
         await camera.addOverlay(added);
         if (!_isCurrent(camera)) return;
@@ -399,8 +398,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       } else {
         final point = _point(current.fix);
         if (marker.position != point) marker.setPosition(point);
-        final angle =
-            entry.key != widget.selfHandle && current.avatar.kind != null
+        final angle = entry.key != widget.selfHandle
             ? 0.0
             : current.fix.heading ?? 0;
         if (marker.angle != angle) {

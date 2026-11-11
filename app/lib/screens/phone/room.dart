@@ -193,12 +193,7 @@ class _RoomScreenState extends State<RoomScreen> {
             if (!dialogContext.mounted) return;
             final notice = session.takeFollowNotice();
             if (notice != null) {
-              final name =
-                  session.state.members
-                      .where((member) => member.handle == notice.target)
-                      .firstOrNull
-                      ?.displayName ??
-                  notice.target;
+              final name = session.displayNameOf(notice.target);
               await showNoticeDialog(
                 dialogContext,
                 message: switch (notice.reason) {
@@ -415,7 +410,7 @@ class _RoomScreenState extends State<RoomScreen> {
                 handle,
                 RoomMapPosition(
                   fix,
-                  displayName: membersByHandle[handle]?.displayName ?? handle,
+                  displayName: session.displayNameOf(handle),
                   avatar: membersByHandle[handle]?.avatar ?? const Avatar(),
                   order:
                       membersByHandle[handle]?.order ??
