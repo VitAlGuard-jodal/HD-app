@@ -8,6 +8,8 @@ import '../net/api_client.dart';
 import '../net/models.dart';
 import 'location_source.dart';
 
+enum LocationMotionState { unknown, moving, stationary }
+
 class LocationShare extends ChangeNotifier {
   LocationShare({
     required this.api,
@@ -32,9 +34,11 @@ class LocationShare extends ChangeNotifier {
   LocationPermissionState? get permission => _permission;
   String? get error => _error;
   LocationFix? get lastSent => _lastSent;
-  bool get isStationary => _isStationary;
+  LocationMotionState get motionState => _motionState;
+  bool get isStationary => motionState == LocationMotionState.stationary;
 
-  bool _sharing = false, _isStationary = false;
+  bool _sharing = false;
+  LocationMotionState _motionState = LocationMotionState.unknown;
   bool _disposed = false;
   LocationPermissionState? _permission;
   String? _error, _activeCode, _activeHandle;
@@ -109,7 +113,10 @@ class LocationShare extends ChangeNotifier {
         },
         onError: (Object error) {
           if (!_current(generation, code)) return;
-          _setStationary(false);
+          _stationaryTimer?.cancel();
+          _observingSince = null;
+          _samples.clear();
+          _setMotionState(LocationMotionState.unknown);
           _setError(exceptionMessage(error, '위치를 읽지 못했습니다'));
         },
         onDone: () {
@@ -136,24 +143,24 @@ class LocationShare extends ChangeNotifier {
       _samples.removeAt(0);
     }
     final first = _samples.first.$2;
-    final slow = _samples.every(
-      (entry) => entry.$2.speed != null && entry.$2.speed! < 1,
-    );
-    final nearby = _samples.every(
+    final moving = _samples.any(
       (entry) =>
-          _distance(first.lat, first.lng, entry.$2.lat, entry.$2.lng) < 3,
+          (entry.$2.speed != null && entry.$2.speed! >= .5) ||
+          _distance(first.lat, first.lng, entry.$2.lat, entry.$2.lng) >= 3,
     );
-    final stationary =
-        time.difference(_observingSince!) >= const Duration(seconds: 3) &&
-        (slow || nearby);
+    final motion = moving
+        ? LocationMotionState.moving
+        : time.difference(_observingSince!) >= const Duration(seconds: 3)
+        ? LocationMotionState.stationary
+        : LocationMotionState.unknown;
     _stationaryTimer?.cancel();
-    // 표본이 끊긴 뒤 예전 정차 판정으로 차량 설정을 허용하지 않는다.
+    // 표본이 끊기면 이전 이동·정차 판정 대신 미확인 상태로 돌아간다.
     _stationaryTimer = Timer(const Duration(seconds: 3), () {
       _observingSince = null;
       _samples.clear();
-      _setStationary(false);
+      _setMotionState(LocationMotionState.unknown);
     });
-    _setStationary(stationary);
+    _setMotionState(motion);
   }
 
   void _scheduleSend(int generation, String code) {
@@ -257,7 +264,7 @@ class LocationShare extends ChangeNotifier {
     _pending = null;
     _samples.clear();
     _observingSince = null;
-    _isStationary = false;
+    _motionState = LocationMotionState.unknown;
     _notify();
     try {
       await _subscription?.cancel();
@@ -289,9 +296,9 @@ class LocationShare extends ChangeNotifier {
     _notify();
   }
 
-  void _setStationary(bool value) {
-    if (_isStationary == value) return;
-    _isStationary = value;
+  void _setMotionState(LocationMotionState value) {
+    if (_motionState == value) return;
+    _motionState = value;
     _notify();
   }
 
@@ -301,7 +308,7 @@ class LocationShare extends ChangeNotifier {
     permission,
     error,
     lastSent,
-    isStationary,
+    motionState,
   ];
 
   late List<Object?> _lastState;

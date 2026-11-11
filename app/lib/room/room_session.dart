@@ -134,7 +134,9 @@ class RoomSession extends ChangeNotifier {
   final Map<String, Map<String, int>> _lastTrailSeq = {};
   String? _followTarget;
   String? get followTarget => _followTarget;
+  bool _followRequestSent = false;
   int _followRevision = 0;
+  int? _followMotionRevision;
   Future<void> _followQueue = Future<void>.value();
   final Set<String> _followRequests = {};
   Set<String> get followRequests => Set.unmodifiable(_followRequests);
@@ -290,6 +292,7 @@ class RoomSession extends ChangeNotifier {
         if (event.target != _followTarget) return;
         if (!event.accepted) {
           _followTarget = null;
+          _followRequestSent = false;
           ++_followRevision;
           _followNotices.add(event);
         }
@@ -352,6 +355,7 @@ class RoomSession extends ChangeNotifier {
         _lastTrailSeq.remove(event.handle);
         if (_followTarget == event.handle) {
           _followTarget = null;
+          _followRequestSent = false;
           ++_followRevision;
           _followNotices.add(
             FollowResponse(event.handle, false, reason: 'left'),
@@ -419,8 +423,15 @@ class RoomSession extends ChangeNotifier {
     }
     _setTrails(event.trails);
     // 마지막 SSE 연결이 끊기면 서버가 관계를 정리한다. 재접속은 자동 동의가 아니다.
+    final awaitingMotion =
+        _followMotionRevision == _followRevision &&
+        event.followTarget == _followTarget;
     _followTarget = locationShare.sharing ? event.followTarget : null;
+    _followRequestSent = _followTarget != null;
     ++_followRevision;
+    _followMotionRevision = awaitingMotion && _followTarget != null
+        ? _followRevision
+        : null;
     _followRequests
       ..clear()
       ..addAll(event.followRequests);
@@ -459,11 +470,13 @@ class RoomSession extends ChangeNotifier {
     return true;
   }
 
-  bool get followNeedsStop =>
+  bool get _carMode =>
       (deviceMode ??
-              (micRouter.isAutomotive ? DeviceMode.car : DeviceMode.phone)) ==
-          DeviceMode.car &&
-      !locationShare.isStationary;
+          (micRouter.isAutomotive ? DeviceMode.car : DeviceMode.phone)) ==
+      DeviceMode.car;
+
+  bool get followNeedsStop =>
+      _carMode && locationShare.motionState == LocationMotionState.moving;
 
   bool checkFollowAllowed(String target) {
     if (_disposed ||
@@ -493,6 +506,11 @@ class RoomSession extends ChangeNotifier {
       return;
     final code = state.code!;
     final revision = ++_followRevision;
+    // unknown에서는 먼저 진행하고, 최초 이동·정차 판정 때 한 번 더 검사한다.
+    _followMotionRevision =
+        _carMode && locationShare.motionState == LocationMotionState.unknown
+        ? revision
+        : null;
     _followTarget = target; // SSE 응답은 POST 응답보다 먼저 도착할 수 있다.
     try {
       await _queueFollowOperation(() async {
@@ -501,6 +519,8 @@ class RoomSession extends ChangeNotifier {
             state.code != code ||
             !locationShare.sharing)
           return;
+        // 큐에서 대기 중인 대상과 실제 서버에 요청한 상태를 구분한다.
+        _followRequestSent = true;
         await api.follow(code, target);
         if (_disposed ||
             state.code != code ||
@@ -510,8 +530,10 @@ class RoomSession extends ChangeNotifier {
         }
       });
     } catch (_) {
-      if (revision == _followRevision && state.code == code)
+      if (revision == _followRevision && state.code == code) {
         _followTarget = null;
+        _followRequestSent = false;
+      }
       rethrow;
     } finally {
       _notify();
@@ -521,11 +543,13 @@ class RoomSession extends ChangeNotifier {
   Future<void> stopFollowing() async {
     final code = state.code;
     if (code == null || _followTarget == null) return;
+    final requestSent = _followRequestSent;
     _followTarget = null;
+    _followRequestSent = false;
     ++_followRevision;
     _followError = null;
     _notify();
-    await _queueFollowOperation(() => api.stopFollowing(code));
+    if (requestSent) await _queueFollowOperation(() => api.stopFollowing(code));
   }
 
   Future<void> respondToFollow(
@@ -561,7 +585,7 @@ class RoomSession extends ChangeNotifier {
     locationShare.permission,
     locationShare.error,
     locationShare.lastSent,
-    locationShare.isStationary,
+    locationShare.motionState,
   ];
 
   void _locationChanged() {
@@ -570,19 +594,27 @@ class RoomSession extends ChangeNotifier {
     final previousFix = _lastLocationState[4];
     final wasSharing = _lastLocationState[1] as bool;
     _lastLocationState = next;
+    final firstMotion =
+        _followTarget != null &&
+        _followMotionRevision == _followRevision &&
+        locationShare.motionState != LocationMotionState.unknown;
+    final rejectFollow = firstMotion && followNeedsStop;
+    if (firstMotion) _followMotionRevision = null;
     final fix = locationShare.lastSent;
     if (locationShare.sharing && fix != null && fix != previousFix) {
       // 서버는 송신자에게 반사하지 않으므로 성공한 로컬 표본을 반영한다.
       _updateLocation(fix);
-    } else if (wasSharing && !locationShare.sharing) {
-      _positions.remove(store.handle);
+    }
+    if (wasSharing && !locationShare.sharing || rejectFollow) {
+      if (!locationShare.sharing) _positions.remove(store.handle);
+      if (rejectFollow) _followError = '정차 후 설정할 수 있습니다';
       final code = state.code;
-      if (_followTarget != null && code != null) {
+      if (_followRequestSent && code != null) {
         unawaited(
           _queueFollowOperation(() => api.stopFollowing(code)).catchError((
             Object error,
           ) {
-            if (!_disposed && state.code == code) {
+            if (!_disposed && state.code == code && !rejectFollow) {
               _followError = errorMessage(error);
               _notify();
             }
@@ -590,6 +622,7 @@ class RoomSession extends ChangeNotifier {
         );
       }
       _followTarget = null;
+      _followRequestSent = false;
       ++_followRevision;
     }
     _notify();
@@ -601,6 +634,7 @@ class RoomSession extends ChangeNotifier {
     _trails.clear();
     _lastTrailSeq.clear();
     _followTarget = null;
+    _followRequestSent = false;
     ++_followRevision;
     _followRequests.clear();
     _followNotices.clear();

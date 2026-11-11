@@ -8,6 +8,8 @@ import 'package:unavo/net/api_client.dart';
 
 import 'support/location_fakes.dart';
 
+const _timeout = Timeout(Duration(seconds: 30));
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -55,28 +57,92 @@ void main() {
     });
   });
 
-  test('최근 3초 이동 또는 속도로 정차를 판단하고 오래된 표본은 허용하지 않는다', () {
+  test('표본 없음·관찰 중·표본 만료는 unknown이고 3초 정지 관찰은 stationary다', () {
     fakeAsync((clock) {
       final f = _Fixture.create(clock);
+      expect(f.share.motionState, LocationMotionState.unknown);
       f.start();
+      expect(f.share.motionState, LocationMotionState.unknown);
       f.add(speed: null);
+      expect(f.share.motionState, LocationMotionState.unknown);
       expect(f.share.isStationary, isFalse);
       for (var second = 1; second <= 3; second++) {
         clock.elapse(const Duration(seconds: 1));
         f.add(speed: null);
       }
+      expect(f.share.motionState, LocationMotionState.stationary);
       expect(f.share.isStationary, isTrue); // 속도가 없으면 3m 미만 이동으로 판단한다.
       clock.elapse(const Duration(seconds: 3));
+      expect(f.share.motionState, LocationMotionState.unknown);
       expect(f.share.isStationary, isFalse);
       f.add(speed: 3, lat: 37.1);
+      expect(f.share.motionState, LocationMotionState.moving);
       for (var second = 1; second <= 3; second++) {
         clock.elapse(const Duration(seconds: 1));
         f.add(speed: 3, lat: 37.1 + second * .001);
       }
       expect(f.share.isStationary, isFalse);
+      _finish(clock, f.share.stop());
+      expect(f.share.motionState, LocationMotionState.unknown);
+      f.start();
+      expect(f.share.motionState, LocationMotionState.unknown);
       f.dispose();
     });
-  });
+  }, timeout: _timeout);
+
+  for (final speed in [0.5, 3.0]) {
+    test('좌표가 같아도 속도 $speed m/s이면 즉시 moving이며 정차로 바뀌지 않는다', () {
+      fakeAsync((clock) {
+        final f = _Fixture.create(clock);
+        f.start();
+        for (var second = 0; second <= 3; second++) {
+          if (second > 0) clock.elapse(const Duration(seconds: 1));
+          f.add(speed: speed);
+          expect(f.share.motionState, LocationMotionState.moving);
+          expect(f.share.isStationary, isFalse);
+        }
+        clock.elapse(const Duration(seconds: 3));
+        expect(f.share.motionState, LocationMotionState.unknown);
+        f.dispose();
+      });
+    }, timeout: _timeout);
+  }
+
+  for (final speed in <double?>[0, null]) {
+    test('속도 $speed여도 최근 표본에서 3m 이상 이동하면 moving이다', () {
+      fakeAsync((clock) {
+        final f = _Fixture.create(clock);
+        f.start();
+        f.add(speed: speed);
+        clock.elapse(const Duration(seconds: 1));
+        f.add(lat: 37.0000269, speed: speed); // 약 2.99m
+        expect(f.share.motionState, LocationMotionState.unknown);
+        clock.elapse(const Duration(seconds: 1));
+        f.add(lat: 37.0000271, speed: speed); // 약 3.01m
+        expect(f.share.motionState, LocationMotionState.moving);
+        expect(f.share.isStationary, isFalse);
+        f.dispose();
+      });
+    }, timeout: _timeout);
+  }
+
+  test('0.5 m/s 미만·3m 미만 표본은 3초 관찰 뒤 stationary다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.start();
+      for (var second = 0; second <= 3; second++) {
+        if (second > 0) clock.elapse(const Duration(seconds: 1));
+        f.add(lat: 37 + second * .000005, speed: .49);
+        expect(
+          f.share.motionState,
+          second < 3
+              ? LocationMotionState.unknown
+              : LocationMotionState.stationary,
+        );
+      }
+      f.dispose();
+    });
+  }, timeout: _timeout);
 
   test('실패 3회 뒤에는 다음 성공까지 5초 간격이며 공유와 seq를 유지한다', () {
     fakeAsync((clock) {

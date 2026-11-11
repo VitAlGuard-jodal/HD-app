@@ -57,7 +57,11 @@ Future<void> pumpConsentUi(WidgetTester tester) async {
 }
 
 class ConsentTestServices implements AppServices {
-  ConsentTestServices(this.store, {DeviceMode mode = DeviceMode.phone}) {
+  ConsentTestServices(
+    this.store, {
+    DeviceMode mode = DeviceMode.phone,
+    DateTime Function()? locationNow,
+  }) {
     _api = ConsentTestApi(store);
     mic = _Mic(store);
     calls = _Calls();
@@ -68,6 +72,7 @@ class ConsentTestServices implements AppServices {
       callService: calls,
       micRouter: mic,
       locationSource: locationSource,
+      locationNow: locationNow,
       deviceMode: mode,
     );
   }
@@ -90,6 +95,7 @@ class ConsentTestServices implements AppServices {
     return ConsentTestServices(
       SessionStore(preferences, defaultBaseUrl: 'https://example.invalid'),
       mode: mode,
+      locationNow: tester.binding.clock.now,
     );
   }
 

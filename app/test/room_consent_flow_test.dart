@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:unavo/core/device_mode.dart';
 import 'package:unavo/call/call_state.dart';
 import 'package:unavo/map/vworld_room_map.dart';
+import 'package:unavo/location/location_share.dart';
 import 'package:unavo/location/location_source.dart';
 import 'package:unavo/map/room_map.dart';
 import 'package:unavo/map/room_map_widgets.dart';
@@ -208,13 +209,131 @@ void main() {
     }
   }, timeout: _timeout);
 
-  testWidgets('차량 정차 오류는 동의 팝업보다 먼저 표시한다', (tester) async {
+  testWidgets('차량은 표본 없는 unknown에서 모달을 열고 동의 후 start·follow POST·지도를 표시한다', (
+    tester,
+  ) async {
     final f = await _Fixture.create(tester, car: true);
     try {
+      expect(f.services.locationShare.motionState, LocationMotionState.unknown);
+      await _member(tester, 'alice');
+      expect(find.text('따라가기'), findsOneWidget);
+      expect(find.text('정차 후 설정할 수 있습니다'), findsNothing);
+      expect(f.services.locationSource.requests, 0);
+      expect(f.services.api.follows, isEmpty);
+      await _tap(tester, '동의');
+      expect(f.services.locationShare.sharing, isTrue);
+      expect(f.services.locationSource.requests, 1);
+      expect(f.services.locationSource.watches, 1);
+      expect(f.services.api.follows, ['alice']);
+      expect(f.services.rooms.followTarget, 'alice');
+      expect(find.byType(RoomMap), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    } finally {
+      await f.dispose(tester);
+    }
+  }, timeout: _timeout);
+
+  testWidgets('차량의 moving 표본은 동의 팝업 전에 정차 오류로 차단한다', (tester) async {
+    final f = await _Fixture.create(tester, car: true);
+    try {
+      await completeConsentFuture(tester, f.services.locationShare.start());
+      await _sample(tester, f, speed: .5);
+      expect(f.services.locationShare.motionState, LocationMotionState.moving);
       await _member(tester, 'alice');
       expect(find.text('정차 후 설정할 수 있습니다'), findsOneWidget);
       expect(find.byType(Dialog), findsNothing);
-      expect(f.services.locationSource.requests, 0);
+      expect(f.services.locationSource.requests, 1);
+      expect(f.services.api.follows, isEmpty);
+      expect(f.services.rooms.followTarget, isNull);
+      expect(find.byType(RoomMap), findsNothing);
+      expect(tester.takeException(), isNull);
+    } finally {
+      await f.dispose(tester);
+    }
+  }, timeout: _timeout);
+
+  testWidgets('차량은 stationary에서 모달·따라가기를 허용하고 이후 이동에도 유지한다', (tester) async {
+    final f = await _Fixture.create(tester, car: true);
+    try {
+      await completeConsentFuture(tester, f.services.locationShare.start());
+      for (var second = 0; second <= 3; second++) {
+        if (second > 0) await tester.pump(const Duration(seconds: 1));
+        await _sample(tester, f, speed: 0);
+      }
+      expect(
+        f.services.locationShare.motionState,
+        LocationMotionState.stationary,
+      );
+      await _member(tester, 'alice');
+      expect(find.text('따라가기'), findsOneWidget);
+      await _tap(tester, '동의');
+      expect(f.services.api.follows, ['alice']);
+      expect(f.services.rooms.followTarget, 'alice');
+      expect(f.services.locationSource.watches, 1);
+      await _sample(tester, f, speed: 3);
+      expect(f.services.rooms.followTarget, 'alice');
+      expect(find.byType(RoomMap), findsOneWidget);
+      expect(find.text('정차 후 설정할 수 있습니다'), findsNothing);
+      expect(tester.takeException(), isNull);
+    } finally {
+      await f.dispose(tester);
+    }
+  }, timeout: _timeout);
+
+  for (final immediate in [true, false]) {
+    testWidgets(
+      '차량 동의 후 ${immediate ? "start 중" : "POST 뒤"} 첫 moving 판정은 따라가기만 거부한다',
+      (tester) async {
+        final f = await _Fixture.create(tester, car: true);
+        try {
+          if (immediate) {
+            f.services.locationSource.initialSample = LocationSample(
+              lat: 37,
+              lng: 127,
+              speed: .5,
+              at: tester.binding.clock.now(),
+            );
+          }
+          await _member(tester, 'alice');
+          expect(find.text('따라가기'), findsOneWidget);
+          expect(f.services.locationSource.requests, 0);
+          await _tap(tester, '동의');
+          if (!immediate) {
+            expect(f.services.rooms.followTarget, 'alice');
+            await _sample(tester, f, speed: .5);
+          }
+          expect(f.services.rooms.followTarget, isNull);
+          expect(f.services.rooms.followError, '정차 후 설정할 수 있습니다');
+          expect(find.text('정차 후 설정할 수 있습니다'), findsOneWidget);
+          expect(find.byType(RoomMap), findsNothing);
+          expect(f.services.api.follows, immediate ? isEmpty : ['alice']);
+          expect(f.services.api.unfollows, immediate ? 0 : 1);
+          expect(f.services.locationShare.sharing, isTrue);
+          expect(f.services.locationSource.watches, 1);
+          expect(f.services.locationSource.cancellations, 0);
+          expect(f.services.api.stops, 0);
+          expect(tester.takeException(), isNull);
+        } finally {
+          await f.dispose(tester);
+        }
+      },
+      timeout: _timeout,
+    );
+  }
+
+  testWidgets('폰은 이동 중에도 모달·동의·따라가기를 허용한다', (tester) async {
+    final f = await _Fixture.create(tester);
+    try {
+      await completeConsentFuture(tester, f.services.locationShare.start());
+      await _sample(tester, f, speed: 3);
+      await _member(tester, 'alice');
+      expect(find.text('따라가기'), findsOneWidget);
+      await _tap(tester, '동의');
+      expect(f.services.rooms.followTarget, 'alice');
+      expect(f.services.api.follows, ['alice']);
+      expect(find.byType(RoomMap), findsOneWidget);
+      expect(find.text('정차 후 설정할 수 있습니다'), findsNothing);
+      expect(tester.takeException(), isNull);
     } finally {
       await f.dispose(tester);
     }
@@ -425,6 +544,23 @@ Future<void> _member(WidgetTester tester, String handle) async {
   await tester.ensureVisible(card);
   await tester.tap(card);
   await pumpConsentUi(tester);
+}
+
+Future<void> _sample(
+  WidgetTester tester,
+  _Fixture fixture, {
+  required double speed,
+}) async {
+  fixture.services.locationSource.add(
+    LocationSample(
+      lat: 37,
+      lng: 127,
+      speed: speed,
+      at: tester.binding.clock.now(),
+    ),
+  );
+  await tester.pump();
+  await tester.pump();
 }
 
 class _Fixture {

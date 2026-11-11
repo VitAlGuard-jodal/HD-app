@@ -16,6 +16,7 @@ class LocationTestTokenStore implements TokenStore {
 class FakeLocationSource extends LocationSource {
   LocationPermissionState permission = LocationPermissionState.granted;
   Completer<LocationPermissionState>? pendingPermission;
+  LocationSample? initialSample;
   int requests = 0, watches = 0, cancellations = 0;
   final controllers = <StreamController<LocationSample>>[];
 
@@ -37,6 +38,7 @@ class FakeLocationSource extends LocationSource {
     );
     unawaited(controller.done);
     controllers.add(controller);
+    if (initialSample != null) controller.add(initialSample!);
     return controller.stream;
   }
 
