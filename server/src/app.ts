@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { avatarDirectory, avatarPng, isMascotKind, MAX_AVATAR_BODY_BYTES, readAvatar, saveAvatar } from "./avatars.ts";
 import { hashPassword, issueToken, lookupToken, revokeToken, tokenHash, verifyPassword } from "./auth.ts";
 import { isValidDisplayName, isValidHandle, isValidPassword } from "./handles.ts";
-import { LOCATION_DISCONNECT_GRACE_MS, LOCATION_SWEEP_INTERVAL_MS, RoomLocationStore } from "./locations.ts";
+import { LOCATION_DISCONNECT_GRACE_MS, LOCATION_STALE_MS, LOCATION_SWEEP_INTERVAL_MS, RoomLocationStore } from "./locations.ts";
 import { generateRoomCode, RoomEventHub } from "./rooms.ts";
 import { openEventStream } from "./sse.ts";
 import { issueIceServers } from "./turn.ts";
@@ -193,6 +193,24 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
   function expireLocations(): void {
     for (const { code, handle } of locations.stale()) removeLocation(code, handle, "stale");
   }
+
+  function scheduleDisconnect(code: string, handle: string): void {
+    cancelDisconnect(code, handle);
+    let timers = disconnectTimers.get(code);
+    if (!timers) { timers = new Map(); disconnectTimers.set(code, timers); }
+    timers.set(handle, setTimeout(() => {
+      cancelDisconnect(code, handle);
+      if (closing || hub.subscriberCount(code, handle) !== 0) return;
+      const lastReceivedAt = locations.lastReceivedAt(code, handle);
+      if (locations.isSharing(code, handle) && lastReceivedAt !== undefined) {
+        if (Date.now() - lastReceivedAt < LOCATION_STALE_MS) scheduleDisconnect(code, handle);
+        // 위치까지 끊긴 공유자는 기존 sweep이 stale로 정리한다.
+        return;
+      }
+      removeLocation(code, handle);
+    }, LOCATION_DISCONNECT_GRACE_MS).unref());
+  }
+
   const locationSweepTimer = setInterval(expireLocations, LOCATION_SWEEP_INTERVAL_MS).unref();
   hub.on("subscribed", ({ code, handle }: { code: string; handle: string }) => {
     cancelDisconnect(code, handle);
@@ -201,13 +219,8 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
   hub.on("unsubscribed", ({ code, handle }: { code: string; handle: string }) => {
     if (closing || hub.subscriberCount(code, handle) !== 0) return;
     // 같은 handle의 마지막 소켓만 유예를 시작한다. 재구독은 이 타이머를 취소한다.
-    cancelDisconnect(code, handle);
     locations.disconnected(code, handle);
-    let timers = disconnectTimers.get(code);
-    if (!timers) { timers = new Map(); disconnectTimers.set(code, timers); }
-    timers.set(handle, setTimeout(() => {
-      if (hub.subscriberCount(code, handle) === 0) removeLocation(code, handle);
-    }, LOCATION_DISCONNECT_GRACE_MS).unref());
+    scheduleDisconnect(code, handle);
   });
   hub.once("closing", () => {
     closing = true;

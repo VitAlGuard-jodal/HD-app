@@ -18,14 +18,14 @@ import 'support/consent_fakes.dart';
 import 'support/icon_bundle.dart';
 
 void main() {
-  testWidgets('M5b는 개인정보 버전 2를 유지하고 항목별 버전 1 동의는 다시 받는다', (tester) async {
+  testWidgets('M7은 개인정보·위치 버전 2를 저장하고 항목별 버전 1 동의는 다시 받는다', (tester) async {
     final services = await ConsentTestServices.create(
       tester,
       savedVersion: '1',
     );
     try {
       expect(legalVersion, '2');
-      expect(locationLegalVersion, '1');
+      expect(locationLegalVersion, '2');
       await _mount(tester, services);
       expect(find.byType(LegalConsentScreen), findsOneWidget);
       await _tapKey(tester, 'legal-check-0');
@@ -34,7 +34,29 @@ void main() {
         services.store.preferences.getString(legalConsentKey)!,
       );
       expect(saved['privacy'], {'accepted': true, 'version': '2'});
-      expect(saved['location'], {'accepted': false, 'version': '1'});
+      expect(saved['location'], {'accepted': false, 'version': '2'});
+    } finally {
+      await _finish(tester, services);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('위치 버전 1 동의는 미동의로 판정하고 재동의하면 버전 2만 갱신한다', (tester) async {
+    final services = await ConsentTestServices.create(
+      tester,
+      savedVersion: legalVersion,
+    );
+    try {
+      final preferences = services.store.preferences;
+      expect(hasPrivacyConsent(preferences), isTrue);
+      expect(hasLocationConsent(preferences), isFalse);
+      await completeConsentFuture(tester, saveLocationConsent(preferences));
+      expect(hasPrivacyConsent(preferences), isTrue);
+      expect(hasLocationConsent(preferences), isTrue);
+      final saved = jsonDecode(preferences.getString(legalConsentKey)!);
+      expect(saved['privacy'], {'accepted': true, 'version': '2'});
+      expect(saved['location'], {'accepted': true, 'version': '2'});
+      expect(services.locationSource.requests, 0);
+      expect(services.locationSource.watches, 0);
     } finally {
       await _finish(tester, services);
     }
@@ -56,7 +78,7 @@ void main() {
         services.store.preferences.getString(legalConsentKey)!,
       );
       expect(saved['privacy'], {'accepted': true, 'version': '2'});
-      expect(saved['location'], {'accepted': false, 'version': '1'});
+      expect(saved['location'], {'accepted': false, 'version': '2'});
       expect(services.locationSource.requests, 0);
     } finally {
       await _finish(tester, services);

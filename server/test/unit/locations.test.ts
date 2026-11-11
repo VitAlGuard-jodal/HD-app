@@ -218,18 +218,84 @@ for (const disconnected of ["alice", "bob"]) {
   });
 }
 
-test("C4 유예 만료는 left로 정리하고 DB 멤버십은 보존한다", async (t) => {
+test("M7 SSE가 끊겨도 위치 수신이 계속되면 반복 유예 뒤 공유·관계·궤적을 보존한다", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
+  const { api, send, hub, locations } = fixture(t);
+  const alice = send("GET", "/v1/rooms/ABC234/events", "alice");
+  const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
+  await api("POST", "/location", "alice", sample);
+  alice.emit("close");
+  const disconnectedAt = locations.disconnectedAt("ABC234", "alice");
+  for (let seq = 1; seq <= 4; seq++) {
+    t.mock.timers.tick(LOCATION_DISCONNECT_GRACE_MS - 1000);
+    assert.equal((await api("POST", "/location", "alice", { ...sample, seq })).status, 202);
+    t.mock.timers.tick(1000);
+    assert.equal(hub.subscriberCount("ABC234", "alice"), 0);
+    assert.equal(locations.targetOf("ABC234", "bob"), "alice");
+    assert.equal(locations.position("ABC234", "alice")?.seq, seq);
+    assert.equal(locations.snapshot("ABC234").trails.alice.length, seq + 1);
+    assert.equal(locations.disconnectedAt("ABC234", "alice"), disconnectedAt);
+  }
+  assert.equal(bob.events().some((e) => e.name === "location-stopped"), false);
+});
+
+test("M7 SSE와 위치가 모두 끊기면 유예가 아닌 기존 sweep이 stale로 정리한다", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
+  const { api, send, locations, db, room, users } = fixture(t);
+  const alice = send("GET", "/v1/rooms/ABC234/events", "alice");
+  const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
+  // sweep과 유예 만료를 어긋나게 해 stale 직후에도 left가 먼저 나가지 않는지 본다.
+  t.mock.timers.tick(5000);
+  await api("POST", "/location", "alice", sample);
+  alice.emit("close");
+  for (let elapsed = 0; elapsed < LOCATION_STALE_MS; elapsed += LOCATION_DISCONNECT_GRACE_MS) {
+    t.mock.timers.tick(LOCATION_DISCONNECT_GRACE_MS - 5000);
+    t.mock.timers.tick(5000);
+    assert.equal(locations.targetOf("ABC234", "bob"), "alice");
+    assert.equal(bob.events().some((e) => e.name === "location-stopped"), false);
+  }
+  t.mock.timers.tick(25000);
+  assert.deepEqual(locations.snapshot("ABC234"), { positions: [], trails: {} });
+  assert.equal(locations.targetOf("ABC234", "bob"), null);
+  assert.equal(locations.disconnectedAt("ABC234", "alice"), undefined);
+  assert.equal(isRoomMember(db, room.id, users[0].id), true);
+  assert.deepEqual(bob.events().filter((e) => e.name === "location-stopped").map((e) => e.data.reason), ["stale"]);
+  t.mock.timers.tick(LOCATION_STALE_MS);
+  assert.equal(bob.events().filter((e) => e.name === "location-stopped").length, 1);
+});
+
+test("M7 공유하지 않는 멤버는 30초 유예 만료에 left로 정리하고 DB 멤버십은 보존한다", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
   const { api, send, locations, db, room, users } = fixture(t);
   const alice = send("GET", "/v1/rooms/ABC234/events", "alice");
   const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
   await api("POST", "/location", "alice", sample);
+  bob.emit("close");
+  t.mock.timers.tick(LOCATION_DISCONNECT_GRACE_MS - 1);
+  assert.equal(locations.targetOf("ABC234", "bob"), "alice");
+  t.mock.timers.tick(1);
+  assert.equal(locations.position("ABC234", "alice")?.seq, 0);
+  assert.deepEqual(locations.snapshot("ABC234").trails, {});
+  assert.equal(locations.targetOf("ABC234", "bob"), null);
+  assert.equal(locations.disconnectedAt("ABC234", "bob"), undefined);
+  assert.equal(isRoomMember(db, room.id, users[1].id), true);
+  assert.ok(alice.events().some((e) => e.name === "location-stopped" && e.data.handle === "bob" && e.data.reason === "left"));
+});
+
+test("M7 중지 전 수신 시각은 표본 없는 새 공유의 유예를 연장하지 않는다", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
+  const { api, send, locations } = fixture(t);
+  const alice = send("GET", "/v1/rooms/ABC234/events", "alice");
+  const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
+  await api("POST", "/location", "alice", sample);
+  await api("DELETE", "/location", "alice");
+  const pending = await api("POST", "/follow", "bob", { target: "alice" });
+  await api("POST", "/follow/respond", "alice", { requestId: pending.body.requestId, accepted: true });
   alice.emit("close");
   t.mock.timers.tick(LOCATION_DISCONNECT_GRACE_MS);
-  assert.deepEqual(locations.snapshot("ABC234"), { positions: [], trails: {} });
   assert.equal(locations.targetOf("ABC234", "bob"), null);
-  assert.equal(isRoomMember(db, room.id, users[0].id), true);
-  assert.ok(bob.events().some((e) => e.name === "location-stopped" && e.data.reason === "left"));
+  assert.equal(locations.disconnectedAt("ABC234", "alice"), undefined);
+  assert.equal(bob.events().filter((e) => e.name === "location-stopped").at(-1)?.data.reason, "left");
 });
 
 test("C3 주기 sweep은 90초 위치와 관계를 stale로 삭제한다", async (t) => {

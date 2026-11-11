@@ -108,6 +108,16 @@ export class RoomLocationStore {
     return this.#rooms.get(code)?.disconnectedAt.get(handle);
   }
 
+  isSharing(code: string, handle: string): boolean {
+    return this.#rooms.get(code)?.sharing.has(handle) ?? false;
+  }
+
+  lastReceivedAt(code: string, handle: string): number | undefined {
+    const room = this.#rooms.get(code);
+    // 중지 뒤 남겨 둔 속도 제한 시각은 새 공유의 위치 수신으로 보지 않는다.
+    return room?.positions.has(handle) ? room.lastReceivedAt.get(handle) : undefined;
+  }
+
   targetOf(code: string, requester: string): string | null {
     return this.#rooms.get(code)?.accepted.get(requester)?.target ?? null;
   }

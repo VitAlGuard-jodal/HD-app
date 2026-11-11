@@ -36,12 +36,22 @@ class GeolocatorLocationSource implements LocationSource {
       accuracy: LocationAccuracy.high,
       intervalDuration: const Duration(seconds: 1),
       distanceFilter: 0,
+      foregroundNotificationConfig: const ForegroundNotificationConfig(
+        notificationTitle: '우나보 위치 공유 중',
+        notificationText: '같은 방 참여자에게 내 위치를 보내고 있습니다',
+        notificationChannelName: '위치 공유',
+        notificationIcon: AndroidResource(name: 'ic_notification_small'),
+        setOngoing: true,
+        enableWakeLock: true,
+      ),
     ),
     TargetPlatform.iOS || TargetPlatform.macOS => AppleSettings(
       accuracy: LocationAccuracy.best,
       activityType: ActivityType.automotiveNavigation,
       distanceFilter: 0,
-      allowBackgroundLocationUpdates: false,
+      allowBackgroundLocationUpdates: true,
+      showBackgroundLocationIndicator: true,
+      pauseLocationUpdatesAutomatically: false,
     ),
     _ => const LocationSettings(
       accuracy: LocationAccuracy.high,

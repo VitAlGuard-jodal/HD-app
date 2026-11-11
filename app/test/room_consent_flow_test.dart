@@ -298,6 +298,7 @@ void main() {
       expect(find.text('따라가기'), findsOneWidget);
       expect(find.text('앨리스 님의 위치를 따라갑니다'), findsOneWidget);
       expect(find.text('내 위치도 같은 방 참여자에게 보입니다'), findsOneWidget);
+      expect(find.text('화면이 꺼져 있어도 공유 중에는 위치를 보냅니다'), findsOneWidget);
       expect(f.services.locationSource.requests, 0);
       expect(f.services.api.follows, isEmpty);
       await _tap(tester, '동의');
@@ -393,6 +394,7 @@ void main() {
         await pumpConsentUi(tester);
         expect(find.text('따라가기 요청'), findsOneWidget);
         expect(find.text('보비 님이 내 위치를 따라가려 합니다'), findsOneWidget);
+        expect(find.text('화면이 꺼져 있어도 공유 중에는 위치를 보냅니다'), findsOneWidget);
         await _tap(tester, accepted ? '동의' : '미동의');
         expect(f.services.api.followResponses, [('bob-request', accepted)]);
         expect(f.services.locationSource.watches, accepted ? 1 : 0);

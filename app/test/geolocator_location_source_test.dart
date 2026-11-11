@@ -122,14 +122,28 @@ void main() {
         expect(settings['forceLocationManager'], isTrue);
         expect(settings['accuracy'], LocationAccuracy.high.index);
         expect(settings['timeInterval'], 1000);
-        expect(settings['foregroundNotificationConfig'], isNull);
+        expect(settings['foregroundNotificationConfig'], {
+          'notificationTitle': '우나보 위치 공유 중',
+          'notificationText': '같은 방 참여자에게 내 위치를 보내고 있습니다',
+          'notificationChannelName': '위치 공유',
+          'notificationIcon': {
+            'name': 'ic_notification_small',
+            'defType': 'drawable',
+          },
+          'setOngoing': true,
+          'enableWakeLock': true,
+          'enableWifiLock': false,
+          'color': null,
+        });
       } else {
         expect(settings['accuracy'], LocationAccuracy.best.index);
         expect(
           settings['activityType'],
           ActivityType.automotiveNavigation.index,
         );
-        expect(settings['allowBackgroundLocationUpdates'], isFalse);
+        expect(settings['allowBackgroundLocationUpdates'], isTrue);
+        expect(settings['showBackgroundLocationIndicator'], isTrue);
+        expect(settings['pauseLocationUpdatesAutomatically'], isFalse);
       }
       Future<void> emit(Map<String, Object> value) =>
           binding.defaultBinaryMessenger.handlePlatformMessage(

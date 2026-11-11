@@ -141,7 +141,7 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 **시연 환경(결정 6-A).** 찌지직의 실제 음원은 맥북 키보드·손·쿨링팬 충격음이 몸체를 타고 내장 마이크로 들어간 것. 시연·녹화 중 맥에 손을 대지 않고 맥 입력 음량을 낮춰 피크(실측 0 dBFS)에 여유를 둔다. 같은 방에 폰과 차를 두면 에코 제거기가 자기 목소리를 에코로 지워(26~43 dB) 음질 판단이 왜곡되므로, 음질 시험은 폰 마이크 음소거 또는 다른 방에서 한다.
 
-## 12. 위치 공유·참여자별 궤적(M6)
+## 12. 위치 공유·참여자별 궤적(M6·M7)
 
 **식별.** `leader`/`RoomSession.leaderHandle`은 방을 만든 사람의 handle이다. 따라갈 대상은 방장과 무관한 `followTarget`이며 자기 자신은 따를 수 없다. 서버·앱은 함께 배포하는 follow 프로토콜 v2를 사용한다(§15). 이전 클라이언트 호환은 제공하지 않는다.
 
@@ -155,13 +155,21 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 **메모리 저장소·revision.** 방별 최신 위치 1건/handle, 수락 관계(`accepted`, `followers`), 대기 요청(`pendingRequests`), 공유 중인 handle, 궤적, 마지막 seq·수신 시각과 `disconnectedAt`을 보관한다. 요청자는 한 대상만 요청하거나 따른다. 대기 요청은 팔로워가 아니며 궤적을 만들지 않는다. 수락된 첫 팔로워부터 대상의 현재 위치를 시작점으로 궤적을 만들고 최대 7,200점만 보관한다. 마지막 팔로워 해제 때 그 대상 궤적을 삭제한다. 방의 위치·관계·공유·단절/복귀·멤버 상태 변경마다 revision을 증가시키며, 중복 표본·무변경 follow 재요청·무변경 삭제는 증가시키지 않는다. 스냅샷은 내부 저장소와 분리된 사본이다.
 
-**공유 수명·단절 유예.** 마지막 SSE 소켓이 닫히면 DB 멤버십과 위치·follow·pending·궤적을 유지한 채 `disconnectedAt`을 기록하고 `LOCATION_DISCONNECT_GRACE_MS = 30초` 타이머를 시작한다. 같은 handle이 유예 안에 재구독하면 타이머를 취소하고 hello로 최신 상태를 복원한다. 다른 소켓이 남아 있으면 유예도 시작하지 않는다. 유예 만료 후에도 소켓이 없으면 `removeLocation(...,'left')`로 양방향 관계와 위치를 정리한다. 명시적 공유 중지·leave·로그아웃은 유예 없이 정리한다. 마지막 멤버 leave는 방·위치·궤적·순번·시그널 백로그·유예 타이머를 삭제한다. `/leave`는 현재·전 멤버에게 204, 한 번도 속하지 않은 사용자에게 403이며 이미 삭제된 방은 404다.
+**공유 수명·단절 유예(M7).** 마지막 SSE 소켓이 닫히면 DB 멤버십과 위치·follow·pending·궤적을 유지한 채 `disconnectedAt`을 기록하고 `LOCATION_DISCONNECT_GRACE_MS = 30초` 타이머를 시작한다. 같은 handle이 재구독하면 연장된 타이머도 취소하고 hello로 최신 상태를 복원한다. 다른 소켓이 남아 있으면 유예도 시작하지 않는다. 유예 만료 시 소켓이 없어도 `isSharing(code,handle)`이 참이고 마지막 위치 수신 `lastReceivedAt`부터 `LOCATION_STALE_MS = 90초` 미만이면 30초 유예를 다시 건다. 따라서 SSE가 끊겨도 위치 POST가 계속 수신되면 공유·follow·궤적을 유지한다. 위치까지 끊긴 공유자는 아래의 기존 stale sweep이 정리한다. 공유하지 않거나 현재 공유의 표본을 받은 적 없는 멤버는 기존대로 30초 뒤 `removeLocation(...,'left')`로 정리한다. 중지 후 속도 제한용으로 남은 수신 시각은 새 공유의 수신으로 보지 않는다. 만료 콜백은 기존 타이머와 빈 방 맵을 먼저 제거한 뒤 필요할 때 한 개만 다시 등록한다.
+
+명시적 공유 중지·leave·로그아웃은 연장된 유예도 취소하고 즉시 정리한다. 마지막 멤버 leave는 방·위치·궤적·순번·시그널 백로그·유예 타이머를 삭제하며 서버 종료 때도 모든 유예를 취소한다. `/leave`는 현재·전 멤버에게 204, 한 번도 속하지 않은 사용자에게 403이며 이미 삭제된 방은 404다.
 
 **stale 만료.** 마지막 저장 표본의 서버 receivedAt부터 `LOCATION_STALE_MS = 90초`가 지나면 snapshot/positions/hello에서 제외한다. 30초 주기 단일 sweep이 만료된 handle의 위치·궤적·관계를 삭제하고 `location-stopped {handle,reason:'stale',revision}` 및 해당 요청 ID의 종료 응답을 보낸다. 조회 경로도 만료 정리를 실행하므로 sweep 직전에도 오래된 위치를 노출하지 않는다. 위치·follow는 SQLite나 디스크에 저장하지 않으며 서버 프로세스 재시작으로 사라진다. 위치 POST는 개별 액세스 로그 없이 방별 분당 건수만 집계한다.
 
 **앱 전송·취소 토큰.** 기능별 동의는 화면에서 받고 `LocationShare.start({required Object token, required bool Function() stillValid})`를 호출한다. 권한 요청 직전·권한 완료 후·watch 직전에 요청 유효성을 재검사한다. 모달 진입부터 토큰을 관리하며 수신 요청은 requestId, 송신 요청은 POST 결과의 requestId와 연결한다. FollowCancelled·MemberLeft·방 변경은 토큰을 무효화한다. 이번 요청이 새로 켠 공유는 즉시 stop하고, 이전부터 켜져 있던 공유는 유지한다. 수락 완료 후에는 요청 토큰에서 공유를 분리한다. pending 송신 요청은 수락 전까지 토큰을 유지한다. 기능별 동의 기록만으로 새 프로세스에서 GPS·공유를 자동 시작하지 않는다.
 
 권한 거부는 “위치 권한이 없습니다”, 서비스 꺼짐은 “위치 서비스가 꺼져 있습니다”로 표시한다. 기본 전송은 1초이며 최신 표본 하나만 보류한다. speed < 0.5m/s·이동 < 3m이거나 연속 전송 실패 3회면 5초 간격이다. seq와 stream은 같은 실행의 중지·재시작·방 변경에도 유지한다. 송신자에게 location SSE를 반사하지 않으므로 성공한 자기 표본은 세션에서 직접 반영한다.
+
+**배경 전송(M7, 결정 18-A).** 사용자가 기능별 동의 후 화면에서 공유를 켠 동안에는 잠금·앱 전환 뒤에도 위치 전송을 이어 간다. iOS는 “앱 사용 중” 권한으로 시작한 스트림에 `allowBackgroundLocationUpdates: true`, `showBackgroundLocationIndicator: true`, `pauseLocationUpdatesAutomatically: false`를 적용한다. Info.plist의 `UIBackgroundModes`는 기존 `audio`와 `location`이며 “항상 허용” 권한을 요구하지 않는다. 시스템 위치 표시기를 켜고 Xcode 프로젝트 파일은 변경하지 않는다.
+
+Android는 공유 스트림에만 `ForegroundNotificationConfig`를 전달한다. 위치용 포그라운드 서비스와 “우나보 위치 공유 중” 알림을 사용하며 본문은 “같은 방 참여자에게 내 위치를 보내고 있습니다”다. `setOngoing: true`, `enableWakeLock: true`, 기존 `drawable/ic_notification_small` 아이콘을 사용한다. targetSdk 34용 `FOREGROUND_SERVICE_LOCATION`과 wake lock용 `WAKE_LOCK`을 선언하고, 기존 `POST_NOTIFICATIONS` 권한 흐름을 유지하며 `ACCESS_BACKGROUND_LOCATION`은 추가하지 않는다. geolocator_android 5.2.1의 서비스 타입은 `location`, 알림 ID/채널은 `75415`/`geolocator_channel_01`이다. 통화 서비스의 `microphone`, `1`/`call`과 분리되어 통화·공유 동시 실행 시 알림도 각각 게시된다. 실제 알림 표시와 Pleos 차량 UI는 기기 확인 대상이다.
+
+위치 스트림은 `LocationShare.start()`에서만 열고 `stop()`에서 구독을 취소한다. 공유 중지·방 나가기 때 네이티브 위치 갱신과 iOS 표시기·Android 포그라운드 알림·wake lock도 종료하는 경로를 사용한다. 앱 재실행이나 저장된 동의만으로 배경 공유를 시작하지 않는다.
 
 **공유 중지·삭제 재시도.** stop은 로컬 GPS·보류 타이머·과거 위치 오류를 즉시 지운다. 삭제 작업은 `(code,handle,generation)`으로 보존하고 진행 중 위치 POST 뒤에 DELETE를 보낸다. 실패 시 1·2·4·8·16·32·60초(이후 최대 60초) 간격으로 재시도한다. 같은 방을 떠나거나 인증/멤버/방이 없어진 401·403·404이면 재시도를 중단한다. 새 공유는 이미 전송된 이전 DELETE 완료를 기다린 뒤 오래된 작업과 타이머를 폐기하므로 이전 세대 삭제가 새 공유 뒤에 실행되지 않는다. 삭제 대기는 `deletionPending`/`deletionStatus`의 “위치 삭제 대기 중”으로 표시하며 `LocationShare.error`와 분리한다. 방 변경도 과거 오류를 지운다.
 
@@ -171,7 +179,7 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 동의 후 `start()`가 완료되면 다시 검사한다. unknown에서 follow POST를 보낸 경우에도 최초 moving/stationary 판정 때 한 번 더 확인한다. 첫 판정이 moving이면 followTarget을 비우고 같은 문구를 표시하며, 이미 보낸 POST 뒤에 follow DELETE를 직렬화해 관계를 정리한다. 내 위치 공유는 유지한다. 첫 stationary 판정 이후에는 이동 중에도 따라가기를 유지하며 중지는 언제나 가능하다. 첫 판정 대기는 해당 따라가기 시도에만 적용하고 중지·거절·대상 변경·방 변경 후 늦은 표본으로 이전 시도를 되살리지 않는다. 폰에는 이 제한과 최초 판정 취소를 적용하지 않는다.
 
-**동의 체계(결정 16-A).** 이 설치의 첫 로그인·회원가입·저장 세션 복원 시 개인정보 처리방침만 필수로 받는다. 위치정보 수집·이용 동의는 선택이며 미체크 상태로도 음성 통화·방 목록에 진입할 수 있다. `legal.consent.v1`에는 `{privacy:{accepted,version},location:{accepted,version}}` JSON을 저장한다. `legalVersion = '2'`는 개인정보 문서 버전이고 변경하지 않은 위치 문서는 `locationLegalVersion = '1'`로 각각 기록한다. 이전 버전 문자열 또는 현재 개인정보 동의가 없는 저장값은 동의 화면을 다시 표시한다. 로그아웃해도 설치의 문서 동의는 보존한다. 개인정보 미동의는 기존 안내·로그아웃 경로이며 알림의 방 열기도 필수 동의 완료까지 보류한다.
+**동의 체계(결정 16-A·M7).** 이 설치의 첫 로그인·회원가입·저장 세션 복원 시 개인정보 처리방침만 필수로 받는다. 위치정보 수집·이용 동의는 선택이며 미체크 상태로도 음성 통화·방 목록에 진입할 수 있다. `legal.consent.v1`에는 `{privacy:{accepted,version},location:{accepted,version}}` JSON을 저장한다. 개인정보 `legalVersion = '2'`를 유지하고 위치 문서는 배경 전송·시스템 표시 안내를 추가해 `locationLegalVersion = '2'`, 시행일 2026-11-12로 올린다. 위치 버전 1의 기존 동의는 현재 위치 동의로 인정하지 않으며 다음 공유 시작 모달에서 다시 동의받고 버전 2를 저장한다. 따라가기 시작·요청 수락 모달에는 “화면이 꺼져 있어도 공유 중에는 위치를 보냅니다”를 표시한다. 법률 문구는 초안이며 별도 검토가 필요하다. 이전 버전 문자열 또는 현재 개인정보 동의가 없는 저장값은 전체 동의 화면을 다시 표시한다. 로그아웃해도 설치의 문서 동의는 보존한다. 개인정보 미동의는 기존 안내·로그아웃 경로이며 알림의 방 열기도 필수 동의 완료까지 보류한다.
 
 위치 항목을 체크하지 않았어도 §15의 따라가기·요청 수락 모달에서 기능별 동의를 받으면 그때 위치 항목의 동의 여부·버전을 저장한다. 저장 성공 후에만 권한 요청으로 진행한다. 선택 동의의 저장은 자동 공유 허가가 아니며 매 새 기능 시작의 모달과 취소 토큰 규칙을 유지한다. `app/assets/legal/location.md`의 “동의하지 않을 권리” 문단은 변경하지 않는다.
 
@@ -219,10 +227,10 @@ NAVER 로고는 왼쪽 아래에 상시 유지하고 플로팅 바 여백을 확
 
 **GPS·권한.** `AppServices` 기본 소스는 `GeolocatorLocationSource()`이며 테스트용 소스 주입도 유지한다. 서비스 확인 → checkPermission → denied일 때 requestPermission → 앱 권한 상태 변환 순서다. whileInUse/always는 granted, denied/unableToDetermine는 denied, deniedForever는 deniedForever다. 서비스 꺼짐은 serviceOff이며 권한 요청 도중 서비스가 꺼지는 경우도 다시 확인한다.
 
-- Android: `AndroidSettings(forceLocationManager: true, accuracy: high, intervalDuration: 1s, distanceFilter: 0)`. GMS가 없는 Pleos에서도 LocationManager를 사용한다. 앱 Manifest에 COARSE/FINE_LOCATION을 추가한다.
-- iOS: `AppleSettings(accuracy: best, activityType: automotiveNavigation, distanceFilter: 0, allowBackgroundLocationUpdates: false)`. Info.plist의 `NSLocationWhenInUseUsageDescription`은 “같은 방 참여자에게 내 차 위치를 보여 주기 위해 사용합니다”이다. xcodeproj는 변경하지 않는다.
+- Android: `AndroidSettings(forceLocationManager: true, accuracy: high, intervalDuration: 1s, distanceFilter: 0)`에 §12의 공유용 `foregroundNotificationConfig`를 설정한다. GMS가 없는 Pleos에서도 LocationManager를 사용하며 COARSE/FINE_LOCATION 권한을 유지한다.
+- iOS: `AppleSettings(accuracy: best, activityType: automotiveNavigation, distanceFilter: 0, allowBackgroundLocationUpdates: true, showBackgroundLocationIndicator: true, pauseLocationUpdatesAutomatically: false)`. Info.plist의 `NSLocationWhenInUseUsageDescription`은 “같은 방 참여자에게 내 차 위치를 보여 주기 위해 사용합니다”이다. xcodeproj는 변경하지 않는다.
 - hasSpeed/hasHeading/hasAccuracy가 false인 값과 음수·유효하지 않은 선택 필드는 null로 전달한다. watch 구독 취소는 네이티브 위치 스트림 취소로 전파된다.
-- 백그라운드 권한·위치 포그라운드 서비스·iOS location background mode는 추가하지 않는다. M1과 동일하게 앱 프로세스와 Dart 스트림의 포그라운드 수명만 다룬다.
+- M7은 §12의 위치 포그라운드 서비스·iOS `location` 배경 모드로 사용자가 켠 공유를 배경에서도 유지한다. Android 배경 위치 권한과 iOS “항상 허용”은 요구하지 않는다.
 
 **화면 연결(M5a).** 입장은 지도가 없는 통화 방이다. 다른 멤버 카드 동의 후만 지도를 표시한다. 폰 세로는 위 70% 지도·아래 30% 통화 방, 폰 가로와 차량 주 패널은 좌 70%·우 30%다. 플로팅 바의 위치 관련 버튼은 제거하고 지도 내부 버튼으로 옮긴다. 전체 화면에서는 통화 방 대신 참여자 아바타 인디케이터와 하단 음성·방 관리 바를 표시한다. 세부 흐름·워터마크·테마는 §15를 따른다.
 
@@ -318,4 +326,4 @@ hello는 `{self,members,leader,positions,trails,revision,followTarget,pendingFol
 
 `ApiClient.avatarPhoto`는 인증 헤더를 포함한 version URL로 가져오며 서버 주소·로그인 토큰·handle·version별 메모리 캐시를 사용한다. 새 버전은 재요청하고 실패한 요청은 캐시에서 제거한다. 네이버 `NOverlayImage.fromWidget` 키에는 handle·표시 이름·나 여부·heading 유무·밝기·차량 여부와 avatar kind·version·색을 포함한다. 사진/마스코트는 `ui.Image`로 완전히 디코딩한 후 `RawImage`로 캡처하므로 비어 있는 첫 프레임을 저장하지 않는다. 로딩 실패 시 임시 차 마커를 사용하고 이후 성공하면 동일 버전이어도 아이콘을 교체한다. SDK alpha와 위젯 opacity를 중복 적용하지 않는다. 앱 수동 디스크 캐시는 없으며 SDK의 캡처용 임시 캐시는 §13과 같다. 브이월드도 facade로 전달된 avatar·order·API와 공통 마커 위젯을 사용한다.
 
-**동의·검증.** 개인정보 `legalVersion='2'`, 위치 문서 `locationLegalVersion='1'`과 M6의 항목별 동의 저장을 유지한다. 법률 Markdown은 변경하지 않는다. 추가 검증은 `member_colors_test.dart`, `member_avatar_test.dart`, `profile_screen_test.dart`, 지도 캐시 키·내 GPS 색 테스트, 개인정보 버전 2 재동의 테스트, 서버 `avatars.test.ts`이다. 서버 테스트에는 마이그레이션, 300KB/PNG/IHDR 검사, 버전 증가·사진 삭제, 인증·캐시 헤더, 첫 입장 순서와 재입장, 공개 직렬화·참여 방 SSE를 포함한다. 새 테스트는 30초 timeout과 유한 pump를 사용하고 비동기 핸들러 밖에서 검증한다. 이 작업에서는 정적 분석·구문·포맷만 검사하며 테스트 실행과 빌드는 Fable이 담당한다. 실제 갤러리·네이티브 지도 캡처와 폰/차량 배치는 기기 확인 대상이다.
+**동의·검증.** M5b 당시 개인정보 `legalVersion='2'`, 위치 문서 `locationLegalVersion='1'`과 M6의 항목별 동의 저장을 유지했고 법률 Markdown은 변경하지 않았다. 이후 M7의 위치 문서 버전 2·배경 전송 동의는 §12를 따른다. 추가 검증은 `member_colors_test.dart`, `member_avatar_test.dart`, `profile_screen_test.dart`, 지도 캐시 키·내 GPS 색 테스트, 개인정보 버전 2 재동의 테스트, 서버 `avatars.test.ts`이다. 서버 테스트에는 마이그레이션, 300KB/PNG/IHDR 검사, 버전 증가·사진 삭제, 인증·캐시 헤더, 첫 입장 순서와 재입장, 공개 직렬화·참여 방 SSE를 포함한다. 새 테스트는 30초 timeout과 유한 pump를 사용하고 비동기 핸들러 밖에서 검증한다. 이 작업에서는 정적 분석·구문·포맷만 검사하며 테스트 실행과 빌드는 Fable이 담당한다. 실제 갤러리·네이티브 지도 캡처와 폰/차량 배치는 기기 확인 대상이다.

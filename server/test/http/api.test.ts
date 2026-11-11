@@ -606,8 +606,8 @@ test("HTTP follow v2 pending·ID·revision·수신자별 trail·무변경 방송
   assert.deepEqual((await api("GET", `${path}/positions`, bob)).body.trails, {});
 });
 
-for (const expired of [false, true]) {
-  test(`HTTP 마지막 SSE 단절 ${expired ? "유예 만료" : "유예 내 재구독"}`, { timeout: 45_000 }, async (t) => {
+for (const graceElapsed of [false, true]) {
+  test(`HTTP 공유자 SSE 단절 ${graceElapsed ? "유예 만료 뒤 위치 수신 유지" : "유예 내 재구독"}`, { timeout: 45_000 }, async (t) => {
     const { api, signup, events, locations } = await fixture(t);
     const alice = await signup("alice", "앨리스"), bob = await signup("bob", "보비");
     const code = (await api("POST", "/v1/rooms", alice, {})).body.room.code;
@@ -623,10 +623,18 @@ for (const expired of [false, true]) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.notEqual(locations.disconnectedAt(code, "alice"), undefined);
-    if (expired) {
+    if (graceElapsed) {
       await new Promise((resolve) => setTimeout(resolve, LOCATION_DISCONNECT_GRACE_MS + 100));
-      assert.equal((await b.next("follow-response")).reason, "left");
-      assert.equal((await b.next("location-stopped")).reason, "left");
+      assert.equal(locations.targetOf(code, "bob"), "alice");
+      const posted = await api("POST", `${path}/location`, alice, {
+        stream: "0123456789abcdef", lat: 37, lng: 127, at: 1, seq: 1,
+      });
+      assert.equal(posted.status, 202);
+      assert.equal((await b.next("location")).seq, 1);
+      assert.equal(locations.snapshot(code).trails.alice.length, 2);
+      await api("DELETE", `${path}/location`, alice);
+      assert.equal((await b.next("follow-response")).reason, "stopped");
+      assert.equal((await b.next("location-stopped")).reason, "stopped");
       assert.equal(locations.targetOf(code, "bob"), null);
     } else {
       const restored = await events(code, alice);

@@ -38,6 +38,7 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>location</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>입력한 로컬 개발 서버에 연결합니다.</string>
