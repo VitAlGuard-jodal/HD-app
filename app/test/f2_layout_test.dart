@@ -8,6 +8,7 @@ import 'package:unavo/call/media_engine.dart';
 import 'package:unavo/call/mesh_coordinator.dart';
 import 'package:unavo/core/app_services.dart';
 import 'package:unavo/core/device_mode.dart';
+import 'package:unavo/map/map_provider.dart';
 import 'package:unavo/map/room_map.dart';
 import 'package:unavo/room/room_session.dart';
 import 'package:unavo/screens/phone/room.dart';
@@ -191,6 +192,7 @@ void main() {
     });
     final services = AppServices(
       SessionStore(await SharedPreferences.getInstance()),
+      mapProvider: MapProvider.vworld,
       mediaEngine: NoopMediaEngine(),
     );
     services.rooms.state = const RoomState(
@@ -397,6 +399,7 @@ void main() {
     SharedPreferences.setMockInitialValues({'token': 'test', 'handle': 'eve'});
     final services = AppServices(
       SessionStore(await SharedPreferences.getInstance()),
+      mapProvider: MapProvider.vworld,
       mediaEngine: NoopMediaEngine(),
     );
     services.rooms.state = RoomState(

@@ -10,6 +10,7 @@ import 'package:unavo/call/call_state.dart';
 import 'package:unavo/call/media_engine.dart';
 import 'package:unavo/core/app_services.dart';
 import 'package:unavo/core/device_mode.dart';
+import 'package:unavo/map/map_provider.dart';
 import 'package:unavo/net/models.dart';
 import 'package:unavo/room/room_session.dart';
 import 'package:unavo/screens/phone/room.dart';
@@ -30,6 +31,7 @@ void main() {
     final media = NoopMediaEngine();
     final services = AppServices(
       SessionStore(await SharedPreferences.getInstance()),
+      mapProvider: MapProvider.vworld,
       mediaEngine: media,
     );
     final messenger = tester.binding.defaultBinaryMessenger;

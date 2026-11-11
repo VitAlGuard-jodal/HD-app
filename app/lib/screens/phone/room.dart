@@ -45,7 +45,9 @@ class _RoomScreenState extends State<RoomScreen> {
   String? _error;
   Timer? _volumeTimer;
   Timer? _mapControlsTimer;
-  final _mapController = RoomMapController();
+  late final _mapController = RoomMapController.create(
+    widget.services.mapProvider,
+  );
 
   @override
   void dispose() {
@@ -140,7 +142,10 @@ class _RoomScreenState extends State<RoomScreen> {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: widget.services.rooms,
+    listenable: Listenable.merge([
+      widget.services.rooms,
+      widget.services.mapAuthError,
+    ]),
     builder: (context, _) {
       final session = widget.services.rooms;
       final state = session.state;
@@ -167,6 +172,7 @@ class _RoomScreenState extends State<RoomScreen> {
           _error ??
           session.locationShare.error ??
           session.followError ??
+          widget.services.mapAuthError.value ??
           session.mediaError ??
           state.error ??
           session.call.error ??
@@ -241,6 +247,8 @@ class _RoomScreenState extends State<RoomScreen> {
       final map = RoomMap(
         key: ValueKey('room-map-${state.code}'),
         controller: _mapController,
+        provider: widget.services.mapProvider,
+        authError: widget.services.mapAuthError.value,
         positions: session.positions.map(
           (handle, fix) => MapEntry(
             handle,

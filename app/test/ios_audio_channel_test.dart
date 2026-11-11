@@ -7,6 +7,7 @@ import 'package:unavo/auth/session_store.dart';
 import 'package:unavo/call/call_service.dart';
 import 'package:unavo/call/media_engine.dart';
 import 'package:unavo/core/app_services.dart';
+import 'package:unavo/map/map_provider.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -20,6 +21,7 @@ void main() {
     });
     final services = AppServices(
       SessionStore(await SharedPreferences.getInstance()),
+      mapProvider: MapProvider.vworld,
       mediaEngine: NoopMediaEngine(),
     );
     final messenger =

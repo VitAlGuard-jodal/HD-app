@@ -10,6 +10,7 @@ import 'package:unavo/call/call_service.dart';
 import 'package:unavo/call/call_state.dart';
 import 'package:unavo/call/media_engine.dart';
 import 'package:unavo/core/app_services.dart';
+import 'package:unavo/map/map_provider.dart';
 import 'package:unavo/net/api_client.dart';
 import 'package:unavo/net/models.dart';
 import 'package:unavo/room/room_session.dart';
@@ -262,6 +263,10 @@ class _Services implements AppServices {
   }
   @override
   final SessionStore store;
+  @override
+  MapProvider mapProvider = MapProvider.vworld;
+  @override
+  final mapAuthError = ValueNotifier<String?>(null);
   late final _Api _api;
   @override
   _Api get api => _api;
@@ -277,6 +282,7 @@ class _Services implements AppServices {
   late final _Media media;
   @override
   void dispose() {
+    mapAuthError.dispose();
     rooms.dispose();
     calls.dispose();
     mic.dispose();

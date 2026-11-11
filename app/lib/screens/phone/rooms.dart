@@ -265,7 +265,10 @@ class _RoomsScreenState extends State<RoomsScreen> {
                 icon: 'map',
                 iconOnly: true,
                 onPressed: () => Navigator.of(context).push<void>(
-                  MaterialPageRoute(builder: (_) => const MapCreditsScreen()),
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        MapCreditsScreen(provider: widget.services.mapProvider),
+                  ),
                 ),
               ),
             ),

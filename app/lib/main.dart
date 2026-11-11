@@ -2,12 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'auth/session_restore.dart';
 import 'auth/session_store.dart';
 import 'core/app_services.dart';
 import 'core/device_mode.dart';
+import 'map/map_provider.dart';
 import 'screens/car/car_dashboard.dart';
 import 'screens/phone/auth.dart';
 import 'screens/phone/cover.dart';
@@ -33,6 +35,27 @@ Future<void> main() async {
   final store = SessionStore(await SharedPreferences.getInstance());
   final capabilities = await DeviceCapabilities.detect();
   final services = AppServices(store, deviceMode: capabilities.mode);
+  if (services.mapProvider == MapProvider.naver) {
+    final clientId = naverClientId.trim();
+    try {
+      await FlutterNaverMap().init(
+        clientId: clientId,
+        onAuthFailed: (error) {
+          // SDK 메시지에 인증값이 포함돼도 로그에는 남기지 않는다.
+          final message = error.message ?? '';
+          final safeMessage = clientId.isEmpty
+              ? message
+              : message.replaceAll(clientId, '[redacted]');
+          debugPrint('map: 네이버 인증 실패 (${error.code}) $safeMessage');
+          services.setMapAuthError(error.code);
+        },
+      );
+    } catch (error) {
+      services.mapProvider = MapProvider.vworld;
+      services.mapAuthError.value = null;
+      debugPrint('map: 네이버 초기화 실패, 브이월드 사용 (${error.runtimeType})');
+    }
+  }
   try {
     await services.initialize();
   } catch (error) {

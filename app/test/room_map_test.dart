@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:unavo/map/map_tiles.dart';
 import 'package:unavo/map/room_map.dart';
+import 'package:unavo/map/room_map_geometry.dart';
 import 'package:unavo/net/models.dart';
 import 'package:unavo/ui/icons.dart';
 import 'package:unavo/ui/theme.dart';

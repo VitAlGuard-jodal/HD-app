@@ -169,14 +169,20 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 **동의 시트·M2.** `showLocationConsentSheet(context, recipients)`는 현재 참여자 표시 이름, “같은 방 참여자에게 내 차 위치를 보여 줍니다”, “방을 나가거나 중지 아이콘을 누르면 끝납니다”, “위치는 방이 있는 동안만 서버에 남습니다”를 보여 준다. 확인/check와 취소/back은 기존 SVG 아이콘만 사용하며 결과를 bool로 돌려준다. 시트는 아직 화면에 연결하지 않는다. M2에서 지도(`flutter_map`), 실제 GPS(`geolocator`), 위치 아이콘·플로팅 바 연결을 구현하며, Android 위치 포그라운드 서비스는 M2 이후에 다룬다.
 
-## 13. 지도 화면(M2)
+## 13. 지도 화면(M2·M3)
 
 이 항은 §12의 M1 범위(실제 GPS 없음·소스 null·동의 시트 미연결·handle 단독 seq)를 확장한다.
 
-**공급원 설정.** `app/lib/map/map_tiles.dart`의 `MapTiles.fromEnvironment()`가 `--dart-define`을 읽으며 `fromDefines()`로 같은 파싱을 단위 검증한다. 실제 키는 앱 코드에 넣지 않는다.
+**공급원 선택(M3).** `app/lib/map/map_provider.dart`의 순수 함수 `selectMapProvider()`와 `mapProviderFromEnvironment()`가 `MapProvider.naver` / `vworld`를 고른다. `auto`는 `NAVER_CLIENT_ID`가 비어 있지 않으면 네이버, 없거나 공백이면 브이월드다. 브이월드 키도 없으면 M2의 타일 없는 단색 바탕을 유지한다. 명시적인 `naver` / `vworld`는 키 유무보다 우선하며, 빈 키의 명시적 네이버 선택은 SDK의 인증 오류로 표시한다. 공급원 문자열의 공백·대소문자는 정규화하고 알 수 없는 값은 auto로 처리한다. `AppServices.mapProvider`는 이 선택을 기본으로 쓰며 테스트에서 주입할 수 있다. 기존 AppServices 테스트는 브이월드를 명시해 네이티브 지도 위젯을 만들지 않는다.
+
+**초기화 순서.** `main()`에서 `WidgetsFlutterBinding.ensureInitialized()` → 서비스 생성과 공급원 선택 → 네이버일 때만 `await FlutterNaverMap().init(clientId: naverClientId, onAuthFailed: ...)` → 기존 플랫폼 서비스 초기화 → `runApp` 순서다. 첫 NaverMap보다 SDK 초기화가 먼저 완료된다. `NAVER_CLIENT_ID`는 빌드 define에서만 읽고 코드·테스트·문서에 실제 인증값을 두지 않는다. 인증 실패는 메시지에서 인증값을 가린 뒤 debugPrint하고 `AppServices.mapAuthError`에는 오류 코드만 넣는다. 코드는 RoomScreen의 기존 오류 영역과 지도 상단 한 줄에 표시한다. init 자체가 예외를 던지면 키·예외 본문 없이 한 줄만 기록하고 runApp 전에 브이월드로 전환한다. 출처 화면도 최종 선택된 공급원을 사용한다.
+
+**브이월드 타일 설정.** `app/lib/map/map_tiles.dart`의 `MapTiles.fromEnvironment()`가 `--dart-define`을 읽으며 `fromDefines()`로 같은 파싱을 단위 검증한다. 실제 키는 앱 코드에 넣지 않는다.
 
 | define | 기본값 / 규칙 |
 |---|---|
+| `UNAVO_MAP_PROVIDER` | `auto`. `naver` / `vworld` / `auto` |
+| `NAVER_CLIENT_ID` | 빈 문자열. `--dart-define`으로만 공급하며 실제 운용은 `--dart-define-from-file` JSON 사용 |
 | `UNAVO_TILE_URL` | `https://api.vworld.kr/req/wmts/1.0.0/{key}/{layer}/{z}/{y}/{x}.png` |
 | `UNAVO_TILE_KEY` | 빈 문자열. 없거나 공백이면 TileLayer 자체를 만들지 않는다 |
 | `UNAVO_TILE_LAYER_LIGHT` / `UNAVO_TILE_LAYER_DARK` | `Base` / `midnight` |
@@ -189,11 +195,19 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 공급자는 기본 클래스 `NetworkTileProvider`이고 추가 캐시 패키지·수동 저장은 없다. **8.3.2에서는 이 공급자도 디스크 캐시가 기본으로 켜져 있으므로 `cachingProvider: const DisabledMapCachingProvider()`를 명시한다.** Flutter 이미지 메모리 캐시만 사용한다. 설치된 패키지 소스와 [공식 캐시 문서](https://docs.fleaflet.dev/layers/raster-tile-layer/caching.md)로 기본 동작을 확인했다. 대상은 Android/iOS 앱이며 브라우저 자체 캐시 정책을 다루는 웹 배포는 이번 범위가 아니다.
 
-**교체 경계·표시.** `app/lib/map/room_map.dart`는 `RoomMap`과 `abstract class RoomMapController`를 제공한다. 컨트롤러의 `moveTo(latitude, longitude, zoom:)`, `follow()`, `recenter()` 및 위젯 입력 positions/trail/leaderHandle/selfHandle/followLeader/brightness/onInteraction으로 연결한다. positions 값은 표시 이름과 LocationFix를 함께 가진 `RoomMapPosition`이다. RoomScreen은 flutter_map·latlong2나 공급자별 카메라·좌표 객체를 사용하지 않는다. 네이버 SDK로 교체할 때 이 경계 안의 구현과 컨트롤러 팩터리를 바꿀 수 있다.
+**네이버 표시·약관(M3).** 고정된 flutter_naver_map 1.4.4의 `NMapType.navi`와 `nightModeEnable`을 사용한다. 회전·기울임 제스처, 최대 기울임 63도, 건물 레이어를 켜고 축척·위치 버튼·실내 지도는 끈다. 첫 카메라는 내 위치 → 그룹장 → 첫 참여자 → 서울시청 순서로 정하며 줌은 16이다. 설치 소스에서 옵션은 `didUpdateWidget`이 아니라 `NaverMap.build → _updateOptionsIfNeeded → controller._updateOptions`로 갱신됨을 확인했다. 밝기 변경 시 야간 옵션만 갱신하고 지도를 재생성하지 않는다.
 
-차 SVG에 표시 이름 첫 글자 배지, 자신에게 강조 테두리, 그룹장에게 별 배지를 붙이고 차 아이콘만 heading에 따라 회전한다. 그룹장 궤적은 포인트색·두께 6·둥근 끝의 Polyline이다. 세션의 7,200점 상한을 유지한다.
+NAVER 로고는 왼쪽 아래에 상시 유지하고 플로팅 바 여백을 확보한다. `logoClickEnable: true`로 SDK의 법적 고지·오픈소스 화면을 그대로 연다. 로고를 숨기거나 다른 UI로 덮지 않으며, 네이버 지도 위에 별도의 출처 텍스트는 붙이지 않는다. 타일 색 필터·변형·커스텀 스타일을 추가하지 않는다. 위의 디스크 캐시 금지는 브이월드 타일 규칙이며, 네이버 SDK 자체 지도 캐시는 SDK가 관리한다. 마커의 `NOverlayImage.fromWidget`은 SDK 내부 임시 이미지 캐시를 사용한다.
 
-따라가기는 내 위치와 전방 궤적점 두 개의 경계를 맞춘다. 순수 함수 `followBounds()`는 heading이 있으면 전방 반평면의 가장 가까운 점을, 없으면 최근접 꼭짓점 다음 점을 고른다. 적절한 점이 없으면 그룹장 현재 위치를 쓴다. 내 위치나 그룹장 위치가 없으면 자동 이동하지 않는다. 여백 80px·자동 줌 상한 18이며(최소 줌 설정이 더 높아도 따라가기 동안 18로 제한), 양쪽 여백을 담을 수 없는 160px 이하 패널에서는 여백만 뷰포트 안으로 줄인다. 직선 거리는 `350 m` / `1.2 km` 형식이다. 사용자의 터치가 끝날 때까지 이동을 멈추고 마지막 제스처 뒤 5초 후 따라가기가 켜진 경우에만 재개한다. 꺼짐에서는 위치 갱신으로 카메라를 움직이지 않는다. 재중심은 내 위치로 이동한다.
+**교체 경계·표시.** `app/lib/map/room_map.dart`는 얇은 `RoomMap` facade와 `abstract class RoomMapController`를 제공한다. `RoomMapController.create(provider)`가 `NaverRoomMapController` / `VworldRoomMapController`를 만들고 facade가 대응하는 지도 구현을 선택한다. 기존 무인자 컨트롤러와 facade의 기본값은 브이월드로 유지한다. 컨트롤러의 `moveTo(latitude, longitude, zoom:)`, `follow()`, `recenter()` 및 기존 위젯 입력 positions/trail/leaderHandle/selfHandle/followLeader/brightness/onInteraction/tiles를 보존한다. positions는 표시 이름과 LocationFix를 담은 `RoomMapPosition`이다. RoomScreen은 서비스의 공급원·오류 상태를 전달하고 공급원별 SDK 카메라·좌표 타입은 사용하지 않는다. 브이월드 구현은 `vworld_room_map.dart`에 유지한다.
+
+두 구현은 `room_map_geometry.dart`의 전방점·거리·경계 계산과 `room_map_widgets.dart`의 차/이름/그룹장 배지·거리 라벨을 공유한다. 브이월드는 차 SVG만 heading에 따라 회전하고 기존 두께 6의 둥근 Polyline을 유지한다. 네이버는 같은 56×56 마커 위젯을 `NOverlayImage.fromWidget(widget:, size:, context:)`으로 렌더해 `(handle, 이름 첫 글자, 나, 그룹장, brightness)`별로 캐시한다. 즉시 캡처 시 SVG가 비지 않도록 이미 설치된 flutter_svg의 디코더로 car/star를 먼저 로드해 같은 위젯에 넣는다. 위치·heading 갱신은 `setPosition` / `setAngle`, 참여자 제거는 `deleteOverlay`다. 네이버 마커는 중심 anchor·`isFlat: true`이며 이중 회전을 피하기 위해 캡처한 차는 회전시키지 않는다. 네이버 궤적은 금색 폭 8, 테마 대비색 외곽선 폭 2의 `NPathOverlay`이며 2점 미만이면 추가하지 않고 기존 경로도 제거한다. 이후 좌표는 `setCoords`로 갱신한다. 두 구현 모두 세션의 7,200점 상한을 유지한다.
+
+**따라가기 공통 규칙.** `roomForwardPoint()`는 heading이 있으면 전방 반평면의 가장 가까운 점을, 없으면 최근접 꼭짓점 다음 점을 고른다. 적절한 점이 없으면 그룹장 현재 위치를 쓴다. 직선 거리는 `350 m` / `1.2 km` 형식이며 좌상단에 표시한다. 사용자 터치가 끝날 때까지 자동 이동을 멈추고 마지막 제스처/카메라 정지 뒤 5초 후 따라가기가 켜진 경우에만 재개한다. 따라가기 꺼짐에서는 새 표본·테마 변경으로 카메라를 자동 이동하지 않는다.
+
+브이월드 `followBounds()`는 내 위치와 전방점 두 개의 경계를 맞추며, 내 위치나 그룹장 위치가 없으면 자동 이동하지 않는다. 여백 80px·자동 줌 상한 18이며(최소 줌 설정이 더 높아도 따라가기 동안 18로 제한), 양쪽 여백을 담을 수 없는 160px 이하 패널에서는 여백만 뷰포트 안으로 줄인다. 기존 재중심 규칙도 유지한다.
+
+네이버 `naverFollowCamera()`는 순수 함수로 target/zoom/tilt/bearing을 계산한다. 따라가기가 켜지고 제스처 정지 중이 아니며 내 위치가 있으면 새 표본을 합쳐 **최대 초당 1회** 카메라를 갱신한다. target은 내 위치, tilt는 50도, bearing은 내 heading → 전방점 방위 → 현재 bearing 순서다. 동일 좌표는 방위가 없는 것으로 본다. 그룹장까지 직선 거리의 줌은 `<200m: 17`, `<600m: 16`, `<1.5km: 15`, `<4km: 14`, 나머지 13이며, 그룹장 본인은 자기 위치·줌 16을 사용한다. 그룹장 현재 위치가 사라졌으나 따라가기 설정이 남아 있으면 줌 16과 남은 궤적/현재 방위를 사용한다. `NCameraUpdate.withParams`에 `NCameraAnimation.linear`·800ms 애니메이션을 지정한다. `NCameraUpdateReason.gesture`는 조작부 표시와 5초 정지를 갱신하며, 따라가기 해제 시 보류 요청과 진행 중 전환을 취소한다. 재중심은 내 위치·줌 16이고 tilt/bearing은 생략해 현재값을 유지한다.
 
 **GPS·권한.** `AppServices` 기본 소스는 `GeolocatorLocationSource()`이며 테스트용 소스 주입도 유지한다. 서비스 확인 → checkPermission → denied일 때 requestPermission → 앱 권한 상태 변환 순서다. whileInUse/always는 granted, denied/unableToDetermine는 denied, deniedForever는 deniedForever다. 서비스 꺼짐은 serviceOff이며 권한 요청 도중 서비스가 꺼지는 경우도 다시 확인한다.
 
@@ -204,20 +218,18 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 **화면 연결.** 폰은 패널 높이의 지도 45% / 목록 55%다. 차량은 지도 아래 높이 112의 가로 멤버 띠를 놓고 기존 마이크 상태·음량 기능을 유지한다. 플로팅 바에는 location/locationoff(공유), navigation(따라가기), focus(재중심)를 추가하며 좁은 폭에서는 가로 스크롤한다. 공유 꺼짐에서 탭하면 동의 시트 true일 때만 consent() 후 start(), 켜짐에서 탭하면 stop()한다. 사용할 수 없으면 비활성이고 위치 오류·followError는 기존 오류 영역에 표시한다. 그룹장 자신이거나 그룹장 현재 위치가 없으면 따라가기 버튼은 비활성이다. 차량에서 켜기는 M1의 정차 규칙을 지킨다.
 
-방 목록 하단 map 아이콘은 `MapCreditsScreen`을 연다. 공급원 출처, 국토교통부의 “브이월드 배경지도”·공공누리 제1유형·“수정·가공하지 않음”, “위치는 방이 있는 동안만 서버(국내 리전)에 남습니다”를 표시한다. chevron 아이콘은 `showLicensePage`에 연결한다. 새 SVG 7종은 Fable이 공급하고 앱은 이름만 참조한다. 동작 테스트는 메모리 아이콘 번들을 사용하며 픽셀 스모크 테스트도 아직 공급되지 않은 7종을 필수 파일로 요구하지 않는다.
+방 목록 하단 map 아이콘은 최종 공급원을 전달해 `MapCreditsScreen`을 연다. 네이버는 “지도: 네이버 지도 (NAVER Cloud Platform Maps)·지도 왼쪽 아래 NAVER 로고를 누르면 법적 고지와 오픈소스 정보”를, 브이월드는 기존 출처·국토교통부의 “브이월드 배경지도”·공공누리 제1유형·“수정·가공하지 않음”을 표시한다. 두 공급원 모두 “위치는 방이 있는 동안만 서버(국내 리전)에 남습니다” 안내와 chevron 아이콘의 `showLicensePage` 연결을 유지한다. 위치 SVG 7종은 Fable이 공급한 기존 자산을 사용한다. 동작 테스트는 메모리 아이콘 번들을 사용한다.
 
 **seq stream.** LocationShare는 프로세스에서 한 번 생성한 암호학적 난수 8바이트를 16자 소문자 hex stream으로 보낸다. 같은 실행의 stop/start·방 변경에도 stream과 기존 세션 seq 증가를 유지한다. POST 본문·위치 응답·SSE·hello의 LocationFix에 stream이 추가된다. 서버는 16자 hex를 검증하고 lastSeq를 `(handle, stream)`별로 보관한다. 새 stream의 seq 0은 이전 stream의 큰 seq와 비교하지 않고, 현재 위치는 여전히 handle당 한 건으로 덮어쓴다. 기존 handle별 400ms 속도 제한은 유지하므로 stream 변경으로 우회할 수 없다. 앱도 stream이 바뀐 위치를 받아들이고 그룹장 궤적은 stream별 마지막 seq로 중복 제거한다. 나머지 궤적·수신 시각·방 삭제 규칙은 M1과 같다. 옛 hello의 stream 누락은 앱에서 빈 문자열로 읽지만 새 서버 POST에는 유효한 stream이 필수다.
 
 검사·빌드 예시:
 
 ```sh
-cd /Users/rlaxorhs77/Desktop/HD-app/server
-npm test
 cd /Users/rlaxorhs77/Desktop/HD-app/app
 flutter analyze --no-pub
-flutter test --no-pub test/map_tiles_test.dart test/room_map_test.dart test/geolocator_location_source_test.dart test/models_location_test.dart test/location_share_test.dart test/room_session_location_test.dart
+flutter test --no-pub test/map_provider_test.dart test/naver_room_map_test.dart test/room_map_test.dart test/f2_layout_test.dart test/room_speaking_test.dart test/session_restore_widget_test.dart test/ios_audio_channel_test.dart
 flutter test --no-pub
-flutter build apk --release --dart-define=UNAVO_TILE_KEY=<키>
+flutter build apk --release --no-pub --target-platform android-arm64 --dart-define-from-file=<키 JSON 경로>
 ```
 
-`<키>`는 실제 키로 치환한다. 의존성이 이미 준비된 환경에서 자동 pub 실행도 생략하려면 `flutter build apk --release --no-pub --dart-define=UNAVO_TILE_KEY='<실제 키>'`를 사용한다. M2 작업에서는 pub get/add와 Flutter test/build를 실행하지 않고 정적 분석과 포맷까지 검사한다.
+키 JSON은 레포 밖에서 관리하고 실제 키는 코드·테스트·문서에 기록하지 않는다. 브이월드로 되돌릴 때도 같은 JSON의 `UNAVO_MAP_PROVIDER`를 `vworld`로 지정한다. 네이버 SDK 위젯을 테스트에서 pump하지 않으며, 새 테스트는 공급원 선택·거리 줌·카메라 파라미터·2점 미만 궤적 생략의 순수 함수만 검사한다. M3 작업에서는 새 패키지 추가·flutter pub 실행·Flutter test/build를 하지 않고, 설치된 SDK와 패키지 소스를 기준으로 정적 분석·포맷까지만 검사한다. 위 test/build는 Fable이 별도로 실행한다.
