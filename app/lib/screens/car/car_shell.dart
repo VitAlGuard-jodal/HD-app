@@ -8,11 +8,16 @@ import '../../ui/appearance.dart';
 import '../../ui/backdrop.dart';
 import '../../ui/control_scale.dart';
 import '../../ui/theme.dart';
-import '../../ui/widgets/panel_button.dart';
 
 /// 패널의 열 수와 폭은 전체 창 너비로 정하고 IME는 가용 높이만 줄인다.
 class CarShell extends StatelessWidget {
-  const CarShell({super.key, required this.primary, this.secondary});
+  const CarShell({
+    super.key,
+    required this.primary,
+    this.secondary,
+    this.room = false,
+  });
+  final bool room;
   final Widget primary;
   final Widget? secondary;
 
@@ -41,35 +46,31 @@ class CarShell extends StatelessWidget {
                 ),
                 child: Column(
                   children: [
-                    Row(
-                      children: [
-                        Text(
-                          '우나보',
-                          style: UnavoType.display.copyWith(fontSize: 32),
-                        ),
-                        const SizedBox(width: 16),
-                        Text(
-                          'UNAVO',
-                          style: UnavoType.western.copyWith(fontSize: 20),
-                        ),
-                        const Spacer(),
-                        PanelButton(
-                          label: brightness == Brightness.dark
-                              ? '낮 테마 보기'
-                              : '밤 테마 보기',
-                          icon: brightness == Brightness.dark ? 'moon' : 'sun',
-                          onPressed: () => appearance.toggle(context),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
+                    if (!room)
+                      Row(
+                        children: [
+                          Text(
+                            '우나보',
+                            style: UnavoType.display.copyWith(fontSize: 32),
+                          ),
+                          const SizedBox(width: 16),
+                          Text(
+                            'UNAVO',
+                            style: UnavoType.western.copyWith(fontSize: 20),
+                          ),
+                          const Spacer(),
+                        ],
+                      ),
+                    if (!room) const SizedBox(height: 16),
                     Expanded(
                       child: LayoutBuilder(
                         builder: (context, constraints) {
                           Widget panel(Widget child, String key) => Container(
                             key: ValueKey(key),
                             decoration: panelDecoration(),
-                            padding: const EdgeInsets.all(20),
+                            padding: room && key == 'car-primary'
+                                ? EdgeInsets.zero
+                                : const EdgeInsets.all(20),
                             child: child,
                           );
                           final left = panel(primary, 'car-primary');
@@ -77,7 +78,9 @@ class CarShell extends StatelessWidget {
                             return Align(
                               alignment: Alignment.centerLeft,
                               child: SizedBox(
-                                width: math.min(720, constraints.maxWidth),
+                                width: room
+                                    ? constraints.maxWidth
+                                    : math.min(720, constraints.maxWidth),
                                 child: left,
                               ),
                             );

@@ -141,39 +141,37 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 **시연 환경(결정 6-A).** 찌지직의 실제 음원은 맥북 키보드·손·쿨링팬 충격음이 몸체를 타고 내장 마이크로 들어간 것. 시연·녹화 중 맥에 손을 대지 않고 맥 입력 음량을 낮춰 피크(실측 0 dBFS)에 여유를 둔다. 같은 방에 폰과 차를 두면 에코 제거기가 자기 목소리를 에코로 지워(26~43 dB) 음질 판단이 왜곡되므로, 음질 시험은 폰 마이크 음소거 또는 다른 방에서 한다.
 
-## 12. 위치 공유·그룹장 궤적(M1)
+## 12. 위치 공유·참여자별 궤적(M1→M5a)
 
-**범위.** 지도 위젯과 실제 GPS 없이 방의 위치 데이터 통로와 앱 세션 상태를 구현한다. `AppServices.locationSource`는 기본 `null`이며 이때 공유는 사용 불가다. `LocationSource.requestPermission()`과 `watch()`만 정의하고, 테스트는 구독 해제를 기록하는 가짜 소스와 가짜 HTTP·시계를 사용한다. 실제 소스는 스트림 구독을 취소할 때 하드웨어 구독도 해제해야 한다.
-
-**그룹장.** 방을 만든 사람의 handle을 `leader`로 노출한다. 생성·조회·참여 응답, `/v1/me.room`, SSE `hello.leader`가 같은 값을 사용한다. SQLite의 `rooms.created_by`는 사용자 ID지만 기존 조회 쿼리가 `createdBy`를 이미 handle로 변환하므로 추가 사용자 조회는 하지 않는다. 그룹장이 잠시 끊기거나 나가도 남은 참여자가 기존 궤적을 볼 수 있다.
+**식별.** `leader`/`RoomSession.leaderHandle`은 방장(방을 만든 사람)의 handle만 뜻한다. 생성·조회·참여·`/v1/me.room`·`hello.leader`는 같은 값을 쓴다. 따라갈 대상은 방장 여부와 무관한 `followTarget`이며 자기 자신을 따라갈 수 없다.
 
 | 메서드·경로 | 본문 / 응답 | 규칙 |
 |---|---|---|
-| `POST /v1/rooms/:code/location` | `{lat,lng,acc?,speed?,heading?,at,seq}` → `202 {accepted:true,dropped}` | 방 멤버만. handle은 인증 사용자, receivedAt은 서버 시각으로 정한다. 잘못된 표본 400, 속도 제한 429 |
-| `GET /v1/rooms/:code/positions` | `{positions:[LocationFix],trail:{handle,points:[LocationFix]} 또는 null}` | 방 멤버만, `Cache-Control: no-store` |
-| `DELETE /v1/rooms/:code/location` | `202 {accepted:true}` | 방 멤버만, 자신의 현재 위치만 제거 |
+| `POST /v1/rooms/:code/location` | `{stream,lat,lng,acc?,speed?,heading?,at,seq}` → `202 {accepted:true,dropped}` | 방 멤버만. handle은 인증 사용자, receivedAt은 서버 시각. 잘못된 표본 400, 속도 제한 429 |
+| `GET /v1/rooms/:code/positions` | `{positions:[LocationFix],trails:{handle:[LocationFix]}}` | 방 멤버만, `Cache-Control: no-store` |
+| `DELETE /v1/rooms/:code/location` | `202 {accepted:true}` | 내 위치와 내 follow 관계를 정리. 나를 따르던 사람에게도 종료 응답 |
 
-`LocationFix`는 `{handle,lat,lng,acc?,speed?,heading?,at,seq,receivedAt}`다. acc는 m, speed는 m/s, heading은 0~360도, at/receivedAt은 epoch ms다. SSE `location`은 저장된 전체 표본, `location-stopped`는 `{handle}`을 보내며 **송신 handle의 모든 연결은 제외**한다. `hello`는 기존 `self`·`members`와 함께 `leader`·`positions`·`trail`을 보내 재접속 즉시 스냅샷을 복원한다. 앱은 송신자에게 반사되지 않는 자신의 성공한 표본을 세션에 직접 반영한다(서버 수신 시각을 모르는 로컬 표본의 receivedAt은 0).
+`LocationFix`는 `{handle,stream,lat,lng,acc?,speed?,heading?,at,seq,receivedAt}`다. acc는 m, speed는 m/s, heading은 0~360도, at/receivedAt은 epoch ms다. SSE `location`과 `location-stopped{handle}`는 송신 handle의 모든 연결을 제외한다. 자신의 성공한 표본은 앱 세션에 직접 반영한다(로컬 receivedAt은 0). `hello`는 `leader`, `positions`, `trails`, 수신자 자신의 `followTarget`, 아직 응답하지 않은 `followRequests:[requester]`를 포함한다. 옛 단일 `trail` 필드는 `trails`로 교체한다.
 
-**메모리 저장소.** `RoomLocationStore`는 방별 최신 위치 1건/handle, 그룹장 궤적, 마지막 seq·수신 시각을 보관한다. 위도 −90~90, 경도 −180~180, acc/speed ≥ 0, heading 0~360, 유한한 at, 정수 seq ≥ 0을 검증한다. 같은 방·handle의 처리 간격은 최소 400ms이며, 그 뒤 seq가 이전 이하이면 성공 응답의 `dropped:true`로 버린다. 유효한 드롭도 수신 간격에 포함한다. 그룹장 궤적은 최대 7,200점이며 초과분은 앞에서 버린다. 스냅샷은 내부 저장소와 분리된 사본이다.
+**메모리 저장소.** `RoomLocationStore`는 방별 최신 위치 1건/handle, `followers: Map<target, Set<requester>>`, 응답 대기 요청, 공유 중인 handle 집합, `trails: Map<handle, LocationFix[]>`, 마지막 seq·수신 시각을 가진다. 요청자는 한 대상만 따른다. 대기 중 요청도 follower 관계에 포함하고, 첫 팔로워가 생기면 대상의 현재 위치가 있을 때 그 점부터 궤적을 시작한다. 각 대상은 최대 7,200점이며 초과분은 앞에서 버린다. 마지막 팔로워 해제 즉시 해당 궤적을 삭제한다. 스냅샷은 내부 Map·배열·fix와 분리된 사본이다.
 
-명시적 중지·leave·해당 handle의 마지막 SSE 연결 해제는 현재 위치를 제거한다. 실제 위치가 제거된 leave/연결 해제와 명시적 DELETE는 `location-stopped`를 전파한다. 다른 기기의 SSE 연결이 남아 있으면 연결 해제만으로 위치를 지우지 않는다. SSE 단절 시 DB 멤버십을 보존하는 기존 터널 복귀 정책도 유지한다. 마지막 멤버가 `/leave`하면 빈 방을 삭제하고 위치·궤적·순번·시그널 백로그를 모두 비운다. 위치는 SQLite에 쓰지 않으며 서버 프로세스 재시작으로도 사라진다. 위치 POST는 기존 개별 액세스 로그를 생략하고, 트래픽이 있는 방마다 분당 `location: code=… accepted=… dropped=… rate=…` 한 줄로 집계한다.
+위도 −90~90, 경도 −180~180, acc/speed ≥ 0, heading 0~360, 유한한 at, 정수 seq ≥ 0, stream 16자리 소문자 hex를 검증한다. handle별 400ms 최소 간격과 `(handle, stream)`별 seq 중복·역순 드롭을 유지한다. stream을 바꾸어도 간격 제한을 우회할 수 없다. 유효한 드롭도 수신 간격에 포함한다.
 
-**앱 전송·수명(M4 갱신).** `LocationShare`는 동의 저장소·`consent()`·`consented` 게이트를 갖지 않는다. 화면이 기능을 켤 때마다 동의를 받은 뒤 명시적으로 `start()`를 호출하며, 공유는 새 실행에서 자동 복원하지 않는다. 시작 시 운영체제 위치 권한을 요청하고 거부/영구 거부는 “위치 권한이 없습니다”, 서비스 꺼짐은 “위치 서비스가 꺼져 있습니다”로 표시한다. 평상시 전송 간격은 1초이며 그 사이에는 최신 표본 하나만 남겨 시한에 보낸다. speed < 0.5m/s이면서 직전 전송 지점에서 3m 미만이면 5초 간격이다. seq는 0부터 전송 시도마다 증가하며 같은 세션에서 중지·재시작해도 이어진다. 전송 실패는 상태 오류로 표시하면서 공유를 유지하고, 3회 연속 실패하면 다음 성공까지 5초 간격으로 보낸다.
+**정리.** 공유 중지·leave·해당 handle의 마지막 SSE 연결 해제는 위치, 그 사람의 따라가기, 그 사람을 따르던 팔로워 관계를 정리한다. 대상이 나가거나 마지막 연결이 끊기면 팔로워에게 `follow-response {target,accepted:false,reason:'left'}`, 공유 중지는 `reason:'stopped'`를 보낸다. 다른 기기의 SSE 연결이 남아 있으면 공유와 관계를 유지한다. SSE 단절 때 DB 멤버십은 보존한다. 마지막 멤버의 leave는 빈 방·위치·궤적·순번·시그널 백로그를 모두 지운다. 위치와 follow는 SQLite에 쓰지 않으며 프로세스 재시작으로도 사라진다. 위치 POST의 개별 액세스 로그 대신 방별 분당 집계를 유지한다.
 
-방 나가기·코드 변경·세션 해제는 구독과 보류 타이머를 중지한다. 진행 중 POST가 끝난 다음 이전 방에 DELETE를 보내 늦은 응답이 중지한 위치를 되살리지 않게 한다. DELETE 실패는 로컬 중지를 막지 않는다. 권한 응답이나 중지 완료를 기다리던 시작 요청도 뒤이은 중지로 취소된다. 이번 구현은 Dart 스트림의 포그라운드 수명만 다루며, 백그라운드에서 살아 있는 동안만 계속 동작한다.
+**앱 전송·수명.** `LocationShare`의 기능별 동의는 화면이 담당한다. `start()`는 위치 권한을 요청하고 거부는 “위치 권한이 없습니다”, 서비스 꺼짐은 “위치 서비스가 꺼져 있습니다”로 표시한다. 기본 전송 간격은 1초이며 그 사이 최신 표본 하나만 보류한다. speed < 0.5m/s·이동 < 3m이면 5초 간격, 3회 연속 실패도 다음 성공까지 5초 간격이다. seq는 전송 시도마다 증가하고 같은 실행의 중지·재시작·방 변경에도 이어진다. 방 나가기·코드 변경·세션 해제 시 구독과 보류 타이머를 중지하고 진행 중 위치 POST 이후 DELETE를 보내 늦은 응답이 위치를 되살리지 않게 한다. 기능별 공유 동의는 새 실행에서 복원하지 않는다.
 
-**세션·정차 규칙.** `RoomSession`은 현재 위치 맵, leaderHandle, 최대 7,200점의 leaderTrail, followLeader/followError를 가진다. hello로 위치·궤적을 교체하고, 위치 이벤트는 seq가 증가한 경우에만 반영한다. 중복·역순 seq는 궤적에 다시 쌓지 않는다. 중지·member-left는 현재 위치만 제거하고 방을 떠나면 전체 상태를 초기화한다. 위치 중복 이벤트와 같은 설정의 반복 호출은 알림을 만들지 않는다.
+`RoomSession`은 `followTarget: String?`, `trailOf(handle)`, `followError`, 수신 요청·거절 안내 대기열을 제공한다. hello와 `trails` 이벤트는 궤적을 교체하고, location은 handle/stream별 순번으로 중복을 거른다. 공유를 끄면 followTarget도 비우며 follow POST/DELETE를 직렬화해 늦은 요청이 중지를 덮지 않게 한다. SSE 응답은 POST 완료보다 먼저 올 수 있으므로 요청 대상은 응답 전에 기록하고, 다른 대상에 대한 늦은 응답은 무시한다. 마지막 SSE 단절 후의 hello는 서버가 정리한 followTarget을 반영한다.
 
-정차 판정은 3초 동안 모은 표본의 speed가 모두 1m/s 미만이거나 이동이 3m 미만인 경우다. 관측 초기 3초와 표본이 3초 이상 끊긴 상태는 정차로 보지 않는다. 차량 모드에서 따라가기 **켜기**는 `LocationShare.isStationary`가 참일 때만 가능하며, 불가능하면 “정차 후 설정할 수 있습니다”를 표시한다. 끄기는 언제나 가능하고 폰에는 정차 제한이 없다. 그룹장 자신에게는 따라가기 설정이 no-op이다.
+**정차 규칙.** 3초 동안 표본의 speed가 모두 1m/s 미만이거나 이동이 3m 미만이어야 정차다. 관측 초기 3초·표본 단절 3초 이상은 정차가 아니다. 차량에서 따라가기 시작은 동의 모달보다 먼저 검사해 불가능하면 “정차 후 설정할 수 있습니다”를 표시한다. 이미 따라가는 동안 이동해도 유지하고 중지는 언제나 가능하다. 폰은 정차 제한이 없다. 공유를 아직 시작하지 않은 차량에는 정차 표본이 없다는 현행 제약은 §15의 후속 결정 항목에 남긴다.
 
 **동의 체계(M4).** 개인정보 처리방침과 위치정보 수집·이용 동의는 이 설치의 첫 로그인·회원가입 성공 직후에 한 번 받는다. 저장된 세션을 `restoreSession`으로 복원할 때도 같은 조건을 적용한다. `legal.consent.v1`에 문서 버전 문자열 `"1"`을 저장하며 `legalVersion`과 다르면 방 목록·차량 대시보드보다 `LegalConsentScreen`을 먼저 표시한다. 두 항목을 모두 체크하고 저장에 성공해야 다음 화면으로 간다. 로그아웃해도 설치의 문서 동의는 보존하며, 문서 버전이 올라가면 다시 받는다. 미동의는 “동의하지 않아 서비스를 이용할 수 없습니다” 안내 확인 후 기존 로그아웃 경로를 호출하고 로그인 화면으로 돌아간다. 서버 로그아웃이 실패해도 방·로컬 로그인은 정리한다. 알림의 방 열기 요청도 전체 동의가 끝날 때까지 보류한다.
 
-위치 공유는 꺼짐→켬 **매번** 별도의 모달 동의를 받는다. 같은 실행에서 중지 후 다시 켜도 새 동의가 필요하며, 전체 문서 동의나 과거 위치 동의 저장값으로 건너뛰지 않는다. 그룹장 따라가기는 공유가 꺼져 있으면 같은 모달 동의→`start()` 성공→`setFollowLeader(true)` 순서이며, 공유가 이미 켜져 있으면 팝업 없이 따른다. 미동의는 해당 기능을 사용할 수 없다는 안내만 표시하고 시작하지 않는다. 공유·따라가기 끄기에는 팝업이 없다. 차량의 정차 제한은 동의 팝업보다 먼저 검사하고 기존 `followError`를 표시한다. 권한 거부 등으로 공유 시작에 실패하거나 동의를 기다리는 동안 방이 바뀌면 따라가기를 켜지 않는다. 모달의 표현 규칙은 §14를 따른다.
+M5a 기능별 동의는 §15의 프로필 탭 모달과 상대의 요청 수락 모달로 통합한다. 공유 중인 대상은 추가 팔로워마다 재동의하지 않는다. 권한 거부·방 변경·취소된 요청의 늦은 동의는 새 공유나 따라가기를 시작하지 않는다. 모달의 차단·중앙 배치 규칙은 §14를 유지한다.
 
-## 13. 지도 화면(M2·M3)
+## 13. 지도 화면(M2·M3·M5a)
 
-이 항은 §12의 초기 M1 범위(실제 GPS 없음·소스 null·handle 단독 seq)를 확장한다. 동의 UI와 수명은 M4에서 갱신한 §12·§14를 따른다.
+초기 M1의 데이터 통로에 실제 GPS와 지도 공급원 경계를 연결한다. 동의 UI와 수명은 §12·§14·§15를 따른다.
 
 **공급원 선택(M3).** `app/lib/map/map_provider.dart`의 순수 함수 `selectMapProvider()`와 `mapProviderFromEnvironment()`가 `MapProvider.naver` / `vworld`를 고른다. `auto`는 `NAVER_CLIENT_ID`가 비어 있지 않으면 네이버, 없거나 공백이면 브이월드다. 브이월드 키도 없으면 M2의 타일 없는 단색 바탕을 유지한다. 명시적인 `naver` / `vworld`는 키 유무보다 우선하며, 빈 키의 명시적 네이버 선택은 SDK의 인증 오류로 표시한다. 공급원 문자열의 공백·대소문자는 정규화하고 알 수 없는 값은 auto로 처리한다. `AppServices.mapProvider`는 이 선택을 기본으로 쓰며 테스트에서 주입할 수 있다. 기존 AppServices 테스트는 브이월드를 명시해 네이티브 지도 위젯을 만들지 않는다.
 
@@ -193,23 +191,25 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 브이월드 WMTS 경로는 **tileMatrix/tileRow/tileCol = z/y/x** 순서다. 키와 레이어만 치환하고 좌표 치환은 flutter_map에 맡긴다. User-Agent 패키지 이름은 `kr.modumoa.hdapp`이다. 키 없음·타일 오류 시 테마에 맞춘 단색 위에 차 아이콘·궤적을 유지한다. 실패 로그는 프로세스당 한 번만 남기고 키가 포함된 URL·예외 본문을 출력하지 않는다.
 
-**타일 이용 규칙.** M2 지시문의 브이월드 2026-10-30 약관 기준으로 원본 타일을 표시한다. 위성 레이어, 색 필터, 블렌드, 재스타일, 타일 Opacity를 사용하지 않으며 `TileDisplay.instantaneous()`로 타일 페이드도 끈다. `UnavoAppearance` 밝기가 바뀌면 제공 레이어 Base/midnight만 바꾼다. 지도 우하단 출처는 접기·숨기기 기능 없는 텍스트이며 키가 없어도 표시한다.
+**타일 이용 규칙.** M2 지시문의 브이월드 2026-10-30 약관 기준으로 원본 타일을 표시한다. 위성 레이어, 색 필터, 블렌드, 재스타일, 타일 Opacity를 사용하지 않으며 `TileDisplay.instantaneous()`로 타일 페이드도 끈다. 시스템 `MediaQuery.platformBrightness`가 바뀌면 제공 레이어 Base/midnight만 바꾼다. 지도 우하단 출처는 접기·숨기기 기능 없는 텍스트이며 키가 없어도 표시한다.
 
 공급자는 기본 클래스 `NetworkTileProvider`이고 추가 캐시 패키지·수동 저장은 없다. **8.3.2에서는 이 공급자도 디스크 캐시가 기본으로 켜져 있으므로 `cachingProvider: const DisabledMapCachingProvider()`를 명시한다.** Flutter 이미지 메모리 캐시만 사용한다. 설치된 패키지 소스와 [공식 캐시 문서](https://docs.fleaflet.dev/layers/raster-tile-layer/caching.md)로 기본 동작을 확인했다. 대상은 Android/iOS 앱이며 브라우저 자체 캐시 정책을 다루는 웹 배포는 이번 범위가 아니다.
 
-**네이버 표시·약관(M3).** 고정된 flutter_naver_map 1.4.4의 `NMapType.navi`와 `nightModeEnable`을 사용한다. 회전·기울임 제스처, 최대 기울임 63도, 건물 레이어를 켜고 축척·위치 버튼·실내 지도는 끈다. 첫 카메라는 내 위치 → 그룹장 → 첫 참여자 → 서울시청 순서로 정하며 줌은 16이다. 설치 소스에서 옵션은 `didUpdateWidget`이 아니라 `NaverMap.build → _updateOptionsIfNeeded → controller._updateOptions`로 갱신됨을 확인했다. 밝기 변경 시 야간 옵션만 갱신하고 지도를 재생성하지 않는다.
+**네이버 표시·약관(M3).** 고정된 flutter_naver_map 1.4.4의 `NMapType.navi`와 `nightModeEnable`을 사용한다. 회전·기울임 제스처, 최대 기울임 63도, 건물 레이어를 켜고 축척·위치 버튼·실내 지도는 끈다. 첫 카메라는 내 위치 → 따라가는 대상 → 첫 참여자 → 서울시청 순서로 정하며 줌은 16이다. 설치 소스에서 옵션은 `didUpdateWidget`이 아니라 `NaverMap.build → _updateOptionsIfNeeded → controller._updateOptions`로 갱신됨을 확인했다. 밝기 변경 시 야간 옵션만 갱신하고 지도를 재생성하지 않는다.
 
 NAVER 로고는 왼쪽 아래에 상시 유지하고 플로팅 바 여백을 확보한다. `logoClickEnable: true`로 SDK의 법적 고지·오픈소스 화면을 그대로 연다. 로고를 숨기거나 다른 UI로 덮지 않으며, 네이버 지도 위에 별도의 출처 텍스트는 붙이지 않는다. 타일 색 필터·변형·커스텀 스타일을 추가하지 않는다. 위의 디스크 캐시 금지는 브이월드 타일 규칙이며, 네이버 SDK 자체 지도 캐시는 SDK가 관리한다. 마커의 `NOverlayImage.fromWidget`은 SDK 내부 임시 이미지 캐시를 사용한다.
 
-**교체 경계·표시.** `app/lib/map/room_map.dart`는 얇은 `RoomMap` facade와 `abstract class RoomMapController`를 제공한다. `RoomMapController.create(provider)`가 `NaverRoomMapController` / `VworldRoomMapController`를 만들고 facade가 대응하는 지도 구현을 선택한다. 기존 무인자 컨트롤러와 facade의 기본값은 브이월드로 유지한다. 컨트롤러의 `moveTo(latitude, longitude, zoom:)`, `follow()`, `recenter()` 및 기존 위젯 입력 positions/trail/leaderHandle/selfHandle/followLeader/brightness/onInteraction/tiles를 보존한다. positions는 표시 이름과 LocationFix를 담은 `RoomMapPosition`이다. RoomScreen은 서비스의 공급원·오류 상태를 전달하고 공급원별 SDK 카메라·좌표 타입은 사용하지 않는다. 브이월드 구현은 `vworld_room_map.dart`에 유지한다.
+**교체 경계·표시.** `app/lib/map/room_map.dart`는 얇은 `RoomMap` facade와 `abstract class RoomMapController`를 제공한다. `RoomMapController.create(provider)`가 `NaverRoomMapController` / `VworldRoomMapController`를 만들고 facade가 대응하는 지도 구현을 선택한다. 기존 무인자 컨트롤러와 facade의 기본값은 브이월드로 유지한다. 컨트롤러는 `moveTo(latitude, longitude, zoom:)`, `follow()`, `recenter()`, `alignHeading(bool)`을 제공한다. facade 입력은 positions/trail/targetHandle/selfHandle/following/brightness/onInteraction/tiles와 car/fullscreen/onFullscreen/onStopSharing이다. 공통 지도 버튼은 facade 내부에 표시한다. positions는 표시 이름과 LocationFix를 담은 `RoomMapPosition`이다. RoomScreen은 서비스의 공급원·오류 상태를 전달하고 공급원별 SDK 카메라·좌표 타입은 사용하지 않는다. 브이월드 구현은 `vworld_room_map.dart`에 유지한다.
 
-두 구현은 `room_map_geometry.dart`의 전방점·거리·경계 계산과 `room_map_widgets.dart`의 차/이름/그룹장 배지·거리 라벨을 공유한다. 브이월드는 차 SVG만 heading에 따라 회전하고 기존 두께 6의 둥근 Polyline을 유지한다. 네이버는 같은 56×56 마커 위젯을 `NOverlayImage.fromWidget(widget:, size:, context:)`으로 렌더해 `(handle, 이름 첫 글자, 나, 그룹장, brightness)`별로 캐시한다. 즉시 캡처 시 SVG가 비지 않도록 이미 설치된 flutter_svg의 디코더로 car/star를 먼저 로드해 같은 위젯에 넣는다. 위치·heading 갱신은 `setPosition` / `setAngle`, 참여자 제거는 `deleteOverlay`다. 네이버 마커는 중심 anchor·`isFlat: true`이며 이중 회전을 피하기 위해 캡처한 차는 회전시키지 않는다. 네이버 궤적은 금색 폭 8, 테마 대비색 외곽선 폭 2의 `NPathOverlay`이며 2점 미만이면 추가하지 않고 기존 경로도 제거한다. 이후 좌표는 `setCoords`로 갱신한다. 두 구현 모두 세션의 7,200점 상한을 유지한다.
+두 구현은 `room_map_geometry.dart`의 전방점·거리 계산과 `room_map_widgets.dart`의 GPS/차량 마커·거리 라벨·원형 버튼을 공유한다. 내 마커는 파란 GPS 점·흰 테두리·옅은 바깥 원이며 heading이 있을 때만 부채꼴을 그린다. 상대는 폰 32dp·차량 44dp 차 아이콘과 작은 표시 이름, 불투명도 0.55다. 네이버는 `NOverlayImage.fromWidget`을 `(handle, 표시 이름, 나 여부, heading 유무, brightness, car)`별로 캐시하고, car SVG는 먼저 디코딩한다. 위치·방위는 `setPosition`/`setAngle`, 스타일은 `setIcon`/`setSize`/`setAlpha`로 갱신한다. `NMarker(alpha:)`를 써 위젯과 SDK에서 alpha를 이중 적용하지 않는다. `setGlobalZIndex(300000)`으로 내 마커를 상대(200000) 위에 둔다. 네이버는 중심 anchor·`isFlat: true`이고 캡처 위젯에는 heading을 다시 적용하지 않는다. 브이월드는 내 마커를 MarkerLayer의 마지막에 배치한다.
 
-**따라가기 공통 규칙.** `roomForwardPoint()`는 heading이 있으면 전방 반평면의 가장 가까운 점을, 없으면 최근접 꼭짓점 다음 점을 고른다. 적절한 점이 없으면 그룹장 현재 위치를 쓴다. 직선 거리는 `350 m` / `1.2 km` 형식이며 좌상단에 표시한다. 사용자 터치가 끝날 때까지 자동 이동을 멈추고 마지막 제스처/카메라 정지 뒤 5초 후 따라가기가 켜진 경우에만 재개한다. 따라가기 꺼짐에서는 새 표본·테마 변경으로 카메라를 자동 이동하지 않는다.
+네이버 궤적은 금색 폭 8·테마 대비색 외곽선 폭 2의 `NPathOverlay`이며 2점 미만이면 생략한다. 이후 `setCoords`로 갱신한다. 브이월드는 기존 금색 폭 6의 둥근 Polyline이다. 지도에는 `trailOf(followTarget)`만 전달한다.
 
-브이월드 `followBounds()`는 내 위치와 전방점 두 개의 경계를 맞추며, 내 위치나 그룹장 위치가 없으면 자동 이동하지 않는다. 여백 80px·자동 줌 상한 18이며(최소 줌 설정이 더 높아도 따라가기 동안 18로 제한), 양쪽 여백을 담을 수 없는 160px 이하 패널에서는 여백만 뷰포트 안으로 줄인다. 기존 재중심 규칙도 유지한다.
+**따라가기 공통 규칙.** `roomForwardPoint()`는 heading이 있으면 전방 반평면의 가장 가까운 점을, 없으면 최근접 꼭짓점 다음 점을 고른다. 적절한 점이 없으면 따라가는 대상의 현재 위치를 쓴다. 직선 거리는 `350 m` / `1.2 km` 형식이며 좌상단에 표시한다. 사용자 터치가 끝날 때까지 자동 이동을 멈추고 마지막 제스처/카메라 정지 뒤 5초 후 따라가기가 켜진 경우에만 재개한다. 따라가기 꺼짐에서는 새 표본·테마 변경으로 카메라를 자동 이동하지 않는다.
 
-네이버 `naverFollowCamera()`는 순수 함수로 target/zoom/tilt/bearing을 계산한다. 따라가기가 켜지고 제스처 정지 중이 아니며 내 위치가 있으면 새 표본을 합쳐 **최대 초당 1회** 카메라를 갱신한다. target은 내 위치, tilt는 50도, bearing은 내 heading → 전방점 방위 → 현재 bearing 순서다. 동일 좌표는 방위가 없는 것으로 본다. 그룹장까지 직선 거리의 줌은 `<200m: 17`, `<600m: 16`, `<1.5km: 15`, `<4km: 14`, 나머지 13이며, 그룹장 본인은 자기 위치·줌 16을 사용한다. 그룹장 현재 위치가 사라졌으나 따라가기 설정이 남아 있으면 줌 16과 남은 궤적/현재 방위를 사용한다. `NCameraUpdate.withParams`에 `NCameraAnimation.linear`·800ms 애니메이션을 지정한다. `NCameraUpdateReason.gesture`는 조작부 표시와 5초 정지를 갱신하며, 따라가기 해제 시 보류 요청과 진행 중 전환을 취소한다. 재중심은 내 위치·줌 16이고 tilt/bearing은 생략해 현재값을 유지한다.
+`naverFollowCamera()`는 SDK와 무관하게 내 위치 중심·tilt 50·진행 방향·거리 줌을 계산한다. 방위는 내 heading → 전방점 방위 → 현재 방위 순서다. 대상까지 거리 `<200m: 17`, `<600m: 16`, `<1.5km: 15`, `<4km: 14`, 나머지 13을 쓴다. 상대 위치가 없으면 내 위치·줌 16이다. 네이버는 최대 초당 1회 최신 표본으로 `NCameraUpdate.withParams`에 linear·800ms를 설정한다. 브이월드도 같은 중심·거리 줌을 쓰며 2D 공급원이라 tilt는 적용하지 않는다.
+
+수동 제스처 중에는 자동 이동을 멈추고 마지막 조작 종료·카메라 정지 후 5초 뒤 재개한다. 내 위치 버튼은 줌을 유지한 채 내 위치로 이동한다. 방향 정렬은 따라가기 여부와 무관하게 즉시 heading 기준으로 회전하고 이후 heading 갱신을 반영한다. 다시 누르면 북쪽 위(0도)를 유지한다. 네이버 `withParams`에서 생략한 줌·tilt는 유지하고, 브이월드는 카메라 rotation에 반대 부호를 사용한다. 따라가기 해제는 보류 카메라 요청과 진행 중 전환을 취소한다.
 
 **GPS·권한.** `AppServices` 기본 소스는 `GeolocatorLocationSource()`이며 테스트용 소스 주입도 유지한다. 서비스 확인 → checkPermission → denied일 때 requestPermission → 앱 권한 상태 변환 순서다. whileInUse/always는 granted, denied/unableToDetermine는 denied, deniedForever는 deniedForever다. 서비스 꺼짐은 serviceOff이며 권한 요청 도중 서비스가 꺼지는 경우도 다시 확인한다.
 
@@ -218,11 +218,11 @@ NAVER 로고는 왼쪽 아래에 상시 유지하고 플로팅 바 여백을 확
 - hasSpeed/hasHeading/hasAccuracy가 false인 값과 음수·유효하지 않은 선택 필드는 null로 전달한다. watch 구독 취소는 네이티브 위치 스트림 취소로 전파된다.
 - 백그라운드 권한·위치 포그라운드 서비스·iOS location background mode는 추가하지 않는다. M1과 동일하게 앱 프로세스와 Dart 스트림의 포그라운드 수명만 다룬다.
 
-**화면 연결.** 폰은 패널 높이의 지도 45% / 목록 55%다. 차량은 지도 아래 높이 112의 가로 멤버 띠를 놓고 기존 마이크 상태·음량 기능을 유지한다. 플로팅 바에는 location/locationoff(공유), navigation(따라가기), focus(재중심)를 추가하며 좁은 폭에서는 가로 스크롤한다. 공유 꺼짐에서 탭하면 §12의 모달 동의가 true일 때만 start(), 켜짐에서 탭하면 stop()한다. 사용할 수 없으면 비활성이고 위치 오류·followError는 기존 오류 영역에 표시한다. 그룹장 자신이거나 그룹장 현재 위치가 없으면 따라가기 버튼은 비활성이다. 차량에서 켜기는 M1의 정차 규칙을 지킨다.
+**화면 연결(M5a).** 입장은 지도가 없는 통화 방이다. 다른 멤버 카드 동의 후만 지도를 표시한다. 폰 세로는 위 70% 지도·아래 30% 통화 방, 폰 가로와 차량 주 패널은 좌 70%·우 30%다. 플로팅 바의 위치 관련 버튼은 제거하고 지도 내부 버튼으로 옮긴다. 전체 화면에서는 통화 방 대신 참여자 아바타 인디케이터와 하단 음성·방 관리 바를 표시한다. 세부 흐름·워터마크·테마는 §15를 따른다.
 
 방 목록 하단 map 아이콘은 최종 공급원을 전달해 `MapCreditsScreen`을 연다. 네이버는 “지도: 네이버 지도 (NAVER Cloud Platform Maps)·지도 왼쪽 아래 NAVER 로고를 누르면 법적 고지와 오픈소스 정보”를, 브이월드는 기존 출처·국토교통부의 “브이월드 배경지도”·공공누리 제1유형·“수정·가공하지 않음”을 표시한다. 두 공급원 모두 “위치는 방이 있는 동안만 서버(국내 리전)에 남습니다” 안내와 chevron 아이콘의 `showLicensePage` 연결을 유지한다. 위치 SVG 7종은 Fable이 공급한 기존 자산을 사용한다. 동작 테스트는 메모리 아이콘 번들을 사용한다.
 
-**seq stream.** LocationShare는 프로세스에서 한 번 생성한 암호학적 난수 8바이트를 16자 소문자 hex stream으로 보낸다. 같은 실행의 stop/start·방 변경에도 stream과 기존 세션 seq 증가를 유지한다. POST 본문·위치 응답·SSE·hello의 LocationFix에 stream이 추가된다. 서버는 16자 hex를 검증하고 lastSeq를 `(handle, stream)`별로 보관한다. 새 stream의 seq 0은 이전 stream의 큰 seq와 비교하지 않고, 현재 위치는 여전히 handle당 한 건으로 덮어쓴다. 기존 handle별 400ms 속도 제한은 유지하므로 stream 변경으로 우회할 수 없다. 앱도 stream이 바뀐 위치를 받아들이고 그룹장 궤적은 stream별 마지막 seq로 중복 제거한다. 나머지 궤적·수신 시각·방 삭제 규칙은 M1과 같다. 옛 hello의 stream 누락은 앱에서 빈 문자열로 읽지만 새 서버 POST에는 유효한 stream이 필수다.
+**seq stream.** LocationShare는 프로세스에서 한 번 생성한 암호학적 난수 8바이트를 16자 소문자 hex stream으로 보낸다. 같은 실행의 stop/start·방 변경에도 stream과 기존 세션 seq 증가를 유지한다. POST 본문·위치 응답·SSE·hello의 LocationFix에 stream이 추가된다. 서버는 16자 hex를 검증하고 lastSeq를 `(handle, stream)`별로 보관한다. 새 stream의 seq 0은 이전 stream의 큰 seq와 비교하지 않고, 현재 위치는 여전히 handle당 한 건으로 덮어쓴다. 기존 handle별 400ms 속도 제한은 유지하므로 stream 변경으로 우회할 수 없다. 앱도 stream이 바뀐 위치를 받아들이고 각 대상의 궤적은 handle/stream별 마지막 seq로 중복 제거한다. 나머지 궤적·수신 시각·방 삭제 규칙은 M1과 같다. 옛 hello의 stream 누락은 앱에서 빈 문자열로 읽지만 새 서버 POST에는 유효한 stream이 필수다.
 
 검사·빌드 예시:
 
@@ -242,8 +242,38 @@ flutter build apk --release --no-pub --target-platform android-arm64 --dart-defi
 
 폰의 카드 폭은 화면의 90% 이내·최대 420, 차량은 최대 560이다. 호출 위치의 `ControlScale`을 다이얼로그 경로에 전달해 폰 56dp·차량 80dp 조작부를 유지한다. 제목·본문과 선택 상세 영역은 스크롤할 수 있고 하단 응답 버튼은 고정한다. 동의는 기존 `check`, 미동의는 `back`, 안내 닫기는 `check` 아이콘의 `PanelButton`만 사용하며 버튼 글자는 표시하지 않는다. 접근성 라벨·선택 상태는 유지한다.
 
-위치 공유 팝업은 자신을 제외한 현재 방 수신자의 표시 이름, “같은 방 참여자에게 내 차 위치를 보여 줍니다”, “방을 나가거나 위치 공유 아이콘을 다시 누르면 끝납니다”, “위치는 방이 있는 동안만 서버(국내)에 남습니다”를 표시한다. 미동의 시에는 “동의하지 않아 위치 공유 기능을 사용할 수 없습니다” 또는 “동의하지 않아 그룹장 따라가기 기능을 사용할 수 없습니다” 안내를 표시한다. 시작·동의 대기 중에는 중복 조작을 막는다.
+M5a는 프로필의 따라가기·따라가기 요청·따라가기 중지에 이 모달을 사용한다. 본문은 대상 또는 요청자의 표시 이름, 공유 범위, 종료 조건, 국내 서버의 보관 기간을 알린다. 미동의 안내와 시작 순서는 §15를 따른다. 시작·동의 대기 중에는 중복 조작을 막고, 여러 요청은 하나씩 처리한다.
 
 `screens/phone/legal_consent.dart`는 로그인 뒤의 전체 동의 페이지다. 차량에서는 `CarShell`의 주 패널을 채우고 두 항목의 체크·전문 펼치기를 제공한다. 체크는 `check` 아이콘의 선택 상태와 색으로, 전문 펼치기는 `chevron`으로 표시한다. 두 문서가 로드되고 두 항목 모두 체크됐을 때만 하단 동의 버튼을 활성화한다. 전문은 `rootBundle.loadString('assets/legal/privacy.md')`와 `location.md`로 읽는다. 원문 파일을 수정하지 않고 `#`·`##` 줄은 제목, `-` 줄은 글머리 기호, 나머지는 본문으로 그리며 펼친 전문에는 별도 스크롤 영역을 둔다. 추가 마크다운 패키지는 사용하지 않는다.
 
 검증 대상은 `unavo_dialog_test.dart`, `room_consent_flow_test.dart`, `legal_consent_test.dart`, 갱신한 `location_share_test.dart`·`room_session_location_test.dart`다. 새 위젯 테스트는 30초 timeout과 유한한 pump를 사용하고 이벤트 핸들러 안에서 expect하지 않는다. M4 작업에서는 format·analyze만 수행하며 Flutter test/build는 Fable이 별도로 실행한다.
+
+## 15. 방 화면 UX(M5a)
+
+**입장·따라가기.** 입장 시 지도 없이 멤버 카드와 음성·방 관리 바를 표시한다. 방 화면의 “우나보 UNAVO” 상단 제목만 제거하고 메인 화면의 제목·기존 워드마크는 유지한다. `MemberAvatar`는 표시 이름 첫 글자의 원형 아바타이며 이후 사진으로 바꿀 경계다. 내 카드 탭은 동작하지 않는다. 다른 카드 탭은 `showConsentDialog(title: '따라가기')`를 열고 표시 이름, “○○ 님의 위치를 따라갑니다”, “내 위치도 같은 방 참여자에게 보입니다”, “방을 나가거나 따라가기를 중지하면 끝납니다”, “위치는 방이 있는 동안만 서버(국내)에 남습니다”를 표시한다. 이것이 요청자의 위치 공유 동의다. 동의 → 꺼져 있으면 `LocationShare.start()` → 성공 시 follow POST → 지도 표시 순서다. 미동의는 “동의하지 않아 따라가기 기능을 사용할 수 없습니다” 안내다.
+
+대상은 follow-request를 받으면 “따라가기 요청” 모달로 요청자 이름·공유 범위·종료 조건·보관 기간을 확인한다. 수락은 `start()` 성공 후 accepted:true, 미동의나 권한 실패는 accepted:false를 보낸다. 이미 공유 중이면 추가 모달 없이 수락한다. 서버도 현재 fix 또는 이전 수락으로 공유 중임을 아는 대상은 즉시 수락한다. 요청자의 거절 안내는 “○○ 님이 위치 공유에 동의하지 않았습니다”이며 followTarget과 지도를 해제한다. 대기 중 취소·방 변경·퇴장 뒤의 늦은 응답은 적용하지 않는다.
+
+같은 대상 카드를 다시 탭하면 “따라가기 중지” 모달이다. check 선택 시 follow DELETE·지도 닫힘이며 내 공유는 계속한다. 지도 안 locationoff 버튼은 내 공유와 따라가기를 함께 중지한다. 방을 나가면 모두 종료한다. 동의 모달은 가운데·차단형·아이콘 버튼만 사용하는 M4 규칙을 유지한다.
+
+**배치.** 폰은 SafeArea 전체를 사용한다. 세로 지도:통화 방 7:3(상/하), 가로는 7:3(좌/우)다. 차량은 CarShell 주 패널을 7:3(좌/우)로 쓴다. 폰 세로의 작은 통화 영역에는 가로 멤버 띠, 옆 통화 영역에는 세로 목록을 둔다. 바는 폰 SafeArea 바닥 또는 차량 주 패널 바닥 +8dp에 고정한다. 마이크·출력 경로(폰)·필요 시 재연결(폰)·음량·나가기만 허용한다. 음량은 폰·차량 모두 표시하고 수신 이득 상한 100%와 기존 차량 시스템 음량 연동 스위치는 유지한다. 좁은 패널의 버튼과 확장 음량 조작은 가로 스크롤한다.
+
+`UnavoWatermark`는 Rye의 “Una Vox”(40)·“UNAVO”(80)를 행 높이 1로 바로 붙이고 통화 영역 중앙에 opacity 0.10·IgnorePointer로 표시한다. 지도에는 배치하지 않는다. 전체 화면은 같은 지도 상태를 GlobalKey로 이동시켜 통화를 유지하고 통화 방은 숨긴다. 하단 바는 계속 보이며 좌상단에는 최대 6명 원형 아바타(폰 40·차량 56dp)를 가로로 놓는다. 말할 때 테두리 3dp와 바깥 글로우는 새 토큰 `UnavoColors.speaking = #7CFF5B`다. 자기 발화는 localSpeaking, 원격 발화는 speaking 집합을 따른다.
+
+**지도 조작.** 우상단 세로 묶음은 흰 원·그림자·진회색 아이콘, 지름 폰44/차량64dp, 간격10dp다. focus는 줌 유지 재중심, compass는 heading/북쪽 위 토글, locationoff는 공유 중지다. 전체 화면에서는 collapse를 추가한다. 평상시 좌하단 로고 위에는 흰색 60% expand 원을 둔다. 네이버 로고는 클릭 가능하고 전체 화면의 바 위에 여백을 확보한다. 타일 변형은 하지 않는다. 신규 compass/expand/collapse SVG는 Fable이 공급하며 테스트는 메모리 icon_bundle을 사용한다. 마커·카메라는 §13을 따른다.
+
+**자동 테마.** 수동 override·라이트/다크 토글은 전역 제거하고 저장된 수동 값은 읽지 않는다. ThemeMode.system 및 `MediaQuery.platformBrightness`가 앱·배경·지도 야간 모드의 출처다. Android Automotive(Pleos)는 OS가 전달하는 차량 주야간 모드, iOS는 시스템 다크 모드(사용자 설정의 일몰 자동 포함)를 따른다. iOS에는 주변 조도 센서의 공개 API가 없어 직접 센서를 읽지 않는다. Android 조도 센서 연결은 후속 결정 항목이다.
+
+**서버 follow 프로토콜.** 모두 인증된 같은 방 멤버에게만 허용한다. `leader`는 방장 의미를 유지한다.
+
+| 메서드·경로 | 본문 | 응답·SSE |
+|---|---|---|
+| `POST /v1/rooms/:code/follow` | `{target}` | 202. 공유 중이면 요청자에게 `follow-response {target,accepted:true}`, 아니면 대상에게 `follow-request {requester}` |
+| `POST /v1/rooms/:code/follow/respond` | `{requester,accepted}` | 202. 수락 시 같은 대상의 대기 요청들을 함께 수락, 거절 시 지정 요청만 해제. 완료·취소된 요청에는 409 FOLLOW_EXPIRED |
+| `DELETE /v1/rooms/:code/follow` | — | 202. 요청자의 관계만 해제하며 공유는 유지 |
+
+관계 변경 때 `trails {trails:{handle:[fix]}}` SSE로 모든 참여자의 궤적 캐시를 맞춘다. 대상 변경·취소·응답 완료에는 대상에게 `follow-cancelled {requester}`를 보내 대기 모달을 중복 처리하지 않게 한다. 이미 열린 M4 모달은 사용자의 응답으로 닫되 취소된 요청의 동의는 실행하지 않는다. hello에는 수신자 자신의 followTarget·followRequests와 전체 positions/trails 스냅샷이 있다. 마지막 팔로워·퇴장·disconnect 정리는 §12를 따른다.
+
+**확인과 남은 결정.** Flutter 테스트는 NaverMap을 pump하지 않고 facade·브이월드·SDK 마커 생성 함수로 검사한다. 새 위젯 테스트는 고정 pump·30초 timeout·핸들러 밖 검증을 사용한다. M5a 작업에서 Flutter test/build는 실행하지 않으며 Fable이 별도 실행한다. 네이티브 지도·주야간 모드·로고 클릭·폰 회전·실차 음성/GPS는 기기 검증 대상이다.
+
+지시문의 두 제약은 그대로 유지했다. 공유를 한 번도 켜지 않은 차량은 정차 표본이 없어 첫 따라가기 진입이 막히므로, 정차 관측을 별도로 허용할지는 후속 결정이 필요하다. 또한 따라가기만 중지하거나 상대 요청만 수락한 사람은 지도가 없어 locationoff에 접근할 수 없으며, 현재 지시에서 허용한 공유 종료 경로는 방 나가기다. 통화 방 안의 별도 공유 중지 버튼·내 카드 동작은 이번 범위에 추가하지 않았다.

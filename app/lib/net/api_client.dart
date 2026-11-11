@@ -124,6 +124,27 @@ class ApiClient {
     await _request('DELETE', '/v1/rooms/${_segment(code)}/location');
   }
 
+  Future<void> follow(String code, String target) async {
+    await _request('POST', '/v1/rooms/${_segment(code)}/follow', {
+      'target': target,
+    });
+  }
+
+  Future<void> respondFollow(
+    String code,
+    String requester, {
+    required bool accepted,
+  }) async {
+    await _request('POST', '/v1/rooms/${_segment(code)}/follow/respond', {
+      'requester': requester,
+      'accepted': accepted,
+    });
+  }
+
+  Future<void> stopFollowing(String code) async {
+    await _request('DELETE', '/v1/rooms/${_segment(code)}/follow');
+  }
+
   Future<void> sendSignal(
     String code,
     String to,
@@ -364,10 +385,26 @@ class ApiClient {
       'signal',
       'location',
       'location-stopped',
+      'follow-request',
+      'follow-response',
+      'follow-cancelled',
+      'trails',
     }.contains(event.name))
       return null;
     final data = jsonDecode(event.data) as JsonMap;
     switch (event.name) {
+      case 'follow-request':
+        return FollowRequest(data['requester'] as String);
+      case 'follow-cancelled':
+        return FollowCancelled(data['requester'] as String);
+      case 'follow-response':
+        return FollowResponse(
+          data['target'] as String,
+          data['accepted'] as bool,
+          reason: data['reason'] as String?,
+        );
+      case 'trails':
+        return TrailsUpdated(locationTrailsFromJson(data));
       case 'hello':
         return Hello.fromJson(data);
       case 'location':

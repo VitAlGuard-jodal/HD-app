@@ -184,7 +184,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('폰 버튼 7개·볼륨 확장, 차량은 슬라이더 없이 80dp 버튼 5개', (tester) async {
+  testWidgets('폰 음성·방 관리 버튼 4개·볼륨 확장, 차량은 80dp 버튼 3개', (tester) async {
     final semantics = tester.ensureSemantics();
     SharedPreferences.setMockInitialValues({
       'token': 'test',
@@ -226,7 +226,7 @@ void main() {
       final controls = find.byKey(const ValueKey('room-controls'));
       expect(
         find.descendant(of: controls, matching: find.byType(FloatingBarButton)),
-        findsNWidgets(car ? 5 : 7),
+        findsNWidgets(car ? 3 : 4),
       );
       expect(
         find.descendant(of: controls, matching: find.byType(Text)),
@@ -235,41 +235,26 @@ void main() {
       expect(find.byTooltip('방 나가기'), findsOneWidget);
       expect(find.byTooltip('통화 참여'), findsNothing);
       expect(find.byTooltip('통화 끊기'), findsNothing);
-      expect(find.byType(RoomMap), findsOneWidget);
-      final locationButtons = tester.widgetList<FloatingBarButton>(
-        find.descendant(of: controls, matching: find.byType(FloatingBarButton)),
+      expect(find.byType(RoomMap), findsNothing);
+      final icons = tester
+          .widgetList<FloatingBarButton>(
+            find.descendant(
+              of: controls,
+              matching: find.byType(FloatingBarButton),
+            ),
+          )
+          .map((button) => button.icon);
+      expect(
+        icons,
+        isNot(contains(anyOf('locationoff', 'navigation', 'focus'))),
       );
       expect(
-        locationButtons.map((button) => button.icon),
-        containsAll(['locationoff', 'navigation', 'focus']),
+        tester.getRect(controls).bottom,
+        closeTo(tester.getRect(find.byType(RoomScreen)).bottom - 8, .01),
       );
-      expect(
-        locationButtons
-            .firstWhere((button) => button.icon == 'navigation')
-            .onPressed,
-        isNull,
-      );
-      expect(
-        locationButtons
-            .firstWhere((button) => button.icon == 'focus')
-            .onPressed,
-        isNull,
-      );
-      if (!car) {
-        expect(
-          tester.getSize(find.byType(RoomMap)).height,
-          closeTo(tester.getSize(find.byType(RoomScreen)).height * .45, .01),
-        );
-      }
       if (car) {
-        expect(
-          tester
-              .getSize(find.byKey(const ValueKey('room-member-strip')))
-              .height,
-          112,
-        );
         expect(find.byType(Slider), findsNothing);
-        expect(find.byTooltip('통화 음량 100%'), findsNothing);
+        expect(find.byTooltip('통화 음량 100%'), findsOneWidget);
         expect(find.byTooltip(services.rooms.outputLabel), findsNothing);
         for (final label in ['음소거', '방 나가기']) {
           final button = find.byTooltip(label);
@@ -297,7 +282,7 @@ void main() {
             of: controls,
             matching: find.byType(FloatingBarButton),
           ),
-          findsNWidgets(5),
+          findsNWidgets(3),
         );
         expect(find.bySemanticsLabel(RegExp('다시 연결')), findsOneWidget);
         await tester.pump(const Duration(seconds: 10));
@@ -317,15 +302,7 @@ void main() {
       final drag = await tester.startGesture(tester.getCenter(slider));
       await drag.moveBy(const Offset(-40, 0));
       await tester.pump(const Duration(seconds: 4));
-      if (!car)
-        expect(
-          tester
-              .widget<AnimatedOpacity>(
-                find.byKey(const ValueKey('floating-bar-opacity')),
-              )
-              .opacity,
-          1,
-        );
+      expect(find.byKey(const ValueKey('room-controls')), findsOneWidget);
       await drag.up();
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 1999));

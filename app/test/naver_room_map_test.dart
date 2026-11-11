@@ -1,4 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_naver_map/flutter_naver_map.dart';
+import 'package:unavo/map/naver_room_map.dart';
+import 'package:unavo/map/room_map_widgets.dart';
 import 'package:unavo/map/room_map_geometry.dart';
 import 'package:unavo/net/models.dart';
 
@@ -13,6 +16,32 @@ LocationFix _fix(String handle, double lat, double lng, {double? heading}) =>
     );
 
 void main() {
+  test('SDK 마커는 내 GPS 불투명·최상위, 상대 차량 0.55와 폰32/차량44를 사용한다', () {
+    for (final car in [false, true]) {
+      final self = roomNaverMarker(
+        handle: 'bob',
+        fix: _fix('bob', 37, 127),
+        icon: const NOverlayImage.fromAssetImage('test-only.png'),
+        self: true,
+        car: car,
+      );
+      final other = roomNaverMarker(
+        handle: 'alice',
+        fix: _fix('alice', 37, 127),
+        icon: const NOverlayImage.fromAssetImage('test-only.png'),
+        self: false,
+        car: car,
+      );
+      expect(self.alpha, 1);
+      expect(other.alpha, .55);
+      expect(self.globalZIndex, greaterThan(other.globalZIndex));
+      expect(RoomMarkerStyle(self: false, car: car).diameter, car ? 44 : 32);
+      expect(other.size, RoomMarkerStyle(self: false, car: car).size);
+      expect(self.anchor, NPoint.relativeCenter);
+      expect(self.isFlat, isTrue);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   test('거리 줌은 모든 임계값 직전과 경계에서 지정 단계로 바뀐다', () {
     for (final (meters, zoom) in <(double, double)>[
       (0, 17),

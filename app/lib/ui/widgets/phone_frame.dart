@@ -9,7 +9,6 @@ import '../appearance.dart';
 import '../backdrop.dart';
 import '../phone_frame_layout.dart';
 import '../theme.dart';
-import 'panel_button.dart';
 import 'floating_bar.dart';
 
 class PhoneFrame extends StatelessWidget {
@@ -96,17 +95,6 @@ class PhoneFrame extends StatelessWidget {
                         style: UnavoType.western.copyWith(fontSize: 12),
                       ),
                       const Spacer(),
-                      Container(
-                        color: UnavoColors.panel,
-                        child: PanelButton(
-                          label: brightness == Brightness.dark
-                              ? '낮 테마 보기'
-                              : '밤 테마 보기',
-                          icon: brightness == Brightness.dark ? 'moon' : 'sun',
-                          iconOnly: true,
-                          onPressed: () => appearance.toggle(context),
-                        ),
-                      ),
                     ],
                   ),
                 ),

@@ -41,18 +41,24 @@ void main() {
       f.open(positions: [previous], trail: [previous]);
       f.event(LocationUpdated(restarted));
       expect(f.session.positions['alice'], restarted);
-      expect(f.session.leaderTrail, [previous, restarted]);
+      expect(f.session.trailOf('alice'), [previous, restarted]);
       f.event(LocationUpdated(restarted));
-      expect(f.session.leaderTrail, [previous, restarted]);
+      expect(f.session.trailOf('alice'), [previous, restarted]);
       final resumed = _fix('alice', 101);
       f.event(LocationUpdated(resumed));
-      expect(f.session.leaderTrail, [previous, restarted, resumed]);
+      expect(f.session.trailOf('alice'), [previous, restarted, resumed]);
       f.event(
-        Hello('bob', f.api.members, 'alice', [
-          resumed,
-        ], LocationTrail('alice', [previous, restarted, resumed, previous])),
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          [resumed],
+          {
+            'alice': [previous, restarted, resumed, previous],
+          },
+        ),
       );
-      expect(f.session.leaderTrail, [previous, restarted, resumed]);
+      expect(f.session.trailOf('alice'), [previous, restarted, resumed]);
       f.dispose();
     });
   });
@@ -66,18 +72,18 @@ void main() {
       );
       expect(f.session.leaderHandle, 'alice');
       expect(f.session.positions.keys, unorderedEquals(['alice', 'bob']));
-      expect(f.session.leaderTrail.map((fix) => fix.seq), [0, 1]);
+      expect(f.session.trailOf('alice').map((fix) => fix.seq), [0, 1]);
       var notifications = 0;
       f.session.addListener(() => notifications++);
       f.event(LocationUpdated(_fix('alice', 2)));
       expect(f.session.positions['alice']?.seq, 2);
-      expect(f.session.leaderTrail.map((fix) => fix.seq), [0, 1, 2]);
+      expect(f.session.trailOf('alice').map((fix) => fix.seq), [0, 1, 2]);
       expect(notifications, 1);
       f.event(LocationUpdated(_fix('alice', 2)));
       f.event(LocationUpdated(_fix('alice', 1)));
       expect(notifications, 1);
       f.event(LocationUpdated(_fix('bob', 1)));
-      expect(f.session.leaderTrail, hasLength(3));
+      expect(f.session.trailOf('alice'), hasLength(3));
       expect(notifications, 2);
       f.dispose();
     });
@@ -89,21 +95,19 @@ void main() {
       f.open(positions: [_fix('bob', 0)]);
       final trail = List.generate(7205, (seq) => _fix('alice', seq));
       f.event(
-        Hello('bob', f.api.members, 'alice', [
-          trail.last,
-        ], LocationTrail('alice', trail)),
+        Hello('bob', f.api.members, 'alice', [trail.last], {'alice': trail}),
       );
       expect(f.session.positions.keys, ['alice']);
-      expect(f.session.leaderTrail, hasLength(7200));
-      expect(f.session.leaderTrail.first.seq, 5);
+      expect(f.session.trailOf('alice'), hasLength(7200));
+      expect(f.session.trailOf('alice').first.seq, 5);
       f.event(LocationUpdated(_fix('alice', 7205)));
-      expect(f.session.leaderTrail, hasLength(7200));
-      expect(f.session.leaderTrail.first.seq, 6);
-      expect(f.session.leaderTrail.last.seq, 7205);
+      expect(f.session.trailOf('alice'), hasLength(7200));
+      expect(f.session.trailOf('alice').first.seq, 6);
+      expect(f.session.trailOf('alice').last.seq, 7205);
       f.event(const LocationStopped('alice'));
       f.event(LocationUpdated(_fix('alice', 0)));
-      expect(f.session.leaderTrail.first.seq, 6); // 이미 잘린 seq도 재누적하지 않는다.
-      expect(f.session.leaderTrail.last.seq, 7205);
+      expect(f.session.trailOf('alice').first.seq, 6); // 이미 잘린 seq도 재누적하지 않는다.
+      expect(f.session.trailOf('alice').last.seq, 7205);
       f.dispose();
     });
   });
@@ -119,7 +123,7 @@ void main() {
       f.session.addListener(() => notifications++);
       f.event(const LocationStopped('alice'));
       expect(f.session.positions.containsKey('alice'), isFalse);
-      expect(f.session.leaderTrail, hasLength(1));
+      expect(f.session.trailOf('alice'), hasLength(1));
       expect(notifications, 1);
       f.event(const LocationStopped('alice'));
       expect(notifications, 1);
@@ -127,7 +131,7 @@ void main() {
       f.event(const MemberLeft('bob'));
       expect(f.session.positions, isEmpty);
       expect(f.session.leaderHandle, 'alice');
-      expect(f.session.leaderTrail, hasLength(1));
+      expect(f.session.trailOf('alice'), hasLength(1));
       f.dispose();
     });
   });
@@ -138,40 +142,40 @@ void main() {
       f.open();
       var notifications = 0;
       f.session.addListener(() => notifications++);
-      f.session.setFollowLeader(true);
-      expect(f.session.followLeader, isFalse);
+      _finish(clock, f.session.startFollowing('alice'));
+      expect(f.session.followTarget, isNull);
       expect(f.session.followError, '정차 후 설정할 수 있습니다');
       expect(notifications, 1);
-      f.session.setFollowLeader(true);
+      _finish(clock, f.session.startFollowing('alice'));
       expect(notifications, 1);
       f.startSharing();
       for (var second = 0; second <= 3; second++) {
         if (second > 0) clock.elapse(const Duration(seconds: 1));
         f.sample(lat: 37 + second * .001, speed: 3);
       }
-      f.session.setFollowLeader(true);
-      expect(f.session.followLeader, isFalse);
+      _finish(clock, f.session.startFollowing('alice'));
+      expect(f.session.followTarget, isNull);
       for (var second = 0; second < 4; second++) {
         clock.elapse(const Duration(seconds: 1));
         f.sample(lat: 37.003, speed: 0);
       }
       expect(f.session.locationShare.isStationary, isTrue);
-      f.session.setFollowLeader(true);
-      expect(f.session.followLeader, isTrue);
+      _finish(clock, f.session.startFollowing('alice'));
+      expect(f.session.followTarget, 'alice');
       expect(f.session.followError, isNull);
       final enabledNotifications = notifications;
-      f.session.setFollowLeader(true);
+      _finish(clock, f.session.startFollowing('alice'));
       expect(notifications, enabledNotifications);
       clock.elapse(const Duration(seconds: 1));
       f.sample(lat: 38, speed: 5);
       expect(f.session.locationShare.isStationary, isFalse);
-      expect(f.session.followLeader, isTrue); // 이미 켠 따라가기는 이동 중에도 유지한다.
+      expect(f.session.followTarget, 'alice'); // 이미 켠 따라가기는 이동 중에도 유지한다.
       final movingNotifications = notifications;
-      f.session.setFollowLeader(true);
+      _finish(clock, f.session.startFollowing('alice'));
       expect(f.session.followError, isNull);
       expect(notifications, movingNotifications);
-      f.session.setFollowLeader(false);
-      expect(f.session.followLeader, isFalse);
+      _finish(clock, f.session.stopFollowing());
+      expect(f.session.followTarget, isNull);
       expect(f.session.followError, isNull);
       f.dispose();
     });
@@ -181,8 +185,9 @@ void main() {
     fakeAsync((clock) {
       final phone = _Fixture.create(clock);
       phone.open();
-      phone.session.setFollowLeader(true);
-      expect(phone.session.followLeader, isTrue);
+      phone.startSharing();
+      _finish(clock, phone.session.startFollowing('alice'));
+      expect(phone.session.followTarget, 'alice');
       expect(phone.session.followError, isNull);
       phone.dispose();
       final leader = _Fixture.create(
@@ -193,9 +198,9 @@ void main() {
       leader.open();
       var notifications = 0;
       leader.session.addListener(() => notifications++);
-      leader.session.setFollowLeader(true);
-      leader.session.setFollowLeader(false);
-      expect(leader.session.followLeader, isFalse);
+      _finish(clock, leader.session.startFollowing('alice'));
+      _finish(clock, leader.session.stopFollowing());
+      expect(leader.session.followTarget, isNull);
       expect(leader.session.followError, isNull);
       expect(notifications, 0);
       leader.dispose();
@@ -209,24 +214,79 @@ void main() {
       f.startSharing();
       f.sample();
       expect(f.session.positions['alice']?.seq, 0);
-      expect(f.session.leaderTrail.single.seq, 0);
+      expect(f.session.trailOf('alice').single.seq, 0);
       clock.elapse(const Duration(seconds: 1));
       f.sample(lat: 37.001);
-      expect(f.session.leaderTrail.map((fix) => fix.seq), [0, 1]);
+      expect(f.session.trailOf('alice').map((fix) => fix.seq), [0, 1]);
       _finish(clock, f.session.locationShare.stop());
       expect(f.session.positions, isEmpty);
-      expect(f.session.leaderTrail, hasLength(2));
+      expect(f.session.trailOf('alice'), hasLength(2));
       f.dispose();
     });
   });
+
+  test('방장도 다른 참여자를 따르며 대상 변경·거절·마지막 팔로워 궤적 삭제를 반영한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock, handle: 'alice');
+      f.api.members = [...f.api.members, const Member('charlie', '찰리', '3')];
+      f.open();
+      f.startSharing();
+      _finish(clock, f.session.startFollowing('bob'));
+      expect(f.session.followTarget, 'bob');
+      expect(f.api.follows, ['bob']);
+      f.event(
+        TrailsUpdated({
+          'bob': [_fix('bob', 0)],
+          'charlie': [_fix('charlie', 0)],
+        }),
+      );
+      f.event(LocationUpdated(_fix('bob', 1)));
+      expect(f.session.trailOf('bob').map((fix) => fix.seq), [0, 1]);
+      expect(f.session.trailOf('charlie').map((fix) => fix.seq), [0]);
+      _finish(clock, f.session.startFollowing('charlie'));
+      f.event(const FollowResponse('bob', false)); // 이전 대상의 늦은 응답
+      expect(f.session.followTarget, 'charlie');
+      f.event(const FollowResponse('charlie', false));
+      expect(f.session.followTarget, isNull);
+      expect(f.session.takeFollowNotice()?.target, 'charlie');
+      expect(f.session.locationShare.sharing, isTrue);
+      f.event(const TrailsUpdated({}));
+      expect(f.session.trailOf('bob'), isEmpty);
+      expect(f.session.trailOf('charlie'), isEmpty);
+      f.dispose();
+    });
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('진행 중 follow POST 뒤 중지는 DELETE로 정리하고 늦은 수락으로 되살리지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      f.startSharing();
+      final gate = Completer<void>();
+      f.api.followGate = gate.future;
+      final pending = f.session.startFollowing('alice');
+      clock.flushMicrotasks();
+      final stopping = f.session.stopFollowing();
+      clock.flushMicrotasks();
+      expect(f.session.followTarget, isNull);
+      expect(f.api.unfollows, 0);
+      gate.complete();
+      _finish(clock, pending);
+      _finish(clock, stopping);
+      expect(f.api.unfollows, 1);
+      f.event(const FollowResponse('alice', true));
+      expect(f.session.followTarget, isNull);
+      f.dispose();
+    });
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   for (final action in ['leave', 'forget', 'change']) {
     test('$action는 공유를 자동 중지하고 방의 위치·궤적·따라가기 상태를 초기화한다', () {
       fakeAsync((clock) {
         final f = _Fixture.create(clock);
         f.open(positions: [_fix('alice', 0)], trail: [_fix('alice', 0)]);
-        f.session.setFollowLeader(true);
         f.startSharing();
+        _finish(clock, f.session.startFollowing('alice'));
         f.sample();
         switch (action) {
           case 'leave':
@@ -241,9 +301,9 @@ void main() {
         expect(f.source.cancellations, 1);
         expect(f.http.deletes.single.uri.path, '/v1/rooms/ABC123/location');
         expect(f.session.positions, isEmpty);
-        expect(f.session.leaderTrail, isEmpty);
+        expect(f.session.trailOf('alice'), isEmpty);
         expect(f.session.leaderHandle, isNull);
-        expect(f.session.followLeader, isFalse);
+        expect(f.session.followTarget, isNull);
         expect(f.session.followError, isNull);
         expect(f.source.watches, 1);
         if (action == 'leave') expect(f.api.leaves, 1);
@@ -311,13 +371,7 @@ class _Fixture {
     _finish(clock, session.open('ABC123'));
     _finish(clock, session.leaveCall()); // 위치 테스트에서는 자동 통화를 시작하지 않는다.
     event(
-      Hello(
-        store.handle!,
-        api.members,
-        'alice',
-        positions,
-        LocationTrail('alice', trail),
-      ),
+      Hello(store.handle!, api.members, 'alice', positions, {'alice': trail}),
     );
   }
 
@@ -360,6 +414,20 @@ class _Api extends ApiClient {
     Member('alice', '앨리스', '1'),
     Member('bob', '보비', '2'),
   ];
+  final follows = <String>[];
+  Future<void>? followGate;
+  int unfollows = 0;
+  @override
+  Future<void> follow(String code, String target) async {
+    follows.add(target);
+    await followGate;
+  }
+
+  @override
+  Future<void> stopFollowing(String code) async {
+    unfollows++;
+  }
+
   int leaves = 0;
   Future<void> close() => events.close();
   @override

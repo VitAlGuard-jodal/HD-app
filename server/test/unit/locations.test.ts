@@ -26,83 +26,87 @@ test("위치 표본은 필수 값·유한수·범위·정수 순번을 검증한
       { acc: -1 }, { speed: -1 }, { heading: -1 }, { heading: 360.1 }, { seq: -.1 }, { seq: .5 }]
       .map((value) => ({ ...sample, ...value })),
   ]) {
-    assert.deepEqual(store.accept("ROOM", fix, "alice", 0), { ok: false, reason: "invalid" });
+    assert.deepEqual(store.accept("ROOM", fix, 0), { ok: false, reason: "invalid" });
   }
-  assert.deepEqual(store.snapshot("ROOM"), { positions: [], trail: null });
-  assert.deepEqual(store.accept("ROOM", { ...sample, lat: -90, lng: 180, heading: 360, acc: 0, speed: 0 }, "alice", 0),
+  assert.deepEqual(store.snapshot("ROOM"), { positions: [], trails: {} });
+  assert.deepEqual(store.accept("ROOM", { ...sample, lat: -90, lng: 180, heading: 360, acc: 0, speed: 0 }, 0),
     { ok: true, dropped: false });
   assert.equal(store.snapshot("ROOM").positions[0].receivedAt, 0);
-  assert.deepEqual(store.accept("OTHER", { handle: "bob", stream: sample.stream, lat: 90, lng: -180, at: 0, seq: 0 }, "alice", 0),
+  assert.deepEqual(store.accept("OTHER", { handle: "bob", stream: sample.stream, lat: 90, lng: -180, at: 0, seq: 0 }, 0),
     { ok: true, dropped: false });
 });
 
 test("새 stream의 seq 0은 이전 stream 위치를 덮고 각 순번 공간은 보존한다", () => {
   const store = new RoomLocationStore();
+  store.requestFollow("ROOM", "bob", "alice");
   const restarted = { ...sample, stream: "fedcba9876543210", seq: 0, lat: 38 };
-  store.accept("ROOM", { ...sample, seq: 100 }, "alice", 0);
+  store.accept("ROOM", { ...sample, seq: 100 }, 0);
   // stream을 바꾸어도 handle별 속도 제한은 우회하지 못한다.
-  assert.deepEqual(store.accept("ROOM", restarted, "alice", 399), { ok: false, reason: "rate" });
-  assert.deepEqual(store.accept("ROOM", restarted, "alice", 400), { ok: true, dropped: false });
+  assert.deepEqual(store.accept("ROOM", restarted, 399), { ok: false, reason: "rate" });
+  assert.deepEqual(store.accept("ROOM", restarted, 400), { ok: true, dropped: false });
   assert.equal(store.snapshot("ROOM").positions.length, 1);
   assert.equal(store.position("ROOM", "alice")?.stream, restarted.stream);
   assert.equal(store.position("ROOM", "alice")?.lat, 38);
-  assert.deepEqual(store.snapshot("ROOM").trail?.points.map((fix) => [fix.stream, fix.seq]),
+  assert.deepEqual(store.snapshot("ROOM").trails.alice?.map((fix) => [fix.stream, fix.seq]),
     [[sample.stream, 100], [restarted.stream, 0]]);
-  assert.deepEqual(store.accept("ROOM", restarted, "alice", 800), { ok: true, dropped: true });
-  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 99 }, "alice", 1200), { ok: true, dropped: true });
-  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 101 }, "alice", 1600), { ok: true, dropped: false });
+  assert.deepEqual(store.accept("ROOM", restarted, 800), { ok: true, dropped: true });
+  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 99 }, 1200), { ok: true, dropped: true });
+  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 101 }, 1600), { ok: true, dropped: false });
   store.remove("ROOM", "alice");
-  assert.deepEqual(store.accept("ROOM", { ...restarted, seq: 1 }, "alice", 2000), { ok: true, dropped: false });
+  assert.deepEqual(store.accept("ROOM", { ...restarted, seq: 1 }, 2000), { ok: true, dropped: false });
 });
 
 test("400ms 미만은 제한하고 사용자·방별로 독립적으로 순번 역순을 버린다", () => {
   const store = new RoomLocationStore();
-  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 3 }, "alice", 0), { ok: true, dropped: false });
-  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 4 }, "alice", 399), { ok: false, reason: "rate" });
-  assert.deepEqual(store.accept("ROOM", { ...sample, handle: "bob" }, "alice", 399), { ok: true, dropped: false });
-  assert.deepEqual(store.accept("OTHER", sample, "alice", 399), { ok: true, dropped: false });
-  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 3 }, "alice", 400), { ok: true, dropped: true });
-  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 2 }, "alice", 800), { ok: true, dropped: true });
-  assert.equal(store.snapshot("ROOM").trail?.points.length, 1);
+  store.requestFollow("ROOM", "bob", "alice");
+  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 3 }, 0), { ok: true, dropped: false });
+  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 4 }, 399), { ok: false, reason: "rate" });
+  assert.deepEqual(store.accept("ROOM", { ...sample, handle: "bob" }, 399), { ok: true, dropped: false });
+  assert.deepEqual(store.accept("OTHER", sample, 399), { ok: true, dropped: false });
+  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 3 }, 400), { ok: true, dropped: true });
+  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 2 }, 800), { ok: true, dropped: true });
+  assert.equal(store.snapshot("ROOM").trails.alice?.length, 1);
   assert.equal(store.position("ROOM", "alice")?.seq, 3);
   assert.equal(store.position("ROOM", "alice")?.receivedAt, 0);
-  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 4 }, "alice", 1200), { ok: true, dropped: false });
+  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 4 }, 1200), { ok: true, dropped: false });
 });
 
-test("그룹장만 궤적을 쌓고 최신 7200점과 사용자별 최신 위치를 남긴다", () => {
+test("팔로워가 있는 대상만 궤적을 쌓고 최신 7200점과 사용자별 최신 위치를 남긴다", () => {
   const store = new RoomLocationStore();
+  store.requestFollow("ROOM", "bob", "alice");
   for (let seq = 0; seq < LOCATION_TRAIL_LIMIT + 5; seq++) {
-    store.accept("ROOM", { ...sample, seq }, "alice", seq * 400);
-    store.accept("ROOM", { ...sample, handle: "bob", seq }, "alice", seq * 400);
+    store.accept("ROOM", { ...sample, seq }, seq * 400);
+    store.accept("ROOM", { ...sample, handle: "bob", seq }, seq * 400);
   }
   const snapshot = store.snapshot("ROOM");
   assert.equal(snapshot.positions.length, 2);
-  assert.equal(snapshot.trail?.handle, "alice");
-  assert.equal(snapshot.trail?.points.length, 7200);
-  assert.equal(snapshot.trail?.points[0].seq, 5);
-  assert.equal(snapshot.trail?.points.at(-1)?.seq, 7204);
-  assert.ok(snapshot.trail?.points.every((fix) => fix.handle === "alice"));
+  assert.deepEqual(Object.keys(snapshot.trails), ["alice"]);
+  assert.equal(snapshot.trails.alice?.length, 7200);
+  assert.equal(snapshot.trails.alice?.[0].seq, 5);
+  assert.equal(snapshot.trails.alice?.at(-1)?.seq, 7204);
+  assert.ok(snapshot.trails.alice?.every((fix) => fix.handle === "alice"));
 });
 
-test("remove는 위치만 지우고 clear는 순번·궤적까지 지우며 스냅샷 수정은 격리한다", () => {
+test("위치 제거와 follow 관계 정리는 분리되고 clear는 순번·궤적까지 지운다", () => {
   const store = new RoomLocationStore();
-  store.accept("ROOM", sample, "alice", 0);
-  store.accept("OTHER", sample, "alice", 0);
+  store.requestFollow("ROOM", "bob", "alice");
+  store.accept("ROOM", sample, 0);
+  store.accept("OTHER", sample, 0);
   const snapshot = store.snapshot("ROOM");
   snapshot.positions[0].lat = 0;
-  snapshot.trail!.points[0].seq = 99;
-  snapshot.trail!.points.length = 0;
+  snapshot.trails.alice[0].seq = 99;
+  snapshot.trails.alice.length = 0;
   assert.equal(store.position("ROOM", "alice")?.lat, sample.lat);
   assert.equal(store.remove("ROOM", "alice"), true);
   assert.equal(store.remove("ROOM", "alice"), false);
   assert.deepEqual(store.snapshot("ROOM").positions, []);
-  assert.equal(store.snapshot("ROOM").trail?.points[0].seq, 0);
-  assert.deepEqual(store.accept("ROOM", sample, "alice", 400), { ok: true, dropped: true });
+  assert.equal(store.snapshot("ROOM").trails.alice?.[0].seq, 0);
+  assert.deepEqual(store.accept("ROOM", sample, 400), { ok: true, dropped: true });
   store.clear("ROOM");
   store.clear("ROOM");
-  assert.deepEqual(store.snapshot("ROOM"), { positions: [], trail: null });
+  assert.deepEqual(store.snapshot("ROOM"), { positions: [], trails: {} });
   assert.equal(store.snapshot("OTHER").positions.length, 1);
-  assert.deepEqual(store.accept("ROOM", sample, "alice", 400), { ok: true, dropped: false });
+  assert.deepEqual(store.accept("ROOM", sample, 400), { ok: true, dropped: false });
 });
 
 // me.test.ts와 같이 TCP 없이 실제 라우터/인증/SSE 응답을 검증한다.
@@ -130,7 +134,7 @@ class Response extends Writable {
   }
 }
 
-function fixture(t: TestContext) {
+function fixture(t: TestContext, withFollow = true) {
   const db = openDb(":memory:");
   const hub = new RoomEventHub();
   const locations = new RoomLocationStore();
@@ -140,6 +144,7 @@ function fixture(t: TestContext) {
   const tokens = new Map(users.map((user) => [user.handle, issueToken(db, user.id)]));
   const room = createRoom(db, { code: "ABC234", name: "위치 공유", createdBy: users[0].id })!;
   joinRoom(db, room.id, users[1].id);
+  if (withFollow) locations.requestFollow(room.code, "bob", "alice");
   const responses: Response[] = [];
   t.after(() => {
     hub.close();
@@ -184,7 +189,7 @@ test("POST 재실행 stream은 seq 0으로 저장되고 SSE와 hello에 그대�
   const snapshot = (await api("GET", "/positions", "bob")).body;
   assert.equal(snapshot.positions.length, 1);
   assert.equal(snapshot.positions[0].stream, restarted.stream);
-  assert.equal(snapshot.trail.points.length, 2);
+  assert.equal(snapshot.trails.alice.length, 2);
   const hello = send("GET", "/v1/rooms/ABC234/events", "bob").events()[0].data;
   assert.deepEqual(hello.positions, snapshot.positions);
 });
@@ -202,12 +207,12 @@ test("위치 POST/GET/DELETE는 멤버만 허용하고 본문으로 송신자를
   assert.equal(snapshot.response.headers.get("cache-control"), "no-store");
   assert.equal(snapshot.body.positions[0].handle, "alice");
   assert.ok(snapshot.body.positions[0].receivedAt > 0);
-  assert.equal(snapshot.body.trail.handle, "alice");
+  assert.deepEqual(Object.keys(snapshot.body.trails), ["alice"]);
   assert.equal((await api("POST", "/location", "alice", { ...sample, seq: 1 })).status, 429);
   assert.equal((await api("DELETE", "/location")).status, 202);
   const stopped = (await api("GET", "/positions")).body;
   assert.deepEqual(stopped.positions, []);
-  assert.equal(stopped.trail.points.length, 1);
+  assert.deepEqual(stopped.trails, {});
 });
 
 test("SSE 위치/중지는 송신자의 모든 연결을 제외하고 hello는 leader·스냅샷을 포함한다", async (t) => {
@@ -226,13 +231,13 @@ test("SSE 위치/중지는 송신자의 모든 연결을 제외하고 hello는 l
   assert.equal(hello.self.handle, "bob");
   assert.equal(hello.members.length, 2);
   assert.deepEqual(hello.positions, [received]);
-  assert.deepEqual(hello.trail, { handle: "alice", points: [received] });
+  assert.deepEqual(hello.trails, { alice: [received] });
   await api("DELETE", "/location");
-  assert.deepEqual(bob.events().at(-1), { name: "location-stopped", data: { handle: "alice" } });
-  assert.deepEqual(alice.events().map((event) => event.name), ["hello"]);
+  assert.ok(bob.events().some((event) => event.name === "location-stopped" && event.data.handle === "alice"));
+  assert.deepEqual(alice.events().map((event) => event.name), ["hello", "follow-cancelled", "trails"]);
 });
 
-test("마지막 소켓 단절과 leave는 위치를 지우되 남은 사람의 그룹장 궤적은 유지한다", async (t) => {
+test("마지막 소켓 단절과 leave는 위치·follow·궤적을 지우고 DB 멤버십만 유지한다", async (t) => {
   const { api, send, hub, locations, db, room, users } = fixture(t);
   const alice = send("GET", "/v1/rooms/ABC234/events");
   send("GET", "/v1/rooms/ABC234/events");
@@ -242,15 +247,15 @@ test("마지막 소켓 단절과 leave는 위치를 지우되 남은 사람의 �
   assert.equal(locations.snapshot(room.code).positions.length, 1);
   hub.disconnectUser(room.code, "alice");
   assert.equal(locations.snapshot(room.code).positions.length, 0);
-  assert.equal(locations.snapshot(room.code).trail?.points.length, 1);
+  assert.deepEqual(locations.snapshot(room.code).trails, {});
   assert.equal(isRoomMember(db, room.id, users[0].id), true);
-  assert.deepEqual(bob.events().at(-1), { name: "location-stopped", data: { handle: "alice" } });
+  assert.ok(bob.events().some((event) => event.name === "location-stopped" && event.data.handle === "alice"));
   await api("POST", "/location", "bob", sample);
   await api("POST", "/leave", "bob");
   assert.deepEqual(locations.snapshot(room.code).positions, []);
-  assert.equal(locations.snapshot(room.code).trail?.points.length, 1);
+  assert.deepEqual(locations.snapshot(room.code).trails, {});
   await api("POST", "/leave");
-  assert.deepEqual(locations.snapshot(room.code), { positions: [], trail: null });
+  assert.deepEqual(locations.snapshot(room.code), { positions: [], trails: {} });
   assert.equal(findRoomByCode(db, room.code), undefined);
 });
 
@@ -288,3 +293,92 @@ test("위치 POST 액세스 로그 대신 분당 집계하며 드롭은 SSE로 �
   t.mock.timers.tick(60000);
   assert.equal(writes.length, 1);
 });
+
+test("follow는 방장과 무관하며 다중 대상·팔로워 수명과 독립된 7200점 상한을 지킨다", { timeout: 30_000 }, () => {
+  const store = new RoomLocationStore();
+  store.accept("ROOM", sample, 0);
+  assert.deepEqual(store.snapshot("ROOM").trails, {});
+  assert.equal(store.requestFollow("ROOM", "alice", "bob"), false);
+  assert.equal(store.requestFollow("ROOM", "charlie", "bob"), false);
+  assert.equal(store.requestFollow("ROOM", "bob", "alice"), true);
+  assert.deepEqual(store.requestsFor("ROOM", "bob"), ["alice", "charlie"]);
+  assert.equal(store.respondFollow("ROOM", "alice", "alice", true), null);
+  assert.deepEqual(store.respondFollow("ROOM", "bob", "alice", true), ["alice", "charlie"]);
+  assert.deepEqual(store.requestsFor("ROOM", "bob"), []);
+  assert.equal(store.requestFollow("ROOM", "david", "bob"), true); // 첫 fix 이전에도 수락한 공유
+  for (let seq = 1; seq <= 7205; seq++) {
+    store.accept("ROOM", { ...sample, seq }, seq * 400);
+    store.accept("ROOM", { ...sample, handle: "bob", seq }, seq * 400);
+  }
+  const snapshot = store.snapshot("ROOM");
+  for (const handle of ["alice", "bob"]) {
+    assert.equal(snapshot.trails[handle].length, 7200);
+    assert.equal(snapshot.trails[handle][0].seq, 6);
+  }
+  store.unfollow("ROOM", "alice");
+  store.unfollow("ROOM", "charlie");
+  assert.equal(store.snapshot("ROOM").trails.bob.length, 7200);
+  store.unfollow("ROOM", "david");
+  assert.equal(store.snapshot("ROOM").trails.bob, undefined);
+  assert.equal(store.snapshot("ROOM").trails.alice.length, 7200);
+  assert.equal(store.position("ROOM", "bob")?.seq, 7205); // follow 중지는 공유를 끄지 않는다
+});
+
+test("follow 요청·거절·취소·이미 공유 중 수락·hello를 실제 라우터로 검증한다", { timeout: 30_000 }, async (t) => {
+  const { api, send, locations } = fixture(t, false);
+  const alice = send("GET", "/v1/rooms/ABC234/events", "alice");
+  const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
+  assert.equal((await api("POST", "/follow", "bob", { target: "alice" })).status, 202);
+  assert.ok(alice.events().some((e) => e.name === "follow-request" && e.data.requester === "bob"));
+  assert.equal((await api("POST", "/follow/respond", "alice", { requester: "bob", accepted: false })).status, 202);
+  assert.ok(bob.events().some((e) => e.name === "follow-response" && e.data.target === "alice" && !e.data.accepted));
+  assert.deepEqual(locations.snapshot("ABC234").trails, {});
+  await api("POST", "/follow", "bob", { target: "alice" });
+  await api("DELETE", "/follow", "bob");
+  assert.equal((await api("POST", "/follow/respond", "alice", { requester: "bob", accepted: true })).status, 409);
+  await api("POST", "/location", "alice", sample);
+  const before = alice.events().filter((e) => e.name === "follow-request").length;
+  await api("POST", "/follow", "bob", { target: "alice" });
+  assert.equal(alice.events().filter((e) => e.name === "follow-request").length, before);
+  assert.deepEqual(bob.events().at(-1), { name: "follow-response", data: { target: "alice", accepted: true } });
+  const hello = send("GET", "/v1/rooms/ABC234/events", "bob").events()[0].data;
+  assert.equal(hello.followTarget, "alice");
+  assert.equal(hello.trails.alice.length, 1);
+  assert.deepEqual(hello.trails, (await api("GET", "/positions", "bob")).body.trails);
+  await api("DELETE", "/follow", "bob");
+  assert.deepEqual(locations.snapshot("ABC234").trails, {});
+  assert.equal(locations.snapshot("ABC234").positions.length, 1);
+});
+
+test("follow는 자신·외부인·잘못된 응답·퇴장한 요청자를 거른다", { timeout: 30_000 }, async (t) => {
+  const { api, locations } = fixture(t, false);
+  assert.equal((await api("POST", "/follow", "bob", { target: "bob" })).status, 400);
+  assert.equal((await api("POST", "/follow", "bob", { target: "outsider" })).status, 403);
+  for (const [method, action, body] of [
+    ["POST", "/follow", { target: "alice" }], ["DELETE", "/follow", undefined],
+    ["POST", "/follow/respond", { requester: "bob", accepted: true }],
+  ] as const) assert.equal((await api(method, action, "outsider", body)).status, 403);
+  await api("POST", "/follow", "bob", { target: "alice" });
+  assert.equal((await api("POST", "/follow/respond", "alice", { requester: "bob", accepted: "true" })).status, 400);
+  assert.equal((await api("POST", "/follow/respond", "bob", { requester: "alice", accepted: true })).status, 409);
+  await api("POST", "/leave", "bob");
+  assert.equal(locations.targetOf("ABC234", "bob"), null);
+  assert.deepEqual(locations.snapshot("ABC234").trails, {});
+  assert.equal((await api("POST", "/follow/respond", "alice", { requester: "bob", accepted: true })).status, 403);
+});
+
+for (const action of ["leave", "disconnect", "stop"]) {
+  test(`${action}는 대상의 팔로워들에게 종료 응답을 보내고 관계·궤적을 정리한다`, { timeout: 30_000 }, async (t) => {
+    const { api, send, hub, locations } = fixture(t, false);
+    send("GET", "/v1/rooms/ABC234/events", "alice");
+    const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
+    await api("POST", "/follow", "bob", { target: "alice" });
+    await api("POST", "/follow/respond", "alice", { requester: "bob", accepted: true });
+    if (action === "disconnect") hub.disconnectUser("ABC234", "alice");
+    else await api(action === "leave" ? "POST" : "DELETE", action === "leave" ? "/leave" : "/location", "alice");
+    assert.ok(bob.events().some((e) => e.name === "follow-response" &&
+      e.data.accepted === false && e.data.reason === (action === "stop" ? "stopped" : "left")));
+    assert.equal(locations.targetOf("ABC234", "bob"), null);
+    assert.deepEqual(locations.snapshot("ABC234").trails, {});
+  });
+}

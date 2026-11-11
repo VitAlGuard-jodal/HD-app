@@ -26,6 +26,7 @@ class CarDashboard extends StatelessWidget {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: services.rooms,
     builder: (context, _) => CarShell(
+      room: services.rooms.state.code != null && showRoom,
       primary: services.rooms.state.code == null || !showRoom
           ? RoomsScreen(services: services, onRoom: onRoom ?? (_) {})
           : RoomScreen(

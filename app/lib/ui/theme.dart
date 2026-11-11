@@ -12,6 +12,7 @@ abstract final class UnavoColors {
   static const muted = Color(0xFFC0B9AD);
   static const line = Color(0xFF818A9C);
   static const call = Color(0xFF1D513F);
+  static const speaking = Color(0xFF7CFF5B);
   static const onCall = Color(0xFF9FE3B2);
   static const danger = Color(0xFF73332F);
   static const onDanger = Color(0xFFFFB6AB);

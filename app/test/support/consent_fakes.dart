@@ -77,9 +77,10 @@ class ConsentTestServices implements AppServices {
     bool signedIn = true,
     String? savedVersion,
     DeviceMode mode = DeviceMode.phone,
+    String handle = 'bob',
   }) async {
     SharedPreferences.setMockInitialValues({
-      if (signedIn) ...{'token': 'test', 'handle': 'bob'},
+      if (signedIn) ...{'token': 'test', 'handle': handle},
       if (savedVersion != null) 'legal.consent.v1': savedVersion,
     });
     final preferences = await completeConsentFuture(
@@ -132,7 +133,7 @@ class ConsentTestServices implements AppServices {
     await completeConsentFuture(tester, rooms.open('ABC123'));
     await completeConsentFuture(tester, rooms.leaveCall());
     api.events.add(
-      Hello('bob', api.members, 'alice', const [
+      Hello(store.handle!, api.members, 'alice', const [
         LocationFix(handle: 'alice', lat: 37, lng: 127, at: 0, seq: 0),
       ]),
     );
@@ -171,6 +172,27 @@ class ConsentTestApi extends ApiClient {
   int logins = 0, signups = 0, meReads = 0, logouts = 0;
   int stops = 0, sends = 0;
   bool logoutFails = false;
+  final follows = <String>[];
+  final followResponses = <(String, bool)>[];
+  int unfollows = 0;
+  @override
+  Future<void> follow(String code, String target) async {
+    follows.add(target);
+  }
+
+  @override
+  Future<void> respondFollow(
+    String code,
+    String requester, {
+    required bool accepted,
+  }) async {
+    followResponses.add((requester, accepted));
+  }
+
+  @override
+  Future<void> stopFollowing(String code) async {
+    unfollows++;
+  }
 
   Future<void> close() => events.close();
 

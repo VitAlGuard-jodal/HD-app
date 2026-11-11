@@ -114,30 +114,26 @@ class LocationFix {
   int get hashCode => _values.hashCode;
 }
 
-class LocationTrail {
-  const LocationTrail(this.handle, this.points);
-  factory LocationTrail.fromJson(JsonMap json) => LocationTrail(
-    json['handle'] as String,
-    (json['points'] as List<dynamic>)
-        .map((value) => LocationFix.fromJson(value as JsonMap))
-        .toList(),
-  );
-  final String handle;
-  final List<LocationFix> points;
-}
+Map<String, List<LocationFix>> locationTrailsFromJson(JsonMap json) =>
+    (json['trails'] as JsonMap? ?? {}).map(
+      (handle, points) => MapEntry(
+        handle,
+        (points as List<dynamic>)
+            .map((value) => LocationFix.fromJson(value as JsonMap))
+            .toList(),
+      ),
+    );
 
 class LocationSnapshot {
-  const LocationSnapshot(this.positions, this.trail);
+  const LocationSnapshot(this.positions, this.trails);
   factory LocationSnapshot.fromJson(JsonMap json) => LocationSnapshot(
     (json['positions'] as List<dynamic>? ?? [])
         .map((value) => LocationFix.fromJson(value as JsonMap))
         .toList(),
-    json['trail'] == null
-        ? null
-        : LocationTrail.fromJson(json['trail'] as JsonMap),
+    locationTrailsFromJson(json),
   );
   final List<LocationFix> positions;
-  final LocationTrail? trail;
+  final Map<String, List<LocationFix>> trails;
 }
 
 class IceServerCredentials {
@@ -176,7 +172,9 @@ final class Hello extends RoomEvent {
     this.members = const [],
     this.leader,
     this.positions = const [],
-    this.trail,
+    this.trails = const {},
+    this.followTarget,
+    this.followRequests = const [],
   ]);
   factory Hello.fromJson(JsonMap json) {
     final self = json['self'];
@@ -188,14 +186,40 @@ final class Hello extends RoomEvent {
           .toList(),
       json['leader'] as String?,
       snapshot.positions,
-      snapshot.trail,
+      snapshot.trails,
+      json['followTarget'] as String?,
+      (json['followRequests'] as List<dynamic>? ?? []).cast<String>(),
     );
   }
   final String self;
   final List<Member> members;
   final String? leader;
   final List<LocationFix> positions;
-  final LocationTrail? trail;
+  final Map<String, List<LocationFix>> trails;
+  final String? followTarget;
+  final List<String> followRequests;
+}
+
+final class FollowRequest extends RoomEvent {
+  const FollowRequest(this.requester);
+  final String requester;
+}
+
+final class FollowCancelled extends RoomEvent {
+  const FollowCancelled(this.requester);
+  final String requester;
+}
+
+final class FollowResponse extends RoomEvent {
+  const FollowResponse(this.target, this.accepted, {this.reason});
+  final String target;
+  final bool accepted;
+  final String? reason;
+}
+
+final class TrailsUpdated extends RoomEvent {
+  const TrailsUpdated(this.trails);
+  final Map<String, List<LocationFix>> trails;
 }
 
 final class LocationUpdated extends RoomEvent {

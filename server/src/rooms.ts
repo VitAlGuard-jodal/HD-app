@@ -54,6 +54,10 @@ export class RoomEventHub extends EventEmitter {
     return this.#deliver(code, (subscriber) => subscriber.handle === handle, name, data) > 0;
   }
 
+  followResponse(code: string, requester: string, target: string, accepted: boolean, reason?: string): void {
+    this.sendTo(code, requester, "follow-response", { target, accepted, ...(reason ? { reason } : {}) });
+  }
+
   queueSignal(code: string, handle: string, name: string, data: unknown, now = Date.now()): void {
     let backlog = this.#backlog.get(code);
     if (!backlog) {

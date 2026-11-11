@@ -151,15 +151,26 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
     }, 60_000).unref();
   }
 
-  function removeLocation(code: string, handle: string, announce = false): void {
+  function announceTrails(code: string): void {
+    hub.broadcast(code, "trails", { trails: locations.snapshot(code).trails });
+  }
+
+  function removeLocation(code: string, handle: string, reason = "left", announce = false): void {
+    const { target, requesters } = locations.removeFollows(code, handle);
+    if (target) hub.sendTo(code, target, "follow-cancelled", { requester: handle });
+    for (const requester of requesters) {
+      hub.followResponse(code, requester, handle, false, reason);
+      hub.sendTo(code, handle, "follow-cancelled", { requester });
+    }
     if (locations.remove(code, handle) || announce) {
       hub.broadcastExcept(code, handle, "location-stopped", { handle });
     }
+    if (target || requesters.length) announceTrails(code);
   }
 
   hub.on("unsubscribed", ({ code, handle }: { code: string; handle: string }) => {
-    // 다른 기기/재접속 소켓이 남아 있으면 그 사용자의 공유를 유지한다.
-    // 터널 복귀를 위해 DB 멤버십과 그룹장 궤적은 연결 수명과 분리한다.
+    // 다른 기기/재접속 소켓이 남아 있으면 공유·따라가기를 유지한다.
+    // DB 멤버십은 보존하지만 마지막 연결의 위치·follow 관계는 정리한다.
     if (hub.subscriberCount(code, handle) === 0) removeLocation(code, handle);
   });
 
@@ -291,7 +302,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       throw new HttpError(409, "ROOM_CODE_CONFLICT", "방 코드를 발급하지 못했습니다. 다시 시도해 주세요.");
     }
 
-    const roomMatch = /^\/v1\/rooms\/([^/]+)(?:\/(join|leave|events|signal|location|positions))?$/.exec(path);
+    const roomMatch = /^\/v1\/rooms\/([^/]+)(?:\/(join|leave|events|signal|location|positions|follow(?:\/respond)?))?$/.exec(path);
     if (roomMatch) {
       const rawCode = pathValue(roomMatch[1]);
       if (!/^[A-Za-z0-9]+$/.test(rawCode)) {
@@ -325,11 +336,58 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         json(response, 204);
         return;
       }
+      if (action === "follow" && method === "POST") {
+        requireMember(db, room, user);
+        const body = await readJson(request);
+        requireMember(db, room, user);
+        if (!isValidHandle(body.target) || body.target === user.handle) invalid("다른 참여자의 아이디가 필요합니다.");
+        const target = findUserByHandle(db, body.target);
+        if (!target || !isRoomMember(db, room.id, target.id)) {
+          throw new HttpError(403, "NOT_ROOM_MEMBER", "대상자가 방 참여자가 아닙니다.");
+        }
+        const previous = locations.targetOf(code, user.handle);
+        const accepted = locations.requestFollow(code, user.handle, target.handle);
+        if (previous && previous !== target.handle) hub.sendTo(code, previous, "follow-cancelled", { requester: user.handle });
+        announceTrails(code);
+        if (accepted) hub.followResponse(code, user.handle, target.handle, true);
+        else hub.sendTo(code, target.handle, "follow-request", { requester: user.handle });
+        json(response, 202, { accepted: true });
+        return;
+      }
+      if (action === "follow/respond" && method === "POST") {
+        requireMember(db, room, user);
+        const body = await readJson(request);
+        requireMember(db, room, user);
+        if (!isValidHandle(body.requester) || typeof body.accepted !== "boolean") invalid("요청 아이디와 동의 여부가 필요합니다.");
+        const requester = findUserByHandle(db, body.requester);
+        if (!requester || !isRoomMember(db, room.id, requester.id)) {
+          throw new HttpError(403, "NOT_ROOM_MEMBER", "요청자가 방 참여자가 아닙니다.");
+        }
+        const requesters = locations.respondFollow(code, user.handle, requester.handle, body.accepted);
+        if (!requesters) throw new HttpError(409, "FOLLOW_EXPIRED", "이미 끝난 따라가기 요청입니다.");
+        for (const handle of requesters) {
+          hub.followResponse(code, handle, user.handle, body.accepted);
+          hub.sendTo(code, user.handle, "follow-cancelled", { requester: handle });
+        }
+        announceTrails(code);
+        json(response, 202, { accepted: true });
+        return;
+      }
+      if (action === "follow" && method === "DELETE") {
+        requireMember(db, room, user);
+        const target = locations.unfollow(code, user.handle);
+        if (target) {
+          hub.sendTo(code, target, "follow-cancelled", { requester: user.handle });
+          announceTrails(code);
+        }
+        json(response, 202, { accepted: true });
+        return;
+      }
       if (method === "POST" && action === "location") {
         requireMember(db, room, user);
         const body = await readJson(request);
         requireMember(db, room, user);
-        const result = locations.accept(code, { ...body, handle: user.handle }, room.createdBy);
+        const result = locations.accept(code, { ...body, handle: user.handle });
         if (!result.ok) {
           if (result.reason === "invalid") invalid("위치 표본이 올바르지 않습니다.");
           countLocation(code, "rate");
@@ -350,7 +408,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       }
       if (method === "DELETE" && action === "location") {
         requireMember(db, room, user);
-        removeLocation(code, user.handle, true);
+        removeLocation(code, user.handle, "stopped", true);
         json(response, 202, { accepted: true });
         return;
       }
@@ -362,6 +420,8 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         if (!stream.send("hello", {
           self: publicUser(user), members: listRoomMembers(db, room.id),
           leader: room.createdBy, ...locations.snapshot(code),
+          followTarget: locations.targetOf(code, user.handle),
+          followRequests: locations.requestsFor(code, user.handle),
         })) {
           unsubscribe();
         } else {

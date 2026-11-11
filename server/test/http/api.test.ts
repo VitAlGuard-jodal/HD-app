@@ -546,3 +546,45 @@ test("JSON 형식·Content-Type·64KB 바이트 제한을 적용한다", { timeo
   });
   assertError(chunked, 413);
 });
+
+test("HTTP follow 수락·추가 팔로워 즉시 수락·해제·hello trails", { timeout: 30_000 }, async (t) => {
+  const { api, signup, events } = await fixture(t);
+  const alice = await signup("alice", "앨리스");
+  const bob = await signup("bob", "보비");
+  const charlie = await signup("charlie", "찰리");
+  const code = (await api("POST", "/v1/rooms", alice, {})).body.room.code;
+  const path = `/v1/rooms/${code}`;
+  await api("POST", `${path}/join`, bob, {});
+  await api("POST", `${path}/join`, charlie, {});
+  const a = await events(code, alice), b = await events(code, bob), c = await events(code, charlie);
+  for (const stream of [a, b, c]) {
+    assert.deepEqual((await stream.next("hello")).trails, {});
+  }
+  assert.equal((await api("POST", `${path}/follow`, bob, { target: "alice" })).status, 202);
+  for (const stream of [a, b, c]) assert.deepEqual((await stream.next("trails")).trails, { alice: [] });
+  assert.deepEqual(await a.next("follow-request"), { requester: "bob" });
+  assert.equal((await api("POST", `${path}/follow/respond`, alice, { requester: "bob", accepted: true })).status, 202);
+  assert.deepEqual(await b.next("follow-response"), { target: "alice", accepted: true });
+  await a.next("follow-cancelled");
+  for (const stream of [a, b, c]) await stream.next("trails");
+  await api("POST", `${path}/location`, alice, {
+    stream: "0123456789abcdef", lat: 37, lng: 127, heading: 90, at: 0, seq: 0,
+  });
+  await b.next("location");
+  await c.next("location");
+  await api("POST", `${path}/follow`, charlie, { target: "alice" });
+  for (const stream of [a, b, c]) assert.equal((await stream.next("trails")).trails.alice.length, 1);
+  assert.deepEqual(await c.next("follow-response"), { target: "alice", accepted: true });
+  const reconnect = await events(code, bob);
+  const hello = await reconnect.next("hello");
+  assert.equal(hello.followTarget, "alice");
+  assert.deepEqual(hello.trails, (await api("GET", `${path}/positions`, bob)).body.trails);
+  await reconnect.close(); // 다른 bob 소켓이 남아 있으므로 관계 보존
+  await api("DELETE", `${path}/follow`, bob);
+  await a.next("follow-cancelled");
+  for (const stream of [a, b, c]) assert.equal((await stream.next("trails")).trails.alice.length, 1);
+  await api("DELETE", `${path}/follow`, charlie);
+  await a.next("follow-cancelled");
+  for (const stream of [a, b, c]) assert.deepEqual((await stream.next("trails")).trails, {});
+  assert.equal((await api("GET", `${path}/positions`, alice)).body.positions.length, 1);
+});

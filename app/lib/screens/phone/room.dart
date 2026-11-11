@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../../audio/mic_router.dart';
+import '../../audio/mic_router.dart' show OutputRouteLabel;
 import '../../call/media_engine.dart';
 import '../../call/mesh_coordinator.dart';
 import '../../core/app_services.dart';
@@ -10,15 +10,15 @@ import '../../core/device_mode.dart';
 import '../../core/errors.dart';
 import '../../map/room_map.dart';
 import '../../net/models.dart';
-import '../../ui/appearance.dart';
 import '../../ui/control_scale.dart';
 import '../../ui/icons.dart';
 import '../../ui/theme.dart';
 import '../../ui/widgets/floating_bar.dart';
 import '../../ui/widgets/member_tile.dart';
 import '../../ui/widgets/unavo_dialog.dart';
-import '../../ui/widgets/panel_scroll.dart';
-import '../../ui/widgets/phone_frame.dart';
+import '../car/car_shell.dart';
+import '../../ui/widgets/member_avatar.dart';
+import '../../ui/widgets/unavo_watermark.dart';
 import '../../ui/widgets/room_code.dart';
 import '../../ui/widgets/status_chip.dart';
 
@@ -40,11 +40,12 @@ class _RoomScreenState extends State<RoomScreen> {
   bool _busy = false;
   bool _volumeExpanded = false;
   bool _dragging = false;
-  bool _mapInteracting = false;
+  bool fullscreenMap = false;
+  bool _dialogScheduled = false;
   bool _popped = false;
   String? _error;
   Timer? _volumeTimer;
-  Timer? _mapControlsTimer;
+  final _mapKey = GlobalKey();
   late final _mapController = RoomMapController.create(
     widget.services.mapProvider,
   );
@@ -52,7 +53,6 @@ class _RoomScreenState extends State<RoomScreen> {
   @override
   void dispose() {
     _volumeTimer?.cancel();
-    _mapControlsTimer?.cancel();
     _mapController.dispose();
     super.dispose();
   }
@@ -88,84 +88,130 @@ class _RoomScreenState extends State<RoomScreen> {
     _closeIfLeft();
   }
 
-  Future<void> _toggleLocation(BuildContext dialogContext) async {
-    final share = widget.services.locationShare;
-    if (share.sharing) {
-      await share.stop();
-      return;
-    }
-    await _startLocation(dialogContext);
-  }
-
-  Future<bool> _startLocation(
-    BuildContext dialogContext, {
-    String feature = '위치 공유',
-  }) async {
+  Future<void> _tapMember(BuildContext dialogContext, Member member) async {
     final session = widget.services.rooms;
     final code = session.state.code;
-    final handle = widget.services.store.handle;
-    if (code == null || session.state.isLeaving) return false;
-    final recipients = session.state.members
-        .where((member) => member.handle != handle)
-        .map((member) => member.displayName)
-        .toList();
+    if (member.handle == widget.services.store.handle || code == null) return;
+    final stopping = session.followTarget == member.handle;
+    if (!stopping && !session.checkFollowAllowed(member.handle)) return;
     final accepted = await showConsentDialog(
       dialogContext,
-      title: '위치 공유',
-      lines: [
-        recipients.isEmpty ? '현재 다른 참여자가 없습니다' : recipients.join(', '),
-        '같은 방 참여자에게 내 차 위치를 보여 줍니다',
-        '방을 나가거나 위치 공유 아이콘을 다시 누르면 끝납니다',
-        '위치는 방이 있는 동안만 서버(국내)에 남습니다',
-      ],
+      title: stopping ? '따라가기 중지' : '따라가기',
+      lines: stopping
+          ? [
+              member.displayName,
+              '${member.displayName} 님의 따라가기를 중지합니다',
+              '지도는 닫히고 내 위치 공유는 계속됩니다',
+            ]
+          : [
+              member.displayName,
+              '${member.displayName} 님의 위치를 따라갑니다',
+              '내 위치도 같은 방 참여자에게 보입니다',
+              '방을 나가거나 따라가기를 중지하면 끝납니다',
+              '위치는 방이 있는 동안만 서버(국내)에 남습니다',
+            ],
     );
-    if (!mounted || !dialogContext.mounted) return false;
-    if (!accepted) {
-      await showNoticeDialog(
-        dialogContext,
-        message: '동의하지 않아 $feature 기능을 사용할 수 없습니다',
-      );
-      return false;
-    }
-    if (session.state.code != code ||
-        session.state.isLeaving ||
-        widget.services.store.handle != handle)
-      return false;
-    await session.locationShare.start();
-    return mounted &&
-        session.state.code == code &&
-        !session.state.isLeaving &&
-        session.locationShare.sharing;
-  }
-
-  Future<void> _toggleFollowLeader(BuildContext dialogContext) async {
-    final session = widget.services.rooms;
-    if (session.followLeader) {
-      session.setFollowLeader(false);
-      return;
-    }
-    if (session.followNeedsStop) {
-      session.setFollowLeader(true); // 기존 정차 오류를 동의 팝업 전에 표시한다.
-      return;
-    }
-    final leader = session.leaderHandle;
-    if (!session.locationShare.sharing &&
-        !await _startLocation(dialogContext, feature: '그룹장 따라가기'))
-      return;
     if (!mounted ||
-        session.state.isLeaving ||
-        session.leaderHandle != leader ||
-        !session.positions.containsKey(leader))
+        !dialogContext.mounted ||
+        session.state.code != code ||
+        session.state.isLeaving)
       return;
-    session.setFollowLeader(true);
+    if (!accepted) {
+      if (!stopping)
+        await showNoticeDialog(
+          dialogContext,
+          message: '동의하지 않아 따라가기 기능을 사용할 수 없습니다',
+        );
+      return;
+    }
+    if (stopping) {
+      await session.stopFollowing();
+      return;
+    }
+    if (!session.state.members.any((m) => m.handle == member.handle)) return;
+    if (!session.locationShare.sharing) await session.locationShare.start();
+    if (!mounted ||
+        session.state.code != code ||
+        session.state.isLeaving ||
+        !session.locationShare.sharing)
+      return;
+    await session.startFollowing(member.handle);
   }
 
-  void _mapInteracted() {
-    // 지도 제스처가 상위 바의 탭을 소비해도 조작부를 다시 볼 수 있게 한다.
-    if (!_mapInteracting) setState(() => _mapInteracting = true);
-    _mapControlsTimer?.cancel();
-    _mapControlsTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted) setState(() => _mapInteracting = false);
+  void _scheduleFollowDialogs(BuildContext dialogContext) {
+    final session = widget.services.rooms;
+    if (_busy ||
+        _dialogScheduled ||
+        session.state.isLeaving ||
+        (!session.hasFollowNotice && session.followRequests.isEmpty))
+      return;
+    _dialogScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _dialogScheduled = false;
+      if (!mounted || !dialogContext.mounted || _busy) return;
+      unawaited(
+        _run(() async {
+          final code = session.state.code;
+          bool current() =>
+              mounted &&
+              dialogContext.mounted &&
+              session.state.code == code &&
+              !session.state.isLeaving;
+          while (current()) {
+            if (!dialogContext.mounted) return;
+            final notice = session.takeFollowNotice();
+            if (notice != null) {
+              final name =
+                  session.state.members
+                      .where((member) => member.handle == notice.target)
+                      .firstOrNull
+                      ?.displayName ??
+                  notice.target;
+              await showNoticeDialog(
+                dialogContext,
+                message: switch (notice.reason) {
+                  'left' => '$name 님이 연결을 종료하여 따라가기가 끝났습니다',
+                  'stopped' => '$name 님이 위치 공유를 중지했습니다',
+                  _ => '$name 님이 위치 공유에 동의하지 않았습니다',
+                },
+              );
+              continue;
+            }
+            final requester = session.followRequests.firstOrNull;
+            if (requester == null) break;
+            final name =
+                session.state.members
+                    .where((m) => m.handle == requester)
+                    .firstOrNull
+                    ?.displayName ??
+                requester;
+            var accepted = session.locationShare.sharing;
+            if (!accepted) {
+              if (!dialogContext.mounted) return;
+              accepted = await showConsentDialog(
+                dialogContext,
+                title: '따라가기 요청',
+                lines: [
+                  name,
+                  '$name 님이 내 위치를 따라가려 합니다',
+                  '동의하면 내 위치가 같은 방 참여자에게 보입니다',
+                  '방을 나가거나 위치 공유를 중지하면 끝납니다',
+                  '위치는 방이 있는 동안만 서버(국내)에 남습니다',
+                ],
+              );
+            }
+            if (!current()) return;
+            if (!session.followRequests.contains(requester)) continue;
+            if (accepted && !session.locationShare.sharing)
+              await session.locationShare.start();
+            if (!current()) return;
+            await session.respondToFollow(
+              requester,
+              accepted: accepted && session.locationShare.sharing,
+            );
+          }
+        }),
+      );
     });
   }
 
@@ -195,360 +241,381 @@ class _RoomScreenState extends State<RoomScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: Listenable.merge([
-      widget.services.rooms,
-      widget.services.mapAuthError,
-    ]),
-    builder: (context, _) {
-      final session = widget.services.rooms;
-      final state = session.state;
-      if (state.code == null && !widget.embedded && !_popped) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => _closeIfLeft());
-      }
-      final car = widget.mode == DeviceMode.car;
-      final automotive = car || widget.services.mic.isAutomotive;
-      final showVolume = !automotive || carVolumeSlider;
-      final inCall = session.call.isActive || session.joiningCall;
-      final reconnect =
-          session.canReconnect || (!state.isConnected && state.error != null);
-      final blocked = session.callJoinBlockedReason;
-      final (statusLabel, statusIcon) = switch (session.mediaConnection) {
-        MediaConnectionState.connecting => ('음성 연결 중', 'refresh'),
-        MediaConnectionState.connected => ('음성 수신 준비됨', 'check'),
-        MediaConnectionState.failed => (
-          '음성 연결 실패',
-          session.permissionDenied ? 'lock' : 'hangup',
-        ),
-        MediaConnectionState.idle => ('음성 연결 대기', 'phone'),
-      };
-      final error =
-          _error ??
-          session.locationShare.error ??
-          session.followError ??
-          widget.services.mapAuthError.value ??
-          session.mediaError ??
-          state.error ??
-          session.call.error ??
-          widget.services.mic.outputError;
-      final status = StatusChip(
-        blocked ??
-            (session.permissionDenied
-                ? session.mediaError ?? statusLabel
-                : statusLabel),
-        icon: blocked != null ? 'hangup' : statusIcon,
-        active: session.mediaConnection == MediaConnectionState.connected,
-      );
-      final statusRow = Row(
-        children: [
-          UnavoIcon('friends', size: ControlScale.icon(context)),
-          const SizedBox(width: 12),
-          Text('${state.members.length}', style: UnavoType.body),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: session.permissionDenied
-                  ? Semantics(
-                      button: true,
-                      label: '마이크 설정 열기',
-                      child: GestureDetector(
-                        onTap: () => _run(widget.services.mic.openSettings),
-                        child: status,
-                      ),
-                    )
-                  : automotive && reconnect
-                  ? Semantics(
-                      button: true,
-                      label: '다시 연결',
-                      child: GestureDetector(
-                        onTap: _busy || state.isLeaving
-                            ? null
-                            : () => _run(session.reconnect),
-                        child: status,
-                      ),
-                    )
-                  : status,
+  Widget build(BuildContext context) => ControlScale(
+    car: widget.mode == DeviceMode.car,
+    child: Builder(
+      builder: (context) => ListenableBuilder(
+        listenable: Listenable.merge([
+          widget.services.rooms,
+          widget.services.mapAuthError,
+        ]),
+        builder: (context, _) {
+          final session = widget.services.rooms;
+          final state = session.state;
+          if (session.followTarget == null) fullscreenMap = false;
+          _scheduleFollowDialogs(context);
+          if (state.code == null && !widget.embedded && !_popped) {
+            WidgetsBinding.instance.addPostFrameCallback((_) => _closeIfLeft());
+          }
+          final car = widget.mode == DeviceMode.car;
+          final automotive = car || widget.services.mic.isAutomotive;
+          final inCall = session.call.isActive || session.joiningCall;
+          final reconnect =
+              session.canReconnect ||
+              (!state.isConnected && state.error != null);
+          final blocked = session.callJoinBlockedReason;
+          final (statusLabel, statusIcon) = switch (session.mediaConnection) {
+            MediaConnectionState.connecting => ('음성 연결 중', 'refresh'),
+            MediaConnectionState.connected => ('음성 수신 준비됨', 'check'),
+            MediaConnectionState.failed => (
+              '음성 연결 실패',
+              session.permissionDenied ? 'lock' : 'hangup',
             ),
-          ),
-        ],
-      );
-      Widget memberTile(Member member) => MemberTile(
-        member: member,
-        self: member.handle == widget.services.store.handle,
-        interrupted:
-            inCall &&
-            session.interrupted &&
-            member.handle == widget.services.store.handle,
-        speaking: member.handle == widget.services.store.handle
-            ? session.localSpeaking
-            : session.speaking.contains(member.handle),
-        connection:
-            !inCall ||
-                member.handle == widget.services.store.handle ||
-                !MeshCoordinator.canJoin(
-                  member.handle,
-                  state.members.map((m) => m.handle),
-                )
-            ? null
-            : session.peerStates[member.handle] ?? MeshPeerState.connecting,
-      );
-      final names = {
-        for (final member in state.members) member.handle: member.displayName,
-      };
-      final appearance = context
-          .dependOnInheritedWidgetOfExactType<UnavoAppearance>();
-      final map = RoomMap(
-        key: ValueKey('room-map-${state.code}'),
-        controller: _mapController,
-        provider: widget.services.mapProvider,
-        authError: widget.services.mapAuthError.value,
-        positions: session.positions.map(
-          (handle, fix) => MapEntry(
-            handle,
-            RoomMapPosition(fix, displayName: names[handle] ?? handle),
-          ),
-        ),
-        trail: session.leaderTrail,
-        leaderHandle: session.leaderHandle,
-        selfHandle: widget.services.store.handle,
-        followLeader: session.followLeader,
-        onInteraction: _mapInteracted,
-        brightness:
-            appearance?.notifier?.resolve(context) ??
-            Theme.of(context).brightness,
-      );
-      final details = PanelScroll(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              state.room?.name ?? '함께 가는 길',
-              style: UnavoType.title.copyWith(fontSize: 22),
-            ),
-            const SizedBox(height: 10),
-            RoomCode(state.code ?? ''),
-            const SizedBox(height: 18),
-            statusRow,
-            ErrorText(error),
-            const SizedBox(height: 12),
-            for (final member in state.members)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: memberTile(member),
-              ),
-          ],
-        ),
-      );
-      final exit = FloatingBarButton(
-        label: '방 나가기',
-        icon: 'exit',
-        danger: true,
-        onPressed: state.isLeaving || _busy ? null : () => _run(_leave),
-      );
-      final volume = FloatingBarButton(
-        label: '통화 음량 ${session.callVolume}%',
-        icon: session.callVolume == 0
-            ? 'volume0'
-            : session.callVolume < 50
-            ? 'volume1'
-            : 'volume2',
-        selected: _volumeExpanded,
-        onPressed: inCall ? _toggleVolume : null,
-      );
-      final buttons = showVolume && _volumeExpanded
-          ? <Widget>[
-              volume,
+            MediaConnectionState.idle => ('음성 연결 대기', 'phone'),
+          };
+          final error =
+              _error ??
+              session.locationShare.error ??
+              session.followError ??
+              widget.services.mapAuthError.value ??
+              session.mediaError ??
+              state.error ??
+              session.call.error ??
+              widget.services.mic.outputError;
+          final status = StatusChip(
+            blocked ??
+                (session.permissionDenied
+                    ? session.mediaError ?? statusLabel
+                    : statusLabel),
+            icon: blocked != null ? 'hangup' : statusIcon,
+            active: session.mediaConnection == MediaConnectionState.connected,
+          );
+          final statusRow = Row(
+            children: [
+              UnavoIcon('friends', size: ControlScale.icon(context)),
+              const SizedBox(width: 12),
+              Text('${state.members.length}', style: UnavoType.body),
+              const SizedBox(width: 12),
               Expanded(
-                child: Semantics(
-                  label: '통화 음량',
-                  child: Slider(
-                    key: const ValueKey('call-volume-slider'),
-                    value: session.callVolume.toDouble(),
-                    min: 0,
-                    max: 100,
-                    divisions: 100,
-                    activeColor: UnavoColors.gold,
-                    label: '${session.callVolume}',
-                    onChangeStart: (_) {
-                      _volumeTimer?.cancel();
-                      setState(() => _dragging = true);
-                    },
-                    onChanged: _changeVolume,
-                    onChangeEnd: (_) {
-                      setState(() => _dragging = false);
-                      _collapseVolumeLater();
-                    },
-                  ),
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: session.permissionDenied
+                      ? Semantics(
+                          button: true,
+                          label: '마이크 설정 열기',
+                          child: GestureDetector(
+                            onTap: () => _run(widget.services.mic.openSettings),
+                            child: status,
+                          ),
+                        )
+                      : automotive && reconnect
+                      ? Semantics(
+                          button: true,
+                          label: '다시 연결',
+                          child: GestureDetector(
+                            onTap: _busy || state.isLeaving
+                                ? null
+                                : () => _run(session.reconnect),
+                            child: status,
+                          ),
+                        )
+                      : status,
                 ),
               ),
-              exit,
-            ]
-          : [
-              FloatingBarButton(
-                label: session.muted ? '음소거 해제' : '음소거',
-                icon: session.muted ? 'micoff' : 'mic',
-                selected: session.muted,
-                onPressed: inCall
-                    ? () => session.setMuted(!session.muted)
-                    : null,
+            ],
+          );
+          Widget memberTile(Member member, {bool compact = false}) =>
+              MemberTile(
+                key: ValueKey('member-${member.handle}'),
+                compact: compact,
+                onTap:
+                    member.handle == widget.services.store.handle ||
+                        _busy ||
+                        state.isLeaving
+                    ? null
+                    : () => _run(() => _tapMember(context, member)),
+                member: member,
+                self: member.handle == widget.services.store.handle,
+                interrupted:
+                    inCall &&
+                    session.interrupted &&
+                    member.handle == widget.services.store.handle,
+                speaking: member.handle == widget.services.store.handle
+                    ? session.localSpeaking
+                    : session.speaking.contains(member.handle),
+                connection:
+                    !inCall ||
+                        member.handle == widget.services.store.handle ||
+                        !MeshCoordinator.canJoin(
+                          member.handle,
+                          state.members.map((m) => m.handle),
+                        )
+                    ? null
+                    : session.peerStates[member.handle] ??
+                          MeshPeerState.connecting,
+              );
+          final names = {
+            for (final member in state.members)
+              member.handle: member.displayName,
+          };
+          final map = RoomMap(
+            key: _mapKey,
+            controller: _mapController,
+            provider: widget.services.mapProvider,
+            authError: widget.services.mapAuthError.value,
+            positions: session.positions.map(
+              (handle, fix) => MapEntry(
+                handle,
+                RoomMapPosition(fix, displayName: names[handle] ?? handle),
               ),
-              if (reconnect && !automotive)
-                FloatingBarButton(
-                  label: '다시 연결',
-                  icon: 'refresh',
-                  onPressed: _busy || state.isLeaving
-                      ? null
-                      : () => _run(session.reconnect),
-                ),
-              if (showVolume) volume,
-              if (!automotive)
-                FloatingBarButton(
-                  label: session.outputLabel,
-                  icon: session.outputRoute.icon,
-                  onPressed: inCall && !_busy
-                      ? () => _run(session.cycleOutputRoute)
-                      : null,
-                ),
-              Builder(
-                builder: (context) => FloatingBarButton(
-                  label: session.locationShare.sharing ? '위치 공유 중지' : '위치 공유',
-                  icon: session.locationShare.sharing
-                      ? 'location'
-                      : 'locationoff',
-                  selected: session.locationShare.sharing,
-                  onPressed:
-                      session.locationShare.available &&
-                          !_busy &&
-                          !state.isLeaving
-                      ? () => _run(() => _toggleLocation(context))
-                      : null,
-                ),
-              ),
-              Builder(
-                builder: (context) => FloatingBarButton(
-                  label: '그룹장 따라가기',
-                  icon: 'navigation',
-                  selected: session.followLeader,
-                  onPressed:
-                      session.leaderHandle != null &&
-                          session.leaderHandle !=
-                              widget.services.store.handle &&
-                          session.positions.containsKey(session.leaderHandle) &&
-                          !_busy &&
-                          !state.isLeaving
-                      ? () => _run(() => _toggleFollowLeader(context))
-                      : null,
-                ),
-              ),
-              FloatingBarButton(
-                label: '내 위치로',
-                icon: 'focus',
-                onPressed:
-                    session.positions.containsKey(widget.services.store.handle)
-                    ? _mapController.recenter
-                    : null,
-              ),
-              exit,
-            ];
-      final controls = FloatingBar(
-        key: const ValueKey('room-controls'),
-        child: showVolume && _volumeExpanded
-            ? Row(children: buttons)
-            : LayoutBuilder(
-                builder: (context, constraints) => SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(minWidth: constraints.maxWidth),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: buttons,
+            ),
+            trail: session.trailOf(session.followTarget),
+            targetHandle: session.followTarget,
+            selfHandle: widget.services.store.handle,
+            following: session.followTarget != null,
+            brightness: MediaQuery.platformBrightnessOf(context),
+            car: car,
+            fullscreen: fullscreenMap,
+            onFullscreen: () => setState(() => fullscreenMap = !fullscreenMap),
+            onStopSharing:
+                _busy || !session.locationShare.sharing || state.isLeaving
+                ? null
+                : () => _run(session.locationShare.stop),
+          );
+          final exit = FloatingBarButton(
+            label: '방 나가기',
+            icon: 'exit',
+            danger: true,
+            onPressed: state.isLeaving || _busy ? null : () => _run(_leave),
+          );
+          final volume = FloatingBarButton(
+            label: '통화 음량 ${session.callVolume}%',
+            icon: session.callVolume == 0
+                ? 'volume0'
+                : session.callVolume < 50
+                ? 'volume1'
+                : 'volume2',
+            selected: _volumeExpanded,
+            onPressed: inCall ? _toggleVolume : null,
+          );
+          final buttons = _volumeExpanded
+              ? <Widget>[
+                  volume,
+                  Expanded(
+                    child: Semantics(
+                      label: '통화 음량',
+                      child: Slider(
+                        key: const ValueKey('call-volume-slider'),
+                        value: session.callVolume.toDouble(),
+                        min: 0,
+                        max: 100,
+                        divisions: 100,
+                        activeColor: UnavoColors.gold,
+                        label: '${session.callVolume}',
+                        onChangeStart: (_) {
+                          _volumeTimer?.cancel();
+                          setState(() => _dragging = true);
+                        },
+                        onChanged: _changeVolume,
+                        onChangeEnd: (_) {
+                          setState(() => _dragging = false);
+                          _collapseVolumeLater();
+                        },
+                      ),
                     ),
                   ),
-                ),
-              ),
-      );
-      final pinned =
-          _busy ||
-          _volumeExpanded ||
-          _dragging ||
-          _mapInteracting ||
-          error != null ||
-          session.mediaConnection == MediaConnectionState.failed;
-      if (car) {
-        final content = Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    state.room?.name ?? '함께 가는 길',
-                    style: UnavoType.title,
+                  exit,
+                ]
+              : [
+                  FloatingBarButton(
+                    label: session.muted ? '음소거 해제' : '음소거',
+                    icon: session.muted ? 'micoff' : 'mic',
+                    selected: session.muted,
+                    onPressed: inCall
+                        ? () => session.setMuted(!session.muted)
+                        : null,
+                  ),
+                  if (reconnect && !automotive)
+                    FloatingBarButton(
+                      label: '다시 연결',
+                      icon: 'refresh',
+                      onPressed: _busy || state.isLeaving
+                          ? null
+                          : () => _run(session.reconnect),
+                    ),
+                  volume,
+                  if (!automotive)
+                    FloatingBarButton(
+                      label: session.outputLabel,
+                      icon: session.outputRoute.icon,
+                      onPressed: inCall && !_busy
+                          ? () => _run(session.cycleOutputRoute)
+                          : null,
+                    ),
+                  exit,
+                ];
+          final controls = FloatingBar(
+            key: const ValueKey('room-controls'),
+            child: _volumeExpanded
+                ? LayoutBuilder(
+                    builder: (context, constraints) => SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: SizedBox(
+                        width: constraints.maxWidth < (car ? 320 : 200)
+                            ? (car ? 320 : 200)
+                            : constraints.maxWidth,
+                        child: Row(children: buttons),
+                      ),
+                    ),
+                  )
+                : LayoutBuilder(
+                    builder: (context, constraints) => SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minWidth: constraints.maxWidth,
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: buttons,
+                        ),
+                      ),
+                    ),
+                  ),
+          );
+          Widget dock(Widget child) => Stack(
+            fit: StackFit.expand,
+            children: [
+              child,
+              Positioned(left: 8, right: 8, bottom: 8, child: controls),
+            ],
+          );
+          Widget callPanel({required bool compact, required bool horizontal}) =>
+              Container(
+                key: const ValueKey('room-call-panel'),
+                color: UnavoColors.ink,
+                child: dock(
+                  Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      const UnavoWatermark(),
+                      SingleChildScrollView(
+                        padding: EdgeInsets.fromLTRB(12, 8, 12, car ? 120 : 88),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (!compact) ...[
+                              Text(
+                                state.room?.name ?? '함께 가는 길',
+                                style: UnavoType.title,
+                              ),
+                              RoomCode(state.code ?? ''),
+                              const SizedBox(height: 12),
+                            ],
+                            statusRow,
+                            ErrorText(error),
+                            const SizedBox(height: 8),
+                            if (horizontal)
+                              SizedBox(
+                                key: const ValueKey('room-member-strip'),
+                                height: 104,
+                                child: ListView.separated(
+                                  scrollDirection: Axis.horizontal,
+                                  itemCount: state.members.length,
+                                  separatorBuilder: (_, _) =>
+                                      const SizedBox(width: 8),
+                                  itemBuilder: (_, index) => SizedBox(
+                                    width: 272,
+                                    child: SingleChildScrollView(
+                                      child: memberTile(state.members[index]),
+                                    ),
+                                  ),
+                                ),
+                              )
+                            else
+                              for (final member in state.members)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 8),
+                                  child: memberTile(member, compact: compact),
+                                ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(width: 12),
-                SizedBox(
-                  width: 144,
-                  child: RoomCode(state.code ?? '', fontSize: 24),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            statusRow,
-            ErrorText(error),
-            const SizedBox(height: 8),
-            Expanded(child: map),
-            SizedBox(
-              key: const ValueKey('room-member-strip'),
-              height: 112,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                itemCount: state.members.length,
-                separatorBuilder: (_, _) => const SizedBox(width: 12),
-                itemBuilder: (_, index) => SizedBox(
-                  width: 300,
-                  child: SingleChildScrollView(
-                    child: memberTile(state.members[index]),
+              );
+          final content = LayoutBuilder(
+            builder: (context, constraints) {
+              final showingMap = session.followTarget != null;
+              final sideBySide =
+                  car || constraints.maxWidth > constraints.maxHeight;
+              if (!showingMap)
+                return callPanel(compact: false, horizontal: false);
+              if (fullscreenMap) {
+                return dock(
+                  Stack(
+                    key: const ValueKey('room-fullscreen-map'),
+                    fit: StackFit.expand,
+                    children: [
+                      map,
+                      Positioned(
+                        left: 12,
+                        top: 12,
+                        right: car ? 88 : 68,
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          clipBehavior: Clip.none,
+                          child: Row(
+                            children: [
+                              for (final member in state.members.take(6))
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: MemberAvatar(
+                                    key: ValueKey('speaker-${member.handle}'),
+                                    member: member,
+                                    diameter: car ? 56 : 40,
+                                    speaking:
+                                        member.handle ==
+                                            widget.services.store.handle
+                                        ? session.localSpeaking
+                                        : session.speaking.contains(
+                                            member.handle,
+                                          ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      if (error != null)
+                        Positioned(
+                          left: 12,
+                          right: car ? 88 : 68,
+                          bottom: car ? 152 : 120,
+                          child: ErrorText(error),
+                        ),
+                    ],
                   ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            controls,
-          ],
-        );
-        return widget.embedded
-            ? content
-            : PhoneFrame(mode: widget.mode, child: content);
-      }
-      final content = Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(flex: 45, child: map),
-          Expanded(
-            flex: 55,
-            child: Padding(
-              padding: const EdgeInsets.only(top: 12),
-              child: details,
-            ),
-          ),
-        ],
-      );
-      if (widget.embedded) {
-        return FloatingBarOverlay(
-          bar: controls,
-          keepVisible: pinned,
-          child: content,
-        );
-      }
-      return PhoneFrame(
-        mode: widget.mode,
-        bottomNav: controls,
-        keepControlsVisible: pinned,
-        child: content,
-      );
-    },
+                );
+              }
+              return Flex(
+                direction: sideBySide ? Axis.horizontal : Axis.vertical,
+                children: [
+                  Expanded(flex: 7, child: map),
+                  Expanded(
+                    flex: 3,
+                    child: callPanel(compact: true, horizontal: !sideBySide),
+                  ),
+                ],
+              );
+            },
+          );
+          if (widget.embedded) return content;
+          if (car) return CarShell(room: true, primary: content);
+          return Scaffold(body: SafeArea(child: content));
+        },
+      ),
+    ),
   );
 }

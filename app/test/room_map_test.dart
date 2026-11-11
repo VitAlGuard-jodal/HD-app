@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:unavo/map/map_tiles.dart';
 import 'package:unavo/map/room_map.dart';
 import 'package:unavo/map/room_map_geometry.dart';
+import 'package:unavo/map/room_map_widgets.dart';
 import 'package:unavo/net/models.dart';
 import 'package:unavo/ui/icons.dart';
 import 'package:unavo/ui/theme.dart';
@@ -125,7 +126,7 @@ void main() {
     controller.dispose();
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  testWidgets('키 없는 지도는 마커·그룹장 배지·이름·궤적·출처를 네트워크 없이 표시한다', (tester) async {
+  testWidgets('키 없는 지도는 GPS 점·상대 차량·상대 이름·궤적·출처를 표시한다', (tester) async {
     final controller = RoomMapController();
     final trail = [_fix('alice', 37.5, 127.0002), _leader];
     await _pumpMap(tester, controller, trail: trail);
@@ -143,10 +144,11 @@ void main() {
     final stars = find.byWidgetPredicate(
       (widget) => widget is UnavoIcon && widget.name == 'star',
     );
-    expect(cars, findsNWidgets(2));
-    expect(stars, findsOneWidget);
-    expect(find.text('보'), findsOneWidget);
-    expect(find.text('앨'), findsOneWidget);
+    expect(cars, findsOneWidget);
+    expect(stars, findsNothing);
+    expect(find.byKey(const ValueKey('gps-marker')), findsOneWidget);
+    expect(find.text('보비'), findsNothing);
+    expect(find.text('앨리스'), findsOneWidget);
     final rotations = tester.widgetList<Transform>(find.byType(Transform));
     expect(
       rotations.any(
@@ -172,24 +174,15 @@ void main() {
     controller.dispose();
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  testWidgets('따라가기는 80px 여백·18 상한, 제스처 동안 정지하고 종료 5초 후 재개한다', (tester) async {
+  testWidgets('따라가기는 내 위치 중심·거리 줌, 제스처 동안 정지하고 종료 5초 후 재개한다', (tester) async {
     final controller = RoomMapController();
-    await _pumpMap(
-      tester,
-      controller,
-      follow: true,
-      tiles: const MapTiles(minZoom: 19, maxZoom: 19),
-    );
+    await _pumpMap(tester, controller, follow: true);
     MapCamera camera() => tester
         .widget<FlutterMap>(find.byType(FlutterMap))
         .mapController!
         .camera;
-    expect(camera().zoom, lessThanOrEqualTo(18));
-    for (final fix in [_self, _leader]) {
-      final offset = camera().latLngToScreenOffset(LatLng(fix.lat, fix.lng));
-      expect(offset.dx, inInclusiveRange(79.9, 520.1));
-      expect(offset.dy, inInclusiveRange(79.9, 420.1));
-    }
+    expect(camera().zoom, 17);
+    expect(camera().center, LatLng(_self.lat, _self.lng));
     final gesture = await tester.startGesture(
       tester.getCenter(find.byType(FlutterMap)),
     );
@@ -206,10 +199,50 @@ void main() {
     await tester.pump(const Duration(milliseconds: 1));
     await tester.pump();
     expect(camera().center, isNot(dragged));
-    expect(
-      camera().visibleBounds.contains(LatLng(moved.lat, moved.lng)),
-      isTrue,
-    );
+    expect(camera().center, LatLng(_self.lat, _self.lng));
+    expect(camera().zoom, 14);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('지도 버튼은 재중심 줌 유지·heading 회전·북쪽 복귀, 상대만 반투명이다', (tester) async {
+    final controller = RoomMapController();
+    await _pumpMap(tester, controller);
+    MapCamera camera() => tester
+        .widget<FlutterMap>(find.byType(FlutterMap))
+        .mapController!
+        .camera;
+    controller.moveTo(37.6, 127.1, zoom: 14);
+    await tester.pump();
+    await tester.tap(find.byTooltip('내 위치로'));
+    await tester.pump();
+    expect(camera().zoom, 14);
+    expect(camera().center, LatLng(_self.lat, _self.lng));
+    await tester.tap(find.byTooltip('방향 정렬'));
+    await tester.pump();
+    expect((camera().rotation + 360) % 360, 270);
+    await tester.tap(find.byTooltip('방향 정렬'));
+    await tester.pump();
+    expect(camera().rotation, 0);
+    expect(find.byType(RoomMapButton), findsNWidgets(4));
+    final markers = tester
+        .widget<MarkerLayer>(find.byType(MarkerLayer))
+        .markers;
+    expect(markers.last.key, const ValueKey('map-marker-bob'));
+    for (final self in [false, true]) {
+      final marker = find.byWidgetPredicate(
+        (w) => w is RoomCarMarker && w.self == self,
+      );
+      expect(
+        tester
+            .widget<Opacity>(
+              find.descendant(of: marker, matching: find.byType(Opacity)),
+            )
+            .opacity,
+        self ? 1 : .55,
+      );
+    }
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     controller.dispose();
@@ -237,7 +270,7 @@ void main() {
     await tester.pump();
     expect(camera().center.latitude, closeTo(_self.lat, .000001));
     expect(camera().center.longitude, closeTo(_self.lng, .000001));
-    expect(camera().zoom, lessThanOrEqualTo(18));
+    expect(camera().zoom, 15);
     expect(find.text(MapTiles.defaultAttribution), findsOneWidget);
     expect(find.byType(TileLayer), findsNothing);
     expect(tester.takeException(), isNull);
@@ -277,9 +310,9 @@ Future<void> _pumpMap(
                     ),
                   },
               trail: trail,
-              leaderHandle: 'alice',
+              targetHandle: 'alice',
               selfHandle: 'bob',
-              followLeader: follow,
+              following: follow,
               brightness: brightness,
               tiles: tiles,
             ),

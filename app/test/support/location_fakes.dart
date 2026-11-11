@@ -65,7 +65,7 @@ class FakeLocationHttp {
   int failures = 0;
   bool dropped = false, deleteFails = false, hang = false;
   Future<void>? sendGate;
-  JsonMap snapshot = {'positions': <JsonMap>[], 'trail': null};
+  JsonMap snapshot = {'positions': <JsonMap>[], 'trails': <String, dynamic>{}};
   List<LocationHttpCall> get posts =>
       calls.where((call) => call.method == 'POST').toList();
   List<LocationHttpCall> get deletes =>

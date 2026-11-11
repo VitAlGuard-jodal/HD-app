@@ -22,6 +22,8 @@ class VworldRoomMapController implements RoomMapController {
   @override
   void recenter() => _state?._recenter();
   @override
+  void alignHeading(bool enabled) => _state?._alignHeading(enabled);
+  @override
   void dispose() => _state = null;
 }
 
@@ -33,21 +35,24 @@ class VworldRoomMap extends StatefulWidget {
     required this.controller,
     required this.positions,
     required this.trail,
-    required this.leaderHandle,
+    required this.targetHandle,
     required this.selfHandle,
-    required this.followLeader,
+    required this.following,
     required this.brightness,
     this.onInteraction,
     this.tiles,
+    this.car = false,
+    this.fullscreen = false,
   });
   final RoomMapController controller;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
-  final String? leaderHandle, selfHandle;
-  final bool followLeader;
+  final String? targetHandle, selfHandle;
+  final bool following;
   final Brightness brightness;
   final VoidCallback? onInteraction;
   final MapTiles? tiles;
+  final bool car, fullscreen;
 
   @override
   State<VworldRoomMap> createState() => _VworldRoomMapState();
@@ -58,11 +63,12 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
   Timer? _resumeTimer;
   bool _ready = false, _paused = false, _followQueued = false;
   int _pointers = 0;
+  bool? _headingAligned;
   MapTiles get _tiles => widget.tiles ?? mapTiles;
   LocationFix? get _self => widget.positions[widget.selfHandle]?.fix;
-  LocationFix? get _leader => widget.positions[widget.leaderHandle]?.fix;
+  LocationFix? get _target => widget.positions[widget.targetHandle]?.fix;
   double get _maximumZoom => _tiles.maximumZoom(widget.brightness);
-  double get _minimumZoom => widget.followLeader
+  double get _minimumZoom => widget.following
       ? math.min(18, _tiles.minimumZoom(widget.brightness))
       : _tiles.minimumZoom(widget.brightness);
 
@@ -83,34 +89,31 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
   }
 
   void _queueFollow() {
-    if (!_ready || !widget.followLeader || _paused || _followQueued) return;
+    if (!_ready ||
+        _paused ||
+        _followQueued ||
+        (!widget.following && _headingAligned != true))
+      return;
     _followQueued = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _followQueued = false;
-      if (!mounted || !widget.followLeader || _paused) return;
-      final bounds = followBounds(
+      if (!mounted || _paused) return;
+      if (!widget.following) {
+        if (_headingAligned == true) _camera.rotate(-(_self?.heading ?? 0));
+        return;
+      }
+      final next = naverFollowCamera(
         self: _self,
-        leader: _leader,
+        leader: _target,
         trail: widget.trail,
+        currentBearing: -_camera.camera.rotation,
       );
-      if (bounds == null) return;
-      final size = _camera.camera.nonRotatedSize;
-      // 160px보다 작은 패널에서도 양쪽 여백이 뷰포트를 넘어가지 않게 한다.
-      final padding = math.min(
-        80.0,
-        math.max(0.0, (size.shortestSide - 1) / 2),
+      if (next == null) return;
+      _camera.move(
+        _point(next.target),
+        next.zoom.clamp(_minimumZoom, _maximumZoom),
       );
-      _camera.fitCamera(
-        CameraFit.bounds(
-          bounds: LatLngBounds(
-            LatLng(bounds.south, bounds.west),
-            LatLng(bounds.north, bounds.east),
-          ),
-          padding: EdgeInsets.all(padding),
-          minZoom: _minimumZoom,
-          maxZoom: math.min(18, _maximumZoom),
-        ),
-      );
+      _camera.rotate(_headingAligned == false ? 0 : -next.bearing);
     });
     WidgetsBinding.instance.scheduleFrame();
   }
@@ -140,7 +143,15 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
 
   void _recenter() {
     final self = _self;
-    if (self != null) _moveTo(_point(self), math.min(18, _maximumZoom));
+    if (self != null && _ready) _moveTo(_point(self), _camera.camera.zoom);
+  }
+
+  void _alignHeading(bool enabled) {
+    _headingAligned = enabled;
+    if (!_ready) return;
+    _resumeTimer?.cancel();
+    _paused = false;
+    _camera.rotate(enabled ? -(_self?.heading ?? 0) : 0);
   }
 
   @override
@@ -155,7 +166,7 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
   @override
   Widget build(BuildContext context) {
     final initial =
-        _self ?? _leader ?? widget.positions.values.firstOrNull?.fix;
+        _self ?? _target ?? widget.positions.values.firstOrNull?.fix;
     return ClipRect(
       child: Stack(
         fit: StackFit.expand,
@@ -180,7 +191,7 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
                     ? UnavoColors.ink
                     : UnavoColors.text,
                 interactionOptions: const InteractionOptions(
-                  flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+                  flags: InteractiveFlag.all,
                 ),
                 onMapReady: () {
                   _ready = true;
@@ -207,16 +218,29 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
                 ),
                 MarkerLayer(
                   markers: [
-                    for (final entry in widget.positions.entries)
+                    for (final entry in [
+                      ...widget.positions.entries.where(
+                        (entry) => entry.key != widget.selfHandle,
+                      ),
+                      ...widget.positions.entries.where(
+                        (entry) => entry.key == widget.selfHandle,
+                      ),
+                    ])
                       Marker(
                         key: ValueKey('map-marker-${entry.key}'),
                         point: _point(entry.value.fix),
-                        width: 56,
-                        height: 56,
+                        width: RoomMarkerStyle(
+                          self: entry.key == widget.selfHandle,
+                          car: widget.car,
+                        ).size.width,
+                        height: RoomMarkerStyle(
+                          self: entry.key == widget.selfHandle,
+                          car: widget.car,
+                        ).size.height,
                         child: RoomCarMarker(
                           position: entry.value,
                           self: entry.key == widget.selfHandle,
-                          leader: entry.key == widget.leaderHandle,
+                          car: widget.car,
                         ),
                       ),
                   ],
@@ -225,16 +249,16 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
             ),
           ),
           if (_self != null &&
-              _leader != null &&
-              widget.selfHandle != widget.leaderHandle)
+              _target != null &&
+              widget.selfHandle != widget.targetHandle)
             Positioned(
               left: 8,
-              top: 8,
-              child: RoomMapLabel(roomDistanceLabel(_self!, _leader!)),
+              top: widget.fullscreen ? (widget.car ? 80 : 64) : 8,
+              child: RoomMapLabel(roomDistanceLabel(_self!, _target!)),
             ),
           Positioned(
             right: 0,
-            bottom: 0,
+            bottom: widget.fullscreen ? (widget.car ? 120 : 88) : 0,
             left: 0,
             child: Align(
               alignment: Alignment.bottomRight,

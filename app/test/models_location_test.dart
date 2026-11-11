@@ -87,27 +87,45 @@ void main() {
         ],
         'leader': 'alice',
         'positions': [_fixJson],
-        'trail': {
-          'handle': 'alice',
-          'points': [_fixJson],
+        'trails': {
+          'alice': [_fixJson],
         },
       });
       http.event('location', _fixJson);
       http.event('location-stopped', {'handle': 'alice'});
+      http.event('follow-request', {'requester': 'alice'});
+      http.event('follow-response', {
+        'target': 'alice',
+        'accepted': false,
+        'reason': 'left',
+      });
+      http.event('follow-cancelled', {'requester': 'alice'});
+      http.event('trails', {
+        'trails': {
+          'alice': [_fixJson],
+        },
+      });
       clock.flushMicrotasks();
       final hello = events[0] as Hello;
       expect(hello.self, 'bob');
       expect(hello.members.single.displayName, '앨리스');
       expect(hello.leader, 'alice');
       expect(hello.positions.single, LocationFix.fromJson(_fixJson));
-      expect(hello.trail?.handle, 'alice');
-      expect(hello.trail?.points.single, hello.positions.single);
+      expect(hello.trails.keys, ['alice']);
+      expect(hello.trails['alice']?.single, hello.positions.single);
       expect((events[1] as LocationUpdated).fix, hello.positions.single);
       expect((events[2] as LocationStopped).handle, 'alice');
+      expect((events[3] as FollowRequest).requester, 'alice');
+      expect((events[4] as FollowResponse).reason, 'left');
+      expect((events[4] as FollowResponse).accepted, isFalse);
+      expect((events[5] as FollowCancelled).requester, 'alice');
+      expect((events[6] as TrailsUpdated).trails['alice'], [
+        hello.positions.single,
+      ]);
       final old = Hello.fromJson({'self': 'bob'});
       expect(old.positions, isEmpty);
       expect(old.leader, isNull);
-      expect(old.trail, isNull);
+      expect(old.trails, isEmpty);
       unawaited(subscription.cancel());
       unawaited(http.close());
       clock.flushMicrotasks();
@@ -129,14 +147,13 @@ void main() {
       expect(http.posts.first.body, fix.toJson());
       http.snapshot = {
         'positions': [_fixJson],
-        'trail': {
-          'handle': 'alice',
-          'points': [_fixJson],
+        'trails': {
+          'alice': [_fixJson],
         },
       };
       final snapshot = _finish(clock, api.positions('ABC123'));
       expect(snapshot.positions.single, fix);
-      expect(snapshot.trail?.points.single, fix);
+      expect(snapshot.trails['alice']?.single, fix);
       _finish(clock, api.stopLocation('ABC123'));
       expect(http.deletes.single.uri.path, '/v1/rooms/ABC123/location');
       // SSE를 구독하지 않은 controller도 종료가 완료되게 drain한다.
@@ -146,6 +163,29 @@ void main() {
       expect(clock.pendingTimers, isEmpty);
     });
   });
+
+  test('follow API는 POST target·응답 accepted·DELETE를 서버 경로로 보낸다', () {
+    fakeAsync((clock) {
+      final http = FakeLocationHttp();
+      final api = ApiClient(
+        tokenStore: LocationTestTokenStore(),
+        clientFactory: http.client,
+      );
+      _finish(clock, api.follow('ABC123', 'alice'));
+      _finish(clock, api.respondFollow('ABC123', 'bob', accepted: false));
+      _finish(clock, api.stopFollowing('ABC123'));
+      expect(http.calls.map((call) => (call.method, call.uri.path)), [
+        ('POST', '/v1/rooms/ABC123/follow'),
+        ('POST', '/v1/rooms/ABC123/follow/respond'),
+        ('DELETE', '/v1/rooms/ABC123/follow'),
+      ]);
+      expect(http.posts[0].body, {'target': 'alice'});
+      expect(http.posts[1].body, {'requester': 'bob', 'accepted': false});
+      unawaited(http.events.stream.drain<void>());
+      _finish(clock, http.close());
+      expect(clock.pendingTimers, isEmpty);
+    });
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   for (final method in ['POST', 'GET', 'DELETE']) {
     test('위치 $method 타임아웃도 서버 응답 없음으로 변환한다', () {
