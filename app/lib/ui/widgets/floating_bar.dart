@@ -49,6 +49,7 @@ class FloatingBarButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final size = ControlScale.isCar(context) ? 80.0 : 48.0;
+    final disabledColor = UnavoColors.text.withValues(alpha: 0.4);
     return Semantics(
       label: label,
       button: true,
@@ -69,14 +70,19 @@ class FloatingBarButton extends StatelessWidget {
                 backgroundColor: selected
                     ? UnavoColors.gold
                     : Colors.transparent,
+                disabledBackgroundColor: UnavoColors.panel,
                 foregroundColor: selected ? UnavoColors.ink : UnavoColors.text,
+                disabledForegroundColor: disabledColor,
+                side: onPressed == null
+                    ? BorderSide(color: disabledColor)
+                    : null,
                 shape: const CircleBorder(),
               ),
               icon: UnavoIcon(
                 icon,
                 size: ControlScale.icon(context),
                 color: onPressed == null
-                    ? UnavoColors.muted
+                    ? disabledColor
                     : selected
                     ? UnavoColors.ink
                     : danger

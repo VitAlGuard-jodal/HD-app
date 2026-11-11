@@ -34,7 +34,13 @@ class PanelButton extends StatelessWidget {
     final car = ControlScale.isCar(context);
     final target = ControlScale.target(context);
     final effectiveHeight = height < target ? target : height;
+    final disabledColor = UnavoColors.text.withValues(alpha: 0.4);
     final (background, foreground, border) = switch (style) {
+      _ when onPressed == null => (
+        UnavoColors.panel,
+        disabledColor,
+        disabledColor,
+      ),
       PanelButtonStyle.neutral => (
         UnavoColors.input,
         UnavoColors.text,
@@ -116,7 +122,16 @@ class PanelButton extends StatelessWidget {
                   animationDuration: const Duration(milliseconds: 150),
                   overlayColor: const WidgetStatePropertyAll(Color(0x16F3EDDF)),
                 ),
-                child: content,
+                // 별도 child의 SVG는 버튼의 foregroundColor를 상속하지 않는다.
+                child: onPressed == null && child != null
+                    ? ColorFiltered(
+                        colorFilter: ColorFilter.mode(
+                          foreground,
+                          BlendMode.srcIn,
+                        ),
+                        child: content,
+                      )
+                    : content,
               ),
             ),
           ),

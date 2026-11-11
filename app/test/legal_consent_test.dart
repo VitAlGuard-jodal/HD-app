@@ -8,6 +8,8 @@ import 'package:unavo/screens/phone/auth.dart';
 import 'package:unavo/screens/phone/legal_consent.dart';
 import 'package:unavo/screens/phone/room.dart';
 import 'package:unavo/screens/phone/rooms.dart';
+import 'package:unavo/ui/icons.dart';
+import 'package:unavo/ui/theme.dart';
 import 'package:unavo/ui/widgets/panel_button.dart';
 
 import 'support/consent_fakes.dart';
@@ -31,15 +33,16 @@ void main() {
         expect(find.byType(LegalConsentScreen), findsOneWidget);
         expect(find.byType(RoomsScreen), findsNothing);
         expect(find.text('서비스 이용 동의'), findsOneWidget);
-        expect(_acceptButton(tester).onPressed, isNull);
+        _expectAcceptButtonState(tester, enabled: false);
         expect(services.store.preferences.getString(legalConsentKey), isNull);
         await _tapKey(tester, 'legal-check-0');
-        expect(_acceptButton(tester).onPressed, isNull);
+        _expectAcceptButtonState(tester, enabled: false);
         await _tapKey(tester, 'legal-check-1');
-        expect(_acceptButton(tester).onPressed, isNotNull);
+        _expectAcceptButtonState(tester, enabled: true);
         await _tapKey(tester, 'legal-check-0');
-        expect(_acceptButton(tester).onPressed, isNull);
+        _expectAcceptButtonState(tester, enabled: false);
         await _tapKey(tester, 'legal-check-0');
+        _expectAcceptButtonState(tester, enabled: true);
         await _tapKey(tester, 'legal-accept');
         expect(
           services.store.preferences.getString(legalConsentKey),
@@ -215,6 +218,13 @@ void main() {
         tester.getSize(find.byKey(const ValueKey('legal-accept'))),
         const Size(80, 80),
       );
+      _expectAcceptButtonState(tester, enabled: false);
+      await _tapKey(tester, 'legal-check-0');
+      _expectAcceptButtonState(tester, enabled: false);
+      await _tapKey(tester, 'legal-check-1');
+      _expectAcceptButtonState(tester, enabled: true);
+      await _tapKey(tester, 'legal-check-0');
+      _expectAcceptButtonState(tester, enabled: false);
       await _tapKey(tester, 'legal-decline');
       final card = find.descendant(
         of: find.byType(Dialog),
@@ -234,6 +244,36 @@ void main() {
 
 PanelButton _acceptButton(WidgetTester tester) =>
     tester.widget<PanelButton>(find.byKey(const ValueKey('legal-accept')));
+
+void _expectAcceptButtonState(WidgetTester tester, {required bool enabled}) {
+  final accept = find.byKey(const ValueKey('legal-accept'));
+  final button = tester.widget<OutlinedButton>(
+    find.descendant(of: accept, matching: find.byType(OutlinedButton)),
+  );
+  final states = <WidgetState>{if (!enabled) WidgetState.disabled};
+  final foreground = enabled
+      ? UnavoColors.ink
+      : UnavoColors.text.withValues(alpha: 0.4);
+  expect(_acceptButton(tester).onPressed, enabled ? isNotNull : isNull);
+  expect(button.onPressed, enabled ? isNotNull : isNull);
+  expect(
+    button.style!.backgroundColor!.resolve(states),
+    enabled ? UnavoColors.gold : UnavoColors.panel,
+  );
+  expect(button.style!.foregroundColor!.resolve(states), foreground);
+  expect(
+    button.style!.side!.resolve(states)!.color,
+    enabled ? UnavoColors.gold : foreground,
+  );
+  expect(
+    tester
+        .widget<UnavoIcon>(
+          find.descendant(of: accept, matching: find.byType(UnavoIcon)),
+        )
+        .color,
+    foreground,
+  );
+}
 
 Future<void> _tapKey(WidgetTester tester, String key) async {
   final target = find.byKey(ValueKey(key));
