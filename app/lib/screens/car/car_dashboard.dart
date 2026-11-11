@@ -8,6 +8,7 @@ import '../phone/friends.dart';
 import '../phone/mic.dart';
 import '../phone/room.dart';
 import '../phone/rooms.dart';
+import '../phone/profile.dart';
 import 'car_shell.dart';
 
 class CarDashboard extends StatelessWidget {
@@ -62,7 +63,16 @@ class _CompanionState extends State<_Companion> {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      MicLevel(router: widget.services.mic),
+      Row(
+        children: [
+          Expanded(child: MicLevel(router: widget.services.mic)),
+          const SizedBox(width: 12),
+          ProfileAvatarButton(
+            api: widget.services.api,
+            store: widget.services.store,
+          ),
+        ],
+      ),
       const SizedBox(height: 20),
       Expanded(
         child: _microphone

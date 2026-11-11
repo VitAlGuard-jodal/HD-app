@@ -58,7 +58,7 @@ async function fixture(t: TestContext) {
       handle, displayName, password: "password123!",
     });
     assert.equal(result.status, 201);
-    assert.deepEqual(result.body.user, { handle, displayName: displayName.trim() });
+    assert.deepEqual(result.body.user, { handle, displayName: displayName.trim(), avatar: { kind: null, version: 0 } });
     assert.match(result.body.token, /^[A-Za-z0-9_-]{43}$/);
     return result.body.token as string;
   }
@@ -148,7 +148,7 @@ test("GET /v1/me는 참여 전 null, 참여 중 방 요약, 나간 뒤 null을 �
   const alice = await signup("alice", "앨리스");
   const bob = await signup("bob", "보비");
   assert.deepEqual((await api("GET", "/v1/me", bob)).body, {
-    user: { handle: "bob", displayName: "보비" }, room: null,
+    user: { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 }, order: null }, room: null,
   });
 
   const created = await api("POST", "/v1/rooms", alice, { name: "자동 복귀" });
@@ -162,7 +162,7 @@ test("GET /v1/me는 참여 전 null, 참여 중 방 요약, 나간 뒤 null을 �
   const restored = await api("GET", "/v1/me", bob);
   assert.equal(restored.status, 200);
   assert.deepEqual(restored.body, {
-    user: { handle: "bob", displayName: "보비" },
+    user: { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 }, order: 1 },
     room: { ...details.room, members: details.members },
   });
   // 재참여로 joinedAt을 바꾸거나 다른 사람의 방을 복구하지 않는다.
@@ -199,13 +199,13 @@ test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가�
   assert.equal(login.status, 200);
   const alice = login.body.token as string;
   assert.notEqual(alice, signupToken);
-  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { user: { handle: "alice", displayName: "앨리스" }, room: null });
-  assert.deepEqual((await api("GET", "/v1/users/bob", alice)).body, { user: { handle: "bob", displayName: "보비" } });
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { user: { handle: "alice", displayName: "앨리스", avatar: { kind: null, version: 0 }, order: null }, room: null });
+  assert.deepEqual((await api("GET", "/v1/users/bob", alice)).body, { user: { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 } } });
 
   const added = await api("POST", "/v1/contacts", alice, { handle: "bob" });
   assert.equal(added.status, 201);
-  assert.deepEqual(added.body, { contact: { handle: "bob", displayName: "보비" } });
-  assert.deepEqual((await api("GET", "/v1/contacts", alice)).body.contacts, [added.body.contact]);
+  assert.deepEqual(added.body, { contact: { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 } } });
+  assert.deepEqual((await api("GET", "/v1/contacts", alice)).body.contacts, [{ ...added.body.contact, order: null }]);
   assert.deepEqual((await api("GET", "/v1/contacts", bob)).body.contacts, []);
 
   const created = await api("POST", "/v1/rooms", alice, { name: "함께 출발", invitees: ["bob"] });
@@ -221,7 +221,7 @@ test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가�
 
   const aliceEvents = await events(code, alice);
   const helloAlice = await aliceEvents.next("hello");
-  assert.deepEqual(helloAlice.self, { handle: "alice", displayName: "앨리스" });
+  assert.deepEqual(helloAlice.self, { handle: "alice", displayName: "앨리스", avatar: { kind: null, version: 0 }, order: 0 });
   assert.equal(helloAlice.members.length, 1);
   assert.equal(typeof helloAlice.members[0].joinedAt, "string");
   assert.equal((await api("POST", `/v1/rooms/${code}/join`, bob)).status, 200);
@@ -232,7 +232,7 @@ test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가�
   const bobSecond = await events(code, bob);
   for (const stream of [bobFirst, bobSecond]) {
     const hello = await stream.next("hello");
-    assert.deepEqual(hello.self, { handle: "bob", displayName: "보비" });
+    assert.deepEqual(hello.self, { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 }, order: 1 });
     assert.deepEqual(hello.members.map((member: { handle: string }) => member.handle).sort(), ["alice", "bob"]);
   }
 
@@ -314,7 +314,7 @@ test("SSE가 없는 수신자의 시그널을 보관하고 연결 시 hello 다�
   assert.deepEqual(sent.body, { delivered: false });
 
   const stream = await events(code, bob);
-  assert.deepEqual((await stream.next("hello")).self, { handle: "bob", displayName: "보비" });
+  assert.deepEqual((await stream.next("hello")).self, { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 }, order: 1 });
   assert.deepEqual(await stream.next("signal"), { from: "alice", ...signal });
 });
 
@@ -441,21 +441,21 @@ test("PATCH /v1/me는 표시 이름만 변경하고 회원가입과 같은 이�
     displayName: "  새 이름  ", handle: "changed", password: "changed-password",
   });
   assert.equal(updated.status, 200);
-  assert.deepEqual(updated.body, { user: { handle: "alice", displayName: "새 이름" } });
-  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { ...updated.body, room: null });
+  assert.deepEqual(updated.body, { user: { handle: "alice", displayName: "새 이름", avatar: { kind: null, version: 0 } } });
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { user: { ...updated.body.user, order: null }, room: null });
   assert.deepEqual((await api("GET", "/v1/users/alice", bob)).body, updated.body);
-  assert.deepEqual((await api("GET", "/v1/me", bob)).body, { user: { handle: "bob", displayName: "보비" }, room: null });
+  assert.deepEqual((await api("GET", "/v1/me", bob)).body, { user: { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 }, order: null }, room: null });
   assert.equal((await api("POST", "/v1/auth/login", undefined, { handle: "alice", password: "password123!" })).status, 200);
 
   for (const body of [{}, { displayName: "가" }, { displayName: "  가  " }, { displayName: "" },
     { displayName: "가".repeat(21) }, { displayName: null }, { displayName: 123 }]) {
     assertError(await api("PATCH", "/v1/me", alice, body), 400);
   }
-  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { ...updated.body, room: null });
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { user: { ...updated.body.user, order: null }, room: null });
   for (const displayName of ["새봄", "🚗".repeat(20)]) {
     const boundary = await api("PATCH", "/v1/me", alice, { displayName });
     assert.equal(boundary.status, 200);
-    assert.deepEqual(boundary.body, { user: { handle: "alice", displayName } });
+    assert.deepEqual(boundary.body, { user: { handle: "alice", displayName, avatar: { kind: null, version: 0 } } });
   }
 });
 

@@ -1,15 +1,20 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
 import '../ui/icons.dart';
+import '../net/api_client.dart';
+import '../net/models.dart';
+import '../ui/member_colors.dart';
+import '../ui/widgets/member_avatar.dart';
 import '../ui/theme.dart';
 import 'room_map_geometry.dart';
 
 class RoomMarkerStyle {
   const RoomMarkerStyle({required this.self, required this.car});
   final bool self, car;
-  double get diameter => self ? (car ? 56 : 40) : (car ? 44 : 32);
+  double get diameter => self ? (car ? 56 : 40) : (car ? 48 : 36);
   double get opacity => self ? 1 : .55;
   int get globalZIndex => self ? 300000 : 200000;
   Size get size =>
@@ -25,10 +30,16 @@ class RoomCarMarker extends StatelessWidget {
     this.rotateHeading = true,
     this.applyOpacity = true,
     this.carIcon,
+    this.api,
+    this.avatarImage,
+    this.avatarLoadFailed = false,
   });
   final RoomMapPosition position;
   final bool self, car, rotateHeading, applyOpacity;
   final Widget? carIcon;
+  final ApiClient? api;
+  final ui.Image? avatarImage;
+  final bool avatarLoadFailed;
 
   @override
   Widget build(BuildContext context) {
@@ -49,22 +60,51 @@ class RoomCarMarker extends StatelessWidget {
                     key: const ValueKey('gps-marker'),
                     painter: RoomGpsPainter(
                       hasHeading: position.fix.heading != null,
+                      color: rainbowColor(position.order),
                     ),
                   ),
                 )
               : Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Transform.rotate(
-                      angle: heading,
-                      child:
-                          carIcon ??
-                          UnavoIcon(
-                            'car',
-                            size: style.diameter,
-                            color: UnavoColors.ink,
+                    if (position.avatar.kind != null && !avatarLoadFailed)
+                      MemberAvatar(
+                        member: Member(
+                          position.fix.handle,
+                          position.name,
+                          '',
+                          avatar: position.avatar,
+                          order: position.order,
+                        ),
+                        diameter: style.diameter,
+                        api: api,
+                        decodedImage: avatarImage,
+                        imageResolved: avatarImage != null,
+                      )
+                    else
+                      Transform.rotate(
+                        angle: heading,
+                        child: Container(
+                          width: style.diameter,
+                          height: style.diameter,
+                          padding: const EdgeInsets.all(3),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: UnavoColors.text,
+                            border: Border.all(
+                              color: rainbowColor(position.order),
+                              width: 3,
+                            ),
                           ),
-                    ),
+                          child:
+                              carIcon ??
+                              UnavoIcon(
+                                'car',
+                                size: style.diameter - 12,
+                                color: UnavoColors.ink,
+                              ),
+                        ),
+                      ),
                     Container(
                       color: UnavoColors.text,
                       padding: const EdgeInsets.symmetric(horizontal: 3),
@@ -88,8 +128,9 @@ class RoomCarMarker extends StatelessWidget {
 }
 
 class RoomGpsPainter extends CustomPainter {
-  const RoomGpsPainter({required this.hasHeading});
+  const RoomGpsPainter({required this.hasHeading, required this.color});
   final bool hasHeading;
+  final Color color;
   @override
   void paint(Canvas canvas, Size size) {
     final center = size.center(Offset.zero);
@@ -105,21 +146,21 @@ class RoomGpsPainter extends CustomPainter {
             false,
           )
           ..close(),
-        Paint()..color = Colors.blue.withValues(alpha: .25),
+        Paint()..color = color.withValues(alpha: .25),
       );
     }
     canvas.drawCircle(
       center,
       radius * .32,
-      Paint()..color = Colors.blue.withValues(alpha: .16),
+      Paint()..color = color.withValues(alpha: .16),
     );
     canvas.drawCircle(center, radius * .19, Paint()..color = Colors.white);
-    canvas.drawCircle(center, radius * .14, Paint()..color = Colors.blue);
+    canvas.drawCircle(center, radius * .14, Paint()..color = color);
   }
 
   @override
   bool shouldRepaint(RoomGpsPainter oldDelegate) =>
-      hasHeading != oldDelegate.hasHeading;
+      hasHeading != oldDelegate.hasHeading || color != oldDelegate.color;
 }
 
 class RoomMapControls extends StatelessWidget {

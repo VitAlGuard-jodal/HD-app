@@ -6,6 +6,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../net/models.dart';
+import '../net/api_client.dart';
 import '../ui/theme.dart';
 import 'map_tiles.dart';
 import 'room_map.dart' show RoomMapController;
@@ -43,8 +44,10 @@ class VworldRoomMap extends StatefulWidget {
     this.tiles,
     this.car = false,
     this.fullscreen = false,
+    this.api,
   });
   final RoomMapController controller;
+  final ApiClient? api;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
   final String? targetHandle, selfHandle;
@@ -238,6 +241,7 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
                           car: widget.car,
                         ).size.height,
                         child: RoomCarMarker(
+                          api: widget.api,
                           position: entry.value,
                           self: entry.key == widget.selfHandle,
                           car: widget.car,

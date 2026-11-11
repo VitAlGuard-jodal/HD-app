@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../net/models.dart';
+import '../net/api_client.dart';
 import 'map_provider.dart';
 import 'map_tiles.dart';
 import 'naver_room_map.dart';
@@ -42,8 +43,10 @@ class RoomMap extends StatefulWidget {
     this.fullscreen = false,
     this.onFullscreen,
     this.onStopSharing,
+    this.api,
   });
   final RoomMapController controller;
+  final ApiClient? api;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
   final String? targetHandle, selfHandle;
@@ -69,6 +72,7 @@ class _RoomMapState extends State<RoomMap> {
     children: [
       switch (widget.provider) {
         MapProvider.naver => NaverRoomMap(
+          api: widget.api,
           controller: widget.controller as NaverRoomMapController,
           positions: widget.positions,
           trail: widget.trail,
@@ -82,6 +86,7 @@ class _RoomMapState extends State<RoomMap> {
           fullscreen: widget.fullscreen,
         ),
         MapProvider.vworld => VworldRoomMap(
+          api: widget.api,
           controller: widget.controller,
           positions: widget.positions,
           trail: widget.trail,

@@ -5,6 +5,7 @@ import '../../core/errors.dart';
 import '../../net/models.dart';
 import '../../room/room_session.dart';
 import '../../ui/theme.dart';
+import '../../ui/control_scale.dart';
 import '../../ui/widgets/focus_ring.dart';
 import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/panel_scroll.dart';
@@ -12,6 +13,7 @@ import '../../ui/widgets/room_code.dart';
 import '../../ui/widgets/panel_field.dart';
 import '../../ui/widgets/status_chip.dart';
 import 'map_credits.dart';
+import 'profile.dart';
 
 class RoomsScreen extends StatefulWidget {
   const RoomsScreen({super.key, required this.services, required this.onRoom});
@@ -122,9 +124,16 @@ class _RoomsScreenState extends State<RoomsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Align(
-              alignment: Alignment.centerLeft,
-              child: StatusChip('방', icon: 'rooms'),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const StatusChip('방', icon: 'rooms'),
+                if (!ControlScale.isCar(context))
+                  ProfileAvatarButton(
+                    api: widget.services.api,
+                    store: widget.services.store,
+                  ),
+              ],
             ),
             const SizedBox(height: 16),
             Row(

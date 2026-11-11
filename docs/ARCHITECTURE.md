@@ -289,3 +289,33 @@ hello는 `{self,members,leader,positions,trails,revision,followTarget,pendingFol
 **확인과 남은 결정.** Flutter 테스트는 NaverMap을 pump하지 않고 facade·브이월드·SDK 마커 생성 함수로 검사한다. 새 위젯 테스트는 고정 pump·30초 timeout·핸들러 밖 검증을 사용한다. M5a 작업에서 Flutter test/build는 실행하지 않으며 Fable이 별도 실행한다. 네이티브 지도·주야간 모드·로고 클릭·폰 회전·실차 음성/GPS는 기기 검증 대상이다.
 
 표본이 없는 차량의 첫 따라가기 진입 제약은 M5a-c의 unknown 허용과 동의 후 최초 판정 검사로 해소한다. 따라가기만 중지하거나 상대 요청만 수락한 사람도 통화 방의 내 카드를 눌러 공유를 중지할 수 있다. 별도 텍스트 버튼은 추가하지 않는다.
+
+## 16. 프로필·아바타(M5b)
+
+**저장·프로토콜.** 계정의 `avatar_kind`는 null, `mascot-01`~`mascot-05`, `photo` 중 하나이고 `avatar_version`은 0에서 시작한다. 기존 SQLite에는 두 열을 추가해 null/0으로 초기화하며 반복 초기화는 기존 선택을 보존한다. 성공한 PUT/DELETE마다 version이 1 증가한다. 공개 사용자와 방 멤버에는 `avatar: {kind, version}`을 포함하며 비밀번호·내부 ID·사진 바이트는 포함하지 않는다.
+
+사진은 기본 `server/data/avatars/<handle>.png`에 저장한다. `HDAPP_DB`로 DB 경로를 바꾸면 그 DB의 부모 데이터 폴더 아래 `avatars/`를 사용하며 디렉터리는 첫 업로드 때 만든다. PNG 시그니처, 첫 IHDR 길이·256×256 크기, 청크 경계·IDAT/IEND와 최대 300×1024바이트를 검사한다. base64는 표준 패딩까지 엄격히 검사한다. 마스코트 선택·삭제 시 사진 파일을 지우며 교체 시 이전 사진 이력은 남기지 않는다. 파일 변경·SQLite 변경은 동기 작업으로 처리하고 저장 실패 시 이전 바이트를 복원한다. 앱은 사진 원본·EXIF를 올리지 않고 재인코딩한 PNG만 보낸다.
+
+| 메서드·경로 | 본문·응답 | 규칙 |
+|---|---|---|
+| `PUT /v1/me/avatar` | `{kind:'mascot-03'}` 또는 `{kind:'photo',png:'<base64>'}` → `200 {user}` | 인증 필요. version 증가, 참여 중인 모든 방에 `member-updated {handle,avatar}` SSE |
+| `GET /v1/users/:handle/avatar?v=<version>` | `image/png` | 인증 필요. 현재 사진 version과 정확히 일치할 때만 `Cache-Control: private, max-age=31536000, immutable`. 사진 없음·이전/누락 version은 404·no-store |
+| `DELETE /v1/me/avatar` | `200 {user}` | null로 초기화, 사진 파일 삭제, version 증가와 같은 SSE |
+
+업로드 경로에만 base64를 담을 수 있는 본문 한도를 적용한다. 다른 JSON API의 64KB 한도는 유지한다. 본문·사진·인증 헤더는 로그에 남기지 않는다. `/v1/me.user`, 연락처, 사용자 조회와 인증 응답에서도 최신 avatar를 직렬화한다. hello의 self·members와 방 조회·`/v1/me.room.members`에는 방 안 순번을 담는다. `/v1/me.user.order`는 현재 방 순번(미참여 시 null), `/v1/contacts[].order`는 조회자의 현재 방에 함께 참여한 연락처의 순번(아니면 null)이다.
+
+**입장 순서·색.** 첫 `room_members.joined_at`을 보존하며 재입장은 `left_at`만 지운다. 방의 과거 참여 기록까지 포함해 joined_at 오름차순으로 0부터 order를 계산하고, 같은 시각은 참여 레코드 삽입 순서(rowid)로 결정한다. 중간 멤버가 나가도 뒤 멤버의 순번·색을 당기지 않는다. 기존 DB에서 이미 덮어써진 과거 시각은 복구할 수 없으므로 마이그레이션 당시 저장된 joined_at을 기준으로 이후부터 보존한다. 앱은 서버 order를 우선하고 누락된 경우 현재 멤버 목록의 인덱스를 사용한다.
+
+`ui/member_colors.dart`의 순수 함수 `rainbowColor(order)`는 빨 `#FF4D4D`, 주 `#FF9A3C`, 노 `#FFD93C`, 초 `#4CD964`, 파 `#3C8CFF`, 남 `#4B5BD6`, 보 `#B36BFF`를 7명마다 반복한다. `MemberAvatar`는 3dp 테두리를 이 색으로 유지하고 발화는 바깥의 `UnavoColors.speaking` 글로우로 나타낸다. 02·05 마스코트만 원형 마스크 안에서 0.82배로 줄여 모자·콘을 보존한다. null의 기본 렌더와 사진 로딩 실패는 이름 첫 글자다. C-1에 따라 방 카드·전체 화면 인디케이터에서는 미설정(null)을 `mascot-01`로 표시한다. 카드의 사람 상태 아이콘은 제거하고 발화·연결·기기 아이콘만 유지한다. 좁은 카드에서도 아바타는 이름·아이디 영역의 왼쪽 세로 중앙이며 폰 이름 두 줄 규칙을 유지한다.
+
+**프로필 편집.** 폰 `RoomsScreen` 우상단과 차량 `CarShell` 보조 패널 우상단의 현재 아바타 원형 버튼으로 `ProfileScreen`을 연다. 큰 미리보기는 폰 120dp·차량 160dp이고 무지개 테두리가 없다. 기본 5종은 번들 PNG 격자로 표시하고 선택 항목에만 금색 테두리를 준다. `plus`는 사진첩, `check`는 서버 저장, `back`은 저장하지 않고 돌아가기다. 버튼에 글자를 표시하지 않는다. 서버 저장 전에는 선택·사진 미리보기만 바뀐다.
+
+설치된 `image_picker 1.2.4`의 `pickImage(source: ImageSource.gallery,maxWidth:1024,maxHeight:1024,imageQuality:90)`를 사용한다. 설치된 Android 구현의 `useAndroidPhotoPicker`를 켜 Android 16 미만에서도 Photo Picker 계약을 사용하며 권한을 추가하지 않는다. 기존 image_picker의 설치된 전이 구현만 사용하고 pubspec 의존성은 추가하지 않는다. iOS Info.plist의 `NSPhotoLibraryUsageDescription`은 “프로필 사진으로 쓸 이미지를 고르기 위해 사진첩에 접근합니다”다.
+
+`ui/avatar_images.dart`는 `ImageDescriptor`로 원본 비율을 읽고 `instantiateImageCodec(targetWidth/targetHeight)`로 긴 변 최대 1024px를 디코딩한다. `Canvas`·`PictureRecorder`로 중앙 정사각형을 256×256에 그린 뒤 `toByteData(png)`로 새 PNG를 만든다. 원본 경로·PNG는 앱 저장소에 쓰지 않는다. 크기·디코딩·네트워크 오류는 M4 `showNoticeDialog`로 표시하며 차량 모달에도 80dp 조작부를 전달한다. 저장·사진 처리 중 중복 조작을 막는다. 저장 성공은 로컬 세션 메타데이터와 내 방 카드에 즉시 반영되고, 다른 참여자는 SSE로 갱신된다. 늦은 HTTP/hello가 더 높은 avatar version을 덮지 않는다.
+
+**마커·캐시.** 이 절의 규칙이 §13·§15의 이전 파란 점/차 아이콘 크기를 갱신한다. 상대는 프로필이 있으면 같은 `MemberAvatar`, 없으면 원형 차 아이콘을 사용한다. 폰 36dp·차량 48dp, 3dp 입장 색 테두리, alpha 0.55와 이름 배지를 유지한다. 나는 프로필 유무와 무관하게 GPS 점·흰 테두리·heading 부채꼴이며 색만 내 입장 색으로 바뀐다. 내 alpha 1과 최상위 z-index를 유지한다. 프로필 마커의 얼굴은 heading으로 회전시키지 않는다.
+
+`ApiClient.avatarPhoto`는 인증 헤더를 포함한 version URL로 가져오며 서버 주소·로그인 토큰·handle·version별 메모리 캐시를 사용한다. 새 버전은 재요청하고 실패한 요청은 캐시에서 제거한다. 네이버 `NOverlayImage.fromWidget` 키에는 handle·표시 이름·나 여부·heading 유무·밝기·차량 여부와 avatar kind·version·색을 포함한다. 사진/마스코트는 `ui.Image`로 완전히 디코딩한 후 `RawImage`로 캡처하므로 비어 있는 첫 프레임을 저장하지 않는다. 로딩 실패 시 임시 차 마커를 사용하고 이후 성공하면 동일 버전이어도 아이콘을 교체한다. SDK alpha와 위젯 opacity를 중복 적용하지 않는다. 앱 수동 디스크 캐시는 없으며 SDK의 캡처용 임시 캐시는 §13과 같다. 브이월드도 facade로 전달된 avatar·order·API와 공통 마커 위젯을 사용한다.
+
+**동의·검증.** 개인정보 `legalVersion='2'`, 위치 문서 `locationLegalVersion='1'`과 M6의 항목별 동의 저장을 유지한다. 법률 Markdown은 변경하지 않는다. 추가 검증은 `member_colors_test.dart`, `member_avatar_test.dart`, `profile_screen_test.dart`, 지도 캐시 키·내 GPS 색 테스트, 개인정보 버전 2 재동의 테스트, 서버 `avatars.test.ts`이다. 서버 테스트에는 마이그레이션, 300KB/PNG/IHDR 검사, 버전 증가·사진 삭제, 인증·캐시 헤더, 첫 입장 순서와 재입장, 공개 직렬화·참여 방 SSE를 포함한다. 새 테스트는 30초 timeout과 유한 pump를 사용하고 비동기 핸들러 밖에서 검증한다. 이 작업에서는 정적 분석·구문·포맷만 검사하며 테스트 실행과 빌드는 Fable이 담당한다. 실제 갤러리·네이티브 지도 캡처와 폰/차량 배치는 기기 확인 대상이다.

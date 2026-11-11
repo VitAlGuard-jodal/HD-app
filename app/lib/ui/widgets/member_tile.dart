@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../net/models.dart';
+import '../../net/api_client.dart';
 import '../../call/mesh_coordinator.dart';
 import '../control_scale.dart';
 import '../icons.dart';
@@ -17,9 +18,13 @@ class MemberTile extends StatelessWidget {
     this.connection,
     this.onTap,
     this.compact = false,
+    this.api,
+    this.fallbackOrder = 0,
   });
   final VoidCallback? onTap;
   final Member member;
+  final ApiClient? api;
+  final int fallbackOrder;
   final bool self, compact;
   final bool speaking;
   final bool interrupted;
@@ -36,17 +41,21 @@ class MemberTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final car = ControlScale.isCar(context);
-    final avatar = MemberAvatar(member: member, diameter: car ? 56 : 32);
+    final avatar = MemberAvatar(
+      member: member,
+      diameter: car ? 56 : 32,
+      speaking: _speaking,
+      api: api,
+      fallbackOrder: fallbackOrder,
+      defaultMascot: true,
+    );
     final indicators = [
-      UnavoIcon(
-        _interrupted
-            ? 'micoff'
-            : _speaking
-            ? 'wave'
-            : 'user',
-        size: car ? 24 : 18,
-        color: _speaking ? UnavoColors.onCall : UnavoColors.gold,
-      ),
+      if (_interrupted || _speaking)
+        UnavoIcon(
+          _interrupted ? 'micoff' : 'wave',
+          size: car ? 24 : 18,
+          color: _speaking ? UnavoColors.onCall : UnavoColors.gold,
+        ),
       if (_connectionLabel.isNotEmpty)
         UnavoIcon(
           connection == MeshPeerState.connecting ? 'refresh' : 'hangup',
@@ -63,6 +72,7 @@ class MemberTile extends StatelessWidget {
         ),
     ];
     final names = Column(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
@@ -108,32 +118,36 @@ class MemberTile extends StatelessWidget {
                   color: _speaking ? UnavoColors.onCall : UnavoColors.line,
                 ),
               ),
-              child: compact
-                  ? Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Wrap(
-                          spacing: 8,
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          children: [avatar, ...indicators],
-                        ),
-                        const SizedBox(height: 8),
-                        names,
-                      ],
-                    )
-                  : Row(
-                      children: [
-                        avatar,
-                        SizedBox(width: car ? 12 : 8),
-                        Expanded(child: names),
-                        const SizedBox(width: 8),
-                        Wrap(
-                          direction: car ? Axis.horizontal : Axis.vertical,
-                          spacing: 4,
-                          children: indicators,
-                        ),
-                      ],
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  avatar,
+                  SizedBox(width: car ? 12 : 8),
+                  Expanded(
+                    child: compact
+                        ? Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              names,
+                              if (indicators.isNotEmpty) ...[
+                                const SizedBox(height: 4),
+                                Wrap(spacing: 4, children: indicators),
+                              ],
+                            ],
+                          )
+                        : names,
+                  ),
+                  if (!compact && indicators.isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    Wrap(
+                      direction: car ? Axis.horizontal : Axis.vertical,
+                      spacing: 4,
+                      children: indicators,
                     ),
+                  ],
+                ],
+              ),
             ),
           ),
         ),

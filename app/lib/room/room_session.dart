@@ -84,6 +84,7 @@ class RoomSession extends ChangeNotifier {
     _lastAudioState = _audioState();
     micRouter.addListener(_audioChanged);
     callVolume = store.callVolume;
+    store.addListener(_profileChanged);
     callService.addListener(_nativeCallChanged);
     mediaEngine.localSpeaking = _setLocalSpeaking;
     mediaEngine.remoteSpeaking = (handle, speaking) {
@@ -466,6 +467,19 @@ class RoomSession extends ChangeNotifier {
       case MemberJoined():
         if (event.revision > _serverRevision) _serverRevision = event.revision;
         await _refresh(code, generation);
+      case MemberUpdated():
+        state = state.copyWith(
+          members: [
+            for (final member in state.members)
+              if (member.handle == event.handle &&
+                  event.avatar.version >= member.avatar.version)
+                member.withAvatar(event.avatar)
+              else
+                member,
+          ],
+        );
+        if (event.handle == store.handle)
+          await store.updateAvatar(event.avatar);
       case MemberLeft():
         if (event.revision > _serverRevision) _serverRevision = event.revision;
         _positions.remove(event.handle);
@@ -517,7 +531,28 @@ class RoomSession extends ChangeNotifier {
   }
 
   Future<void> _setMembers(List<Member> members) async {
+    // 늦은 HTTP/hello 응답이 이미 받은 새 프로필 버전을 덮지 않는다.
+    final previous = {
+      for (final member in state.members) member.handle: member.avatar,
+    };
+    final self = store.handle;
+    if (self != null &&
+        store.avatar.version > (previous[self]?.version ?? -1)) {
+      previous[self] = store.avatar;
+    }
+    members = [
+      for (final member in members)
+        if ((previous[member.handle]?.version ?? -1) > member.avatar.version)
+          member.withAvatar(previous[member.handle]!)
+        else
+          member,
+    ];
     state = state.copyWith(members: members);
+    for (final member in members) {
+      if (member.handle == store.handle && member.avatar != store.avatar) {
+        await store.updateAvatar(member.avatar);
+      }
+    }
     _speaking.removeWhere((handle) => !members.any((m) => m.handle == handle));
     await mediaEngine.setMembers(members.map((m) => m.handle).toList());
     if (_mediaJoined &&
@@ -533,6 +568,19 @@ class RoomSession extends ChangeNotifier {
   }
 
   void _setLeader(String? handle) => _leaderHandle = handle;
+
+  void _profileChanged() {
+    final index = state.members.indexWhere(
+      (member) => member.handle == store.handle,
+    );
+    if (index < 0 ||
+        store.avatar.version <= state.members[index].avatar.version)
+      return;
+    final members = [...state.members];
+    members[index] = members[index].withAvatar(store.avatar);
+    state = state.copyWith(members: members);
+    _notify();
+  }
 
   void _setLocationSnapshot(Hello event) {
     _setLeader(event.leader ?? state.room?.leader);
@@ -1309,6 +1357,7 @@ class RoomSession extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    store.removeListener(_profileChanged);
     locationShare.removeListener(_locationChanged);
     locationShare.dispose();
     ++_generation;

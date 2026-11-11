@@ -681,7 +681,11 @@ void main() {
                     .decoration!
                 as BoxDecoration;
         expect((glow.border! as Border).top.width, 3);
-        expect((glow.border! as Border).top.color, UnavoColors.speaking);
+        expect((glow.border! as Border).top.color, const Color(0xFFFF4D4D));
+        expect(
+          glow.boxShadow!.single.color,
+          UnavoColors.speaking.withValues(alpha: .65),
+        );
         expect(glow.boxShadow, isNotEmpty);
         await _tap(tester, '지도 축소');
         expect(panel, findsOneWidget);

@@ -78,13 +78,13 @@ test("방 조회 JSON은 기존 요약 분해 방식과 바이트 단위로 같�
 
 test("me 라우터: 참여 전·나간 뒤 room은 null, 참여 중에는 기존 방 응답과 같은 공개 요약", async (t) => {
   const { db, alice, bob, get } = fixture(t);
-  const user = { handle: "bob", displayName: "보비" };
+  const user = { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 }, order: null };
   assert.deepEqual(await get("/v1/me"), { status: 200, body: { user, room: null } });
   const room = createRoom(db, { code: "ABC234", name: "자동 복귀", createdBy: alice.id })!;
   joinRoom(db, room.id, bob.id);
   const details = (await get(`/v1/rooms/${room.code}`)).body;
   assert.deepEqual(await get("/v1/me"), {
-    status: 200, body: { user, room: { ...details.room, members: details.members } },
+    status: 200, body: { user: { ...user, order: 1 }, room: { ...details.room, members: details.members } },
   });
   leaveRoom(db, room.id, bob.id);
   assert.deepEqual(await get("/v1/me"), { status: 200, body: { user, room: null } });
@@ -100,7 +100,8 @@ test("me 라우터: joined_at이 가장 최근인 활성 방을 고르고 동률
   leaveRoom(db, first.id, bob.id);
   assert.equal((await get("/v1/me")).body.room.code, second.code);
   joinRoom(db, first.id, bob.id, "2026-01-01T00:00:00.000Z");
-  assert.equal((await get("/v1/me")).body.room.code, second.code);
+  // 재입장은 첫 joined_at을 보존하므로 최초 입장이 더 최근인 first를 고른다.
+  assert.equal((await get("/v1/me")).body.room.code, first.code);
   leaveRoom(db, first.id, bob.id);
   leaveRoom(db, second.id, bob.id);
   assert.equal((await get("/v1/me")).body.room, null);

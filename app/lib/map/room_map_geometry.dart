@@ -5,9 +5,16 @@ import 'package:latlong2/latlong.dart';
 import '../net/models.dart';
 
 class RoomMapPosition {
-  const RoomMapPosition(this.fix, {required this.displayName});
+  const RoomMapPosition(
+    this.fix, {
+    required this.displayName,
+    this.avatar = const Avatar(),
+    this.order = 0,
+  });
   final LocationFix fix;
   final String displayName;
+  final Avatar avatar;
+  final int order;
 
   String get name => displayName.trim().isEmpty ? fix.handle : displayName;
 }

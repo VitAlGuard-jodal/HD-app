@@ -380,6 +380,8 @@ class _RoomScreenState extends State<RoomScreen> {
                     ? null
                     : () => _run(() => _tapMember(context, member)),
                 member: member,
+                api: widget.services.api,
+                fallbackOrder: state.members.indexOf(member),
                 self: member.handle == widget.services.store.handle,
                 interrupted:
                     inCall &&
@@ -399,11 +401,11 @@ class _RoomScreenState extends State<RoomScreen> {
                     : session.peerStates[member.handle] ??
                           MeshPeerState.connecting,
               );
-          final names = {
-            for (final member in state.members)
-              member.handle: member.displayName,
+          final membersByHandle = {
+            for (final member in state.members) member.handle: member,
           };
           final map = RoomMap(
+            api: widget.services.api,
             key: _mapKey,
             controller: _mapController,
             provider: widget.services.mapProvider,
@@ -411,7 +413,16 @@ class _RoomScreenState extends State<RoomScreen> {
             positions: session.positions.map(
               (handle, fix) => MapEntry(
                 handle,
-                RoomMapPosition(fix, displayName: names[handle] ?? handle),
+                RoomMapPosition(
+                  fix,
+                  displayName: membersByHandle[handle]?.displayName ?? handle,
+                  avatar: membersByHandle[handle]?.avatar ?? const Avatar(),
+                  order:
+                      membersByHandle[handle]?.order ??
+                      state.members
+                          .indexWhere((member) => member.handle == handle)
+                          .clamp(0, state.members.length),
+                ),
               ),
             ),
             trail: session.trailOf(session.followTarget),
@@ -627,6 +638,11 @@ class _RoomScreenState extends State<RoomScreen> {
                                   child: MemberAvatar(
                                     key: ValueKey('speaker-${member.handle}'),
                                     member: member,
+                                    api: widget.services.api,
+                                    fallbackOrder: state.members.indexOf(
+                                      member,
+                                    ),
+                                    defaultMascot: true,
                                     diameter: car ? 56 : 40,
                                     speaking:
                                         member.handle ==

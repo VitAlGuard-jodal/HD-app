@@ -23,7 +23,7 @@ test("사용자를 저장하고 공개 정보에서 내부 식별자와 해시�
   const { db, alice } = fixture(t);
   assert.equal(alice.displayName, "앨리스");
   assert.equal(findUserByHandle(db, "alice")?.passwordHash, "alice-hash");
-  assert.deepEqual(publicUser(alice), { handle: "alice", displayName: "앨리스" });
+  assert.deepEqual(publicUser(alice), { handle: "alice", displayName: "앨리스", avatar: { kind: null, version: 0 } });
   assert.equal(findUserByHandle(db, "unknown"), undefined);
   assert.equal(findUserByHandle(db, "' OR 1=1 --"), undefined);
   assert.equal(new Date(alice.createdAt).toISOString(), alice.createdAt);
@@ -43,9 +43,9 @@ test("표시 이름만 갱신하고 사용자 조회·친구 목록·방 참여�
   assert.deepEqual(updated, { ...alice, displayName: "새로운 이름" });
   assert.deepEqual(findUserByHandle(db, "alice"), updated);
   assert.deepEqual(findUserByHandle(db, "bob"), bob);
-  assert.deepEqual(listContacts(db, bob.id), [{ handle: "alice", displayName: "새로운 이름" }]);
+  assert.deepEqual(listContacts(db, bob.id), [{ handle: "alice", displayName: "새로운 이름", avatar: { kind: null, version: 0 } }]);
   assert.deepEqual(listRoomMembers(db, room.id), [
-    { handle: "alice", displayName: "새로운 이름", joinedAt: room.createdAt },
+    { handle: "alice", displayName: "새로운 이름", avatar: { kind: null, version: 0 }, joinedAt: room.createdAt, order: 0 },
   ]);
   assert.equal(updateDisplayName(db, -1, "없는 사용자"), undefined);
 });
@@ -81,7 +81,7 @@ test("방 생성자는 자동 참여하고 방의 공개 정보에는 코드와 
   const now = "2026-01-01T00:00:00.000Z";
   const room = createRoom(db, { code: "ABC234", name: "같이 출발", createdBy: alice.id }, now)!;
   assert.deepEqual(publicRoom(room), { code: "ABC234", name: "같이 출발", createdBy: "alice", createdAt: now, leader: "alice" });
-  assert.deepEqual(listRoomMembers(db, room.id), [{ ...publicUser(alice), joinedAt: now }]);
+  assert.deepEqual(listRoomMembers(db, room.id), [{ ...publicUser(alice), joinedAt: now, order: 0 }]);
   assert.equal(isRoomMember(db, room.id, alice.id), true);
   assert.deepEqual(findRoomByCode(db, room.code), room);
 });
@@ -124,7 +124,7 @@ test("나가기는 기록을 남기고 재참여는 기록을 다시 활성화�
   assert.equal(isRoomMember(db, room.id, bob.id), false);
   assert.deepEqual(listRoomMembers(db, room.id).map((member) => member.handle), [alice.handle]);
   assert.equal(joinRoom(db, room.id, bob.id, rejoinedAt), true);
-  assert.deepEqual(findRoomMembership(db, room.id, bob.id), { joinedAt: rejoinedAt, leftAt: null });
+  assert.deepEqual(findRoomMembership(db, room.id, bob.id), { joinedAt, leftAt: null });
   assert.equal(isRoomMember(db, room.id, bob.id), true);
 });
 

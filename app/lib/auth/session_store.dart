@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -11,10 +12,16 @@ abstract interface class TokenStore {
 }
 
 class Session {
-  const Session(this.token, this.handle, this.displayName);
+  const Session(
+    this.token,
+    this.handle,
+    this.displayName, {
+    this.avatar = const Avatar(),
+  });
   final String token;
   final String handle;
   final String displayName;
+  final Avatar avatar;
 }
 
 class SessionStore extends ChangeNotifier implements TokenStore {
@@ -29,6 +36,7 @@ class SessionStore extends ChangeNotifier implements TokenStore {
         token,
         handle,
         preferences.getString('displayName') ?? handle,
+        avatar: _readAvatar(preferences),
       );
     }
   }
@@ -40,6 +48,17 @@ class SessionStore extends ChangeNotifier implements TokenStore {
   String? get token => _session?.token;
   String? get handle => _session?.handle;
   String? get displayName => _session?.displayName;
+  Avatar get avatar => _session?.avatar ?? const Avatar();
+  static Avatar _readAvatar(SharedPreferences preferences) {
+    try {
+      return Avatar.fromJson(
+        jsonDecode(preferences.getString('avatar') ?? '{}'),
+      );
+    } on FormatException {
+      return const Avatar();
+    }
+  }
+
   @override
   String get baseUrl => preferences.getString('baseUrl') ?? defaultBaseUrl;
   int? get manualMicId => preferences.getInt('manualMicId');
@@ -67,19 +86,38 @@ class SessionStore extends ChangeNotifier implements TokenStore {
     // 토큰은 마지막에 쓴다. 비밀번호는 어떤 저장소에도 기록하지 않는다.
     await preferences.setString('handle', result.user.handle);
     await preferences.setString('displayName', result.user.displayName);
+    await preferences.setString(
+      'avatar',
+      jsonEncode(result.user.avatar.toJson()),
+    );
     await preferences.setString('token', result.token);
     _session = Session(
       result.token,
       result.user.handle,
       result.user.displayName,
+      avatar: result.user.avatar,
     );
     notifyListeners();
+  }
+
+  Future<void> updateAvatar(Avatar value) async {
+    final current = _session;
+    if (current == null || value.version < current.avatar.version) return;
+    _session = Session(
+      current.token,
+      current.handle,
+      current.displayName,
+      avatar: value,
+    );
+    notifyListeners();
+    await preferences.setString('avatar', jsonEncode(value.toJson()));
   }
 
   Future<void> clear() async {
     await preferences.remove('token');
     await preferences.remove('handle');
     await preferences.remove('displayName');
+    await preferences.remove('avatar');
     _session = null;
     // 서버 주소와 마이크 선택은 다음 로그인에서도 보존한다.
     notifyListeners();

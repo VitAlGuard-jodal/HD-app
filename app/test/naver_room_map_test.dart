@@ -1,9 +1,14 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:unavo/map/naver_room_map.dart';
 import 'package:unavo/map/room_map_widgets.dart';
 import 'package:unavo/map/room_map_geometry.dart';
 import 'package:unavo/net/models.dart';
+import 'package:unavo/ui/member_colors.dart';
+import 'package:unavo/ui/widgets/member_avatar.dart';
+
+import 'support/icon_bundle.dart';
 
 LocationFix _fix(String handle, double lat, double lng, {double? heading}) =>
     LocationFix(
@@ -16,7 +21,7 @@ LocationFix _fix(String handle, double lat, double lng, {double? heading}) =>
     );
 
 void main() {
-  test('SDK 마커는 내 GPS 불투명·최상위, 상대 차량 0.55와 폰32/차량44를 사용한다', () {
+  test('SDK 마커는 내 GPS 불투명·최상위, 상대 0.55와 폰36/차량48을 사용한다', () {
     for (final car in [false, true]) {
       final self = roomNaverMarker(
         handle: 'bob',
@@ -35,10 +40,74 @@ void main() {
       expect(self.alpha, 1);
       expect(other.alpha, .55);
       expect(self.globalZIndex, greaterThan(other.globalZIndex));
-      expect(RoomMarkerStyle(self: false, car: car).diameter, car ? 44 : 32);
+      expect(RoomMarkerStyle(self: false, car: car).diameter, car ? 48 : 36);
       expect(other.size, RoomMarkerStyle(self: false, car: car).size);
       expect(self.anchor, NPoint.relativeCenter);
       expect(self.isFlat, isTrue);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('마커 캐시는 프로필 종류·버전·무지개 색을 구분하고 좌표 변화에는 재사용한다', () {
+    RoomMarkerKey key({
+      String? kind = 'photo',
+      int version = 1,
+      int order = 0,
+      double lat = 37,
+    }) => roomMarkerCacheKey(
+      position: RoomMapPosition(
+        _fix('alice', lat, 127),
+        displayName: '앨리스',
+        avatar: Avatar(kind: kind, version: version),
+        order: order,
+      ),
+      self: false,
+      brightness: Brightness.dark,
+      car: false,
+    );
+    expect(key(), isNot(key(kind: 'mascot-01')));
+    expect(key(), isNot(key(version: 2)));
+    expect(key(), isNot(key(order: 1)));
+    expect(key(), key(lat: 38));
+    expect(key(), key(order: 7));
+    expect(key().$9, rainbowColor(0));
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('프로필이 있어도 나는 무지개 GPS 점, 상대는 같은 색 원형 프로필이다', (tester) async {
+    final position = RoomMapPosition(
+      _fix('alice', 37, 127, heading: 90),
+      displayName: '앨리스',
+      avatar: const Avatar(kind: 'mascot-05', version: 2),
+      order: 5,
+    );
+    for (final self in [true, false]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: testIconBuilder,
+          home: Scaffold(
+            body: Center(
+              child: RoomCarMarker(position: position, self: self),
+            ),
+          ),
+        ),
+      );
+      if (self) {
+        final painter =
+            tester
+                    .widget<CustomPaint>(
+                      find.byKey(const ValueKey('gps-marker')),
+                    )
+                    .painter!
+                as RoomGpsPainter;
+        expect(painter.color, rainbowColor(5));
+        expect(painter.hasHeading, isTrue);
+        expect(find.byType(MemberAvatar), findsNothing);
+      } else {
+        final avatar = tester.widget<MemberAvatar>(find.byType(MemberAvatar));
+        expect(avatar.member.avatar.kind, 'mascot-05');
+        expect(avatar.member.order, 5);
+        expect(avatar.diameter, 36);
+        expect(find.text('앨리스'), findsOneWidget);
+      }
     }
   }, timeout: const Timeout(Duration(seconds: 30)));
 

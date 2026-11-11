@@ -1,8 +1,15 @@
 import type { DatabaseSync } from "node:sqlite";
 
+export type AvatarKind = null | "mascot-01" | "mascot-02" | "mascot-03" | "mascot-04" | "mascot-05" | "photo";
+export interface Avatar {
+  kind: AvatarKind;
+  version: number;
+}
+
 export interface PublicUser {
   handle: string;
   displayName: string;
+  avatar: Avatar;
 }
 
 export interface StoredUser extends PublicUser {
@@ -25,6 +32,15 @@ export interface StoredRoom extends Omit<PublicRoom, "leader"> {
 
 export interface RoomMember extends PublicUser {
   joinedAt: string;
+  order: number;
+}
+
+type UserRow = Omit<StoredUser, "avatar"> & { avatarKind: AvatarKind; avatarVersion: number };
+
+function storedUser(row: UserRow | undefined): StoredUser | undefined {
+  if (!row) return undefined;
+  const { avatarKind, avatarVersion, ...user } = row;
+  return { ...user, avatar: { kind: avatarKind, version: avatarVersion } };
 }
 
 // 스키마와 쿼리를 한곳에 두어 다른 모듈이 저장 방식에 의존하지 않게 한다.
@@ -69,10 +85,19 @@ export function initializeSchema(db: DatabaseSync): void {
       PRIMARY KEY (room_id, user_id)
     );
   `);
+  // 기존 계정 DB에도 기본 프로필을 부여한다. 반복 초기화는 무변경이다.
+  const columns = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+  if (!columns.some((column) => column.name === "avatar_kind")) {
+    db.exec(`ALTER TABLE users ADD COLUMN avatar_kind TEXT DEFAULT NULL
+      CHECK (avatar_kind IS NULL OR avatar_kind IN ('mascot-01','mascot-02','mascot-03','mascot-04','mascot-05','photo'))`);
+  }
+  if (!columns.some((column) => column.name === "avatar_version")) {
+    db.exec("ALTER TABLE users ADD COLUMN avatar_version INTEGER NOT NULL DEFAULT 0 CHECK (avatar_version >= 0)");
+  }
 }
 
 export function publicUser(user: PublicUser): PublicUser {
-  return { handle: user.handle, displayName: user.displayName };
+  return { handle: user.handle, displayName: user.displayName, avatar: { ...user.avatar } };
 }
 
 export function publicRoom(room: Omit<PublicRoom, "leader">): PublicRoom {
@@ -92,10 +117,11 @@ export function publicRoomDetails(db: DatabaseSync, room: StoredRoom): PublicRoo
 export function findUserByHandle(db: DatabaseSync, handle: string): StoredUser | undefined {
   const row = db.prepare(`
     SELECT id, handle, display_name AS displayName,
-           password_hash AS passwordHash, created_at AS createdAt
+           password_hash AS passwordHash, created_at AS createdAt,
+           avatar_kind AS avatarKind, avatar_version AS avatarVersion
     FROM users WHERE handle = ?
-  `).get(handle) as StoredUser | undefined;
-  return row ? { ...row } : undefined;
+  `).get(handle) as UserRow | undefined;
+  return storedUser(row);
 }
 
 export function createUser(
@@ -114,9 +140,29 @@ export function updateDisplayName(db: DatabaseSync, userId: number, displayName:
   const row = db.prepare(`
     UPDATE users SET display_name = ? WHERE id = ?
     RETURNING id, handle, display_name AS displayName,
-              password_hash AS passwordHash, created_at AS createdAt
-  `).get(displayName.trim(), userId) as StoredUser | undefined;
-  return row ? { ...row } : undefined;
+              password_hash AS passwordHash, created_at AS createdAt,
+              avatar_kind AS avatarKind, avatar_version AS avatarVersion
+  `).get(displayName.trim(), userId) as UserRow | undefined;
+  return storedUser(row);
+}
+
+export function updateAvatar(db: DatabaseSync, userId: number, kind: AvatarKind): StoredUser | undefined {
+  const row = db.prepare(`
+    UPDATE users SET avatar_kind = ?, avatar_version = avatar_version + 1 WHERE id = ?
+    RETURNING id, handle, display_name AS displayName,
+              password_hash AS passwordHash, created_at AS createdAt,
+              avatar_kind AS avatarKind, avatar_version AS avatarVersion
+  `).get(kind, userId) as UserRow | undefined;
+  return storedUser(row);
+}
+
+export function userRoomCodes(db: DatabaseSync, userId: number): string[] {
+  const rows = db.prepare(`
+    SELECT r.code FROM room_members m JOIN rooms r ON r.id = m.room_id
+    WHERE m.user_id = ? AND m.left_at IS NULL
+    ORDER BY r.id
+  `).all(userId) as { code: string }[];
+  return rows.map((row) => row.code);
 }
 
 export function saveToken(
@@ -137,11 +183,12 @@ export function findTokenUser(
 ): StoredUser | undefined {
   const row = db.prepare(`
     SELECT u.id, u.handle, u.display_name AS displayName,
-           u.password_hash AS passwordHash, u.created_at AS createdAt
+           u.password_hash AS passwordHash, u.created_at AS createdAt,
+           u.avatar_kind AS avatarKind, u.avatar_version AS avatarVersion
     FROM tokens t JOIN users u ON u.id = t.user_id
     WHERE t.token_hash = ? AND t.revoked = 0 AND t.expires_at > ?
-  `).get(tokenHash, now) as StoredUser | undefined;
-  return row ? { ...row } : undefined;
+  `).get(tokenHash, now) as UserRow | undefined;
+  return storedUser(row);
 }
 
 export function revokeTokenHash(db: DatabaseSync, tokenHash: string): void {
@@ -150,11 +197,14 @@ export function revokeTokenHash(db: DatabaseSync, tokenHash: string): void {
 
 export function listContacts(db: DatabaseSync, ownerId: number): PublicUser[] {
   const rows = db.prepare(`
-    SELECT u.handle, u.display_name AS displayName
+    SELECT u.handle, u.display_name AS displayName,
+           u.avatar_kind AS avatarKind, u.avatar_version AS avatarVersion
     FROM contacts c JOIN users u ON u.id = c.contact_id
     WHERE c.owner_id = ? ORDER BY u.handle
-  `).all(ownerId) as unknown as PublicUser[];
-  return rows.map(publicUser);
+  `).all(ownerId) as { handle: string; displayName: string; avatarKind: AvatarKind; avatarVersion: number }[];
+  return rows.map(({ handle, displayName, avatarKind, avatarVersion }) => ({
+    handle, displayName, avatar: { kind: avatarKind, version: avatarVersion },
+  }));
 }
 
 export function addContact(
@@ -232,12 +282,12 @@ export function joinRoom(
   userId: number,
   now = new Date().toISOString(),
 ): boolean {
-  // 재접속으로 반복 호출되어도 이미 참여 중인 사람의 시각은 바꾸지 않는다.
+  // 재입장도 첫 참여 시각을 보존하여 방 안 색상·순번이 바뀌지 않는다.
   return Boolean(db.prepare(`
     INSERT INTO room_members (room_id, user_id, joined_at, left_at)
     VALUES (?, ?, ?, NULL)
     ON CONFLICT(room_id, user_id) DO UPDATE
-    SET joined_at = excluded.joined_at, left_at = NULL
+    SET left_at = NULL
     WHERE room_members.left_at IS NOT NULL
   `).run(roomId, userId, now).changes);
 }
@@ -280,9 +330,17 @@ export function findRoomMembership(db: DatabaseSync, roomId: number, userId: num
 
 export function listRoomMembers(db: DatabaseSync, roomId: number): RoomMember[] {
   const rows = db.prepare(`
-    SELECT u.handle, u.display_name AS displayName, m.joined_at AS joinedAt
-    FROM room_members m JOIN users u ON u.id = m.user_id
-    WHERE m.room_id = ? AND m.left_at IS NULL ORDER BY m.joined_at, u.handle
-  `).all(roomId) as unknown as RoomMember[];
-  return rows.map((row) => ({ ...row }));
+    WITH ordered AS (
+      SELECT user_id, joined_at, left_at,
+             ROW_NUMBER() OVER (ORDER BY joined_at, rowid) - 1 AS member_order
+      FROM room_members WHERE room_id = ?
+    )
+    SELECT u.handle, u.display_name AS displayName, m.joined_at AS joinedAt,
+           m.member_order AS "order", u.avatar_kind AS avatarKind, u.avatar_version AS avatarVersion
+    FROM ordered m JOIN users u ON u.id = m.user_id
+    WHERE m.left_at IS NULL ORDER BY m.member_order
+  `).all(roomId) as (Omit<RoomMember, "avatar"> & { avatarKind: AvatarKind; avatarVersion: number })[];
+  return rows.map(({ avatarKind, avatarVersion, ...member }) => ({
+    ...member, avatar: { kind: avatarKind, version: avatarVersion },
+  }));
 }

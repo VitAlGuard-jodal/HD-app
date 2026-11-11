@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 
@@ -33,6 +34,70 @@ class ApiClient {
 
   // 서버 ping 15초 + 여유 5초
   static const sseSilenceTimeout = Duration(seconds: 20);
+
+  final _avatarPhotos = <(String, String?, String, int), Future<Uint8List>>{};
+
+  Future<User> updateAvatar(String kind, {Uint8List? png}) async =>
+      User.fromJson(
+        (await _response('PUT', '/v1/me/avatar', {
+              'kind': kind,
+              if (png != null) 'png': base64Encode(png),
+            }))['user']
+            as JsonMap,
+      );
+
+  Future<User> deleteAvatar() async => User.fromJson(
+    (await _response('DELETE', '/v1/me/avatar'))['user'] as JsonMap,
+  );
+
+  // 인증 세션·서버·버전까지 분리한 메모리 캐시. 실패한 요청은 재시도할 수 있다.
+  Future<Uint8List> avatarPhoto(String handle, int version) {
+    final key = (tokenStore.baseUrl, tokenStore.token, handle, version);
+    final cached = _avatarPhotos[key];
+    if (cached != null) return cached;
+    _avatarPhotos.removeWhere(
+      (old, _) => old.$1 != key.$1 || old.$2 != key.$2 || old.$3 == handle,
+    );
+    if (_avatarPhotos.length >= 64)
+      _avatarPhotos.remove(_avatarPhotos.keys.first);
+    late final Future<Uint8List> pending;
+    pending = _readAvatar(handle, version).catchError((Object error) {
+      if (identical(_avatarPhotos[key], pending)) _avatarPhotos.remove(key);
+      throw error;
+    });
+    _avatarPhotos[key] = pending;
+    return pending;
+  }
+
+  Future<Uint8List> _readAvatar(String handle, int version) async {
+    final client = _clientFactory()..connectionTimeout = _timeout;
+    try {
+      final request = await _open(
+        client,
+        'GET',
+        '/v1/users/${_segment(handle)}/avatar?v=$version',
+      );
+      request.headers.set(HttpHeaders.acceptHeader, 'image/png');
+      final response = await request.close().timeout(
+        _timeout,
+        onTimeout: _onTimeout,
+      );
+      if (response.statusCode != 200) throw await _responseError(response);
+      final bytes = BytesBuilder(copy: false);
+      await for (final chunk in response.timeout(
+        _timeout,
+        onTimeout: _onStreamTimeout,
+      )) {
+        bytes.add(chunk);
+        if (bytes.length > 300 * 1024) {
+          throw const FormatException('프로필 사진은 300KB 이하여야 합니다.');
+        }
+      }
+      return bytes.takeBytes();
+    } finally {
+      client.close(force: true);
+    }
+  }
 
   Future<AuthResult> signup(
     String handle,
@@ -388,6 +453,7 @@ class ApiClient {
     if (!{
       'hello',
       'member-joined',
+      'member-updated',
       'member-left',
       'signal',
       'location',
@@ -407,6 +473,11 @@ class ApiClient {
       return null;
     }
     switch (event.name) {
+      case 'member-updated':
+        return MemberUpdated(
+          data['handle'] as String,
+          Avatar.fromJson(data['avatar']),
+        );
       case 'follow-request':
         return FollowRequest.fromJson(data);
       case 'follow-cancelled':

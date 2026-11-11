@@ -8,6 +8,9 @@ import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../net/models.dart';
+import '../net/api_client.dart';
+import '../ui/avatar_images.dart';
+import '../ui/member_colors.dart';
 import '../ui/theme.dart';
 import 'room_map.dart' show RoomMapController;
 import 'room_map_geometry.dart';
@@ -37,13 +40,14 @@ NMarker roomNaverMarker({
   required NOverlayImage icon,
   required bool self,
   required bool car,
+  bool profile = false,
 }) {
   final style = RoomMarkerStyle(self: self, car: car);
   return NMarker(
     id: handle,
     position: _point(fix),
     icon: icon,
-    angle: fix.heading ?? 0,
+    angle: !self && profile ? 0 : fix.heading ?? 0,
     isFlat: true,
     anchor: NPoint.relativeCenter,
     size: style.size,
@@ -51,7 +55,34 @@ NMarker roomNaverMarker({
   )..setGlobalZIndex(style.globalZIndex);
 }
 
-typedef _MarkerKey = (String, String, bool, bool, Brightness, bool);
+typedef RoomMarkerKey = (
+  String,
+  String,
+  bool,
+  bool,
+  Brightness,
+  bool,
+  String?,
+  int,
+  Color,
+);
+
+RoomMarkerKey roomMarkerCacheKey({
+  required RoomMapPosition position,
+  required bool self,
+  required Brightness brightness,
+  required bool car,
+}) => (
+  position.fix.handle,
+  position.name,
+  self,
+  position.fix.heading != null,
+  brightness,
+  car,
+  position.avatar.kind,
+  position.avatar.version,
+  rainbowColor(position.order),
+);
 
 class NaverRoomMap extends StatefulWidget {
   const NaverRoomMap({
@@ -67,8 +98,10 @@ class NaverRoomMap extends StatefulWidget {
     this.authError,
     this.car = false,
     this.fullscreen = false,
+    this.api,
   });
   final NaverRoomMapController controller;
+  final ApiClient? api;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
   final String? targetHandle, selfHandle;
@@ -86,8 +119,8 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   NaverMapController? _camera;
   late final NCameraPosition _initialCamera;
   final _markers = <String, NMarker>{};
-  final _markerKeys = <String, _MarkerKey>{};
-  final _icons = <_MarkerKey, NOverlayImage>{};
+  final _markerKeys = <String, RoomMarkerKey>{};
+  final _icons = <RoomMarkerKey, NOverlayImage>{};
   final _assetImages = <String, ui.Image>{};
   NPathOverlay? _path;
   List<LocationFix> _pathPoints = const [];
@@ -139,7 +172,9 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
         widget.positions.entries.any((entry) {
           final old = oldWidget.positions[entry.key];
           return old?.fix != entry.value.fix ||
-              old?.displayName != entry.value.displayName;
+              old?.displayName != entry.value.displayName ||
+              old?.avatar != entry.value.avatar ||
+              old?.order != entry.value.order;
         });
     if (positionsChanged ||
         trailChanged ||
@@ -188,14 +223,13 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     _queueFollow();
   }
 
-  _MarkerKey _keyFor(String handle, RoomMapPosition position) => (
-    handle,
-    position.name,
-    handle == widget.selfHandle,
-    position.fix.heading != null,
-    widget.brightness,
-    widget.car,
-  );
+  RoomMarkerKey _keyFor(String handle, RoomMapPosition position) =>
+      roomMarkerCacheKey(
+        position: position,
+        self: handle == widget.selfHandle,
+        brightness: widget.brightness,
+        car: widget.car,
+      );
 
   // fromWidget는 첫 paint 직후 캡처한다. 비동기 SvgPicture의 빈 첫 프레임을
   // 피하려고 기존 SVG를 먼저 디코딩하고 같은 마커 위젯에 RawImage로 넣는다.
@@ -227,14 +261,20 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   }
 
   Future<NOverlayImage?> _markerIcon(
-    _MarkerKey key,
+    RoomMarkerKey key,
     RoomMapPosition position,
   ) async {
     final cached = _icons[key];
     if (cached != null) return cached;
     final style = RoomMarkerStyle(self: key.$3, car: key.$6);
-    final car = key.$3 ? null : await _markerAsset('car', style.diameter);
-    if (!mounted || (!key.$3 && car == null)) return null;
+    final avatar = key.$3 || position.avatar.kind == null
+        ? null
+        : await _markerAvatar(position);
+    final failed = !key.$3 && position.avatar.kind != null && avatar == null;
+    final car = key.$3 || avatar != null
+        ? null
+        : await _markerAsset('car', style.diameter);
+    if (!mounted || (!key.$3 && avatar == null && car == null)) return null;
     final icon = await NOverlayImage.fromWidget(
       context: context,
       size: style.size,
@@ -242,6 +282,8 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
         position: position,
         self: key.$3,
         car: key.$6,
+        avatarImage: avatar,
+        avatarLoadFailed: failed,
         // SDK 회전·alpha를 한 번만 적용한다. 이름은 전체 표시 이름별로 캐시한다.
         rotateHeading: false,
         applyOpacity: false,
@@ -257,7 +299,38 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       ),
     );
     if (!mounted) return null;
-    return _icons[key] = icon;
+    // 실패한 사진의 임시 차 아이콘을 영구 캐시하지 않는다.
+    if (!failed) _icons[key] = icon;
+    return icon;
+  }
+
+  Future<ui.Image?> _markerAvatar(RoomMapPosition position) async {
+    final avatar = position.avatar;
+    final assetKey =
+        'avatar:${position.fix.handle}:${avatar.kind}:${avatar.version}';
+    final cached = _assetImages[assetKey];
+    if (cached != null) return cached;
+    try {
+      final image = await decodeAvatar(
+        Member(position.fix.handle, position.name, '', avatar: avatar),
+        api: widget.api,
+        bundle: DefaultAssetBundle.of(context),
+      );
+      if (image == null) return null;
+      if (!mounted) {
+        image.dispose();
+        return null;
+      }
+      _assetImages.removeWhere((key, oldImage) {
+        if (!key.startsWith('avatar:${position.fix.handle}:')) return false;
+        oldImage.dispose();
+        return true;
+      });
+      return _assetImages[assetKey] = image;
+    } catch (error) {
+      _logError(error);
+      return null;
+    }
   }
 
   Future<void> _syncOverlays() async {
@@ -287,7 +360,19 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       _markers.remove(handle);
       _markerKeys.remove(handle);
     }
-    _icons.removeWhere((key, _) => !widget.positions.containsKey(key.$1));
+    _icons.removeWhere((key, _) {
+      final current = widget.positions[key.$1];
+      return current == null || _keyFor(key.$1, current) != key;
+    });
+    final activeAvatars = {
+      for (final position in widget.positions.values)
+        'avatar:${position.fix.handle}:${position.avatar.kind}:${position.avatar.version}',
+    };
+    for (final key in _assetImages.keys.toList()) {
+      if (key.startsWith('avatar:') && !activeAvatars.contains(key)) {
+        _assetImages.remove(key)?.dispose();
+      }
+    }
     for (final entry in widget.positions.entries.toList()) {
       final key = _keyFor(entry.key, entry.value);
       final icon = await _markerIcon(key, entry.value);
@@ -306,6 +391,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
           icon: icon,
           self: entry.key == widget.selfHandle,
           car: widget.car,
+          profile: current.avatar.kind != null,
         );
         await camera.addOverlay(added);
         if (!_isCurrent(camera)) return;
@@ -313,17 +399,26 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       } else {
         final point = _point(current.fix);
         if (marker.position != point) marker.setPosition(point);
-        if (marker.angle != (current.fix.heading ?? 0)) {
-          marker.setAngle(current.fix.heading ?? 0);
+        final angle =
+            entry.key != widget.selfHandle && current.avatar.kind != null
+            ? 0.0
+            : current.fix.heading ?? 0;
+        if (marker.angle != angle) {
+          marker.setAngle(angle);
         }
-        if (_markerKeys[entry.key] != key) {
+        if (_markerKeys[entry.key] != key || marker.icon != icon) {
           marker.setIcon(icon);
           marker.setSize(style.size);
           marker.setAlpha(style.opacity);
           marker.setGlobalZIndex(style.globalZIndex);
         }
       }
-      _markerKeys[entry.key] = key;
+      if (_icons.containsKey(key)) {
+        _markerKeys[entry.key] = key;
+        _icons.removeWhere((old, _) => old.$1 == entry.key && old != key);
+      } else {
+        _markerKeys.remove(entry.key);
+      }
     }
 
     final points = roomPathPoints(widget.trail);

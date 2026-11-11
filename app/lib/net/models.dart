@@ -2,12 +2,55 @@ import 'package:flutter/foundation.dart';
 
 typedef JsonMap = Map<String, dynamic>;
 
+class Avatar {
+  const Avatar({this.kind, this.version = 0});
+  factory Avatar.fromJson(Object? json) {
+    if (json is! JsonMap) return const Avatar();
+    final kind = json['kind'];
+    final version = json['version'];
+    return Avatar(
+      kind: kind is String && (kind == 'photo' || mascotKinds.contains(kind))
+          ? kind
+          : null,
+      version: version is int && version >= 0 ? version : 0,
+    );
+  }
+  static const mascotKinds = [
+    'mascot-01',
+    'mascot-02',
+    'mascot-03',
+    'mascot-04',
+    'mascot-05',
+  ];
+  final String? kind;
+  final int version;
+  bool get isMascot => mascotKinds.contains(kind);
+  double get scale => kind == 'mascot-02' || kind == 'mascot-05' ? .82 : 1;
+  JsonMap toJson() => {'kind': kind, 'version': version};
+  @override
+  bool operator ==(Object other) =>
+      other is Avatar && kind == other.kind && version == other.version;
+  @override
+  int get hashCode => Object.hash(kind, version);
+}
+
 class User {
-  const User(this.handle, this.displayName);
-  factory User.fromJson(JsonMap json) =>
-      User(json['handle'] as String, json['displayName'] as String);
+  const User(
+    this.handle,
+    this.displayName, {
+    this.avatar = const Avatar(),
+    this.order,
+  });
+  factory User.fromJson(JsonMap json) => User(
+    json['handle'] as String,
+    json['displayName'] as String,
+    avatar: Avatar.fromJson(json['avatar']),
+    order: json['order'] as int?,
+  );
   final String handle;
   final String displayName;
+  final Avatar avatar;
+  final int? order;
 }
 
 class AuthResult {
@@ -45,15 +88,29 @@ class Room {
 }
 
 class Member {
-  const Member(this.handle, this.displayName, this.joinedAt);
+  const Member(
+    this.handle,
+    this.displayName,
+    this.joinedAt, {
+    this.avatar = const Avatar(),
+    this.order,
+  });
   factory Member.fromJson(JsonMap json) => Member(
     json['handle'] as String,
     json['displayName'] as String,
     json['joinedAt'] as String? ?? '',
+    avatar: Avatar.fromJson(json['avatar']),
+    order: json['order'] is int && (json['order'] as int) >= 0
+        ? json['order'] as int
+        : null,
   );
   final String handle;
   final String displayName;
   final String joinedAt;
+  final Avatar avatar;
+  final int? order;
+  Member withAvatar(Avatar value) =>
+      Member(handle, displayName, joinedAt, avatar: value, order: order);
 }
 
 class RoomDetails {
@@ -337,6 +394,12 @@ final class MemberJoined extends RoomEvent {
   const MemberJoined(this.handle, {this.revision = 0});
   final String handle;
   final int revision;
+}
+
+final class MemberUpdated extends RoomEvent {
+  const MemberUpdated(this.handle, this.avatar);
+  final String handle;
+  final Avatar avatar;
 }
 
 final class MemberLeft extends RoomEvent {

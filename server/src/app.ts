@@ -1,5 +1,6 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import type { DatabaseSync } from "node:sqlite";
+import { avatarDirectory, avatarPng, isMascotKind, MAX_AVATAR_BODY_BYTES, readAvatar, saveAvatar } from "./avatars.ts";
 import { hashPassword, issueToken, lookupToken, revokeToken, tokenHash, verifyPassword } from "./auth.ts";
 import { isValidDisplayName, isValidHandle, isValidPassword } from "./handles.ts";
 import { LOCATION_DISCONNECT_GRACE_MS, LOCATION_SWEEP_INTERVAL_MS, RoomLocationStore } from "./locations.ts";
@@ -9,7 +10,7 @@ import { issueIceServers } from "./turn.ts";
 import {
   addContact, createRoom, createUser, deleteContact, deleteEmptyRoom, findCurrentRoom, findRoomByCode, findUserByHandle,
   findRoomMembership, isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicRoomDetails, publicUser,
-  updateDisplayName,
+  updateDisplayName, userRoomCodes,
 } from "./store.ts";
 import type { StoredRoom, StoredUser } from "./store.ts";
 
@@ -37,10 +38,11 @@ function json(response: ServerResponse, status: number, body?: unknown): void {
   response.end(status === 204 ? undefined : JSON.stringify(body));
 }
 
-function readBody(request: IncomingMessage): Promise<Buffer> {
-  if (Number(request.headers["content-length"]) > MAX_BODY_BYTES) {
+function readBody(request: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Buffer> {
+  const tooLarge = () => new HttpError(413, "BODY_TOO_LARGE", `본문은 ${Math.ceil(maxBytes / 1024)}KB 이하여야 합니다.`);
+  if (Number(request.headers["content-length"]) > maxBytes) {
     request.resume();
-    return Promise.reject(new HttpError(413, "BODY_TOO_LARGE", "본문은 64KB 이하여야 합니다."));
+    return Promise.reject(tooLarge());
   }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -60,8 +62,8 @@ function readBody(request: IncomingMessage): Promise<Buffer> {
 
     function onData(chunk: Buffer): void {
       length += chunk.length;
-      if (length > MAX_BODY_BYTES) {
-        fail(new HttpError(413, "BODY_TOO_LARGE", "본문은 64KB 이하여야 합니다."));
+      if (length > maxBytes) {
+        fail(tooLarge());
         // 소켓을 파괴하지 않고 남은 본문을 버려 413 응답을 전달한다.
         request.resume();
         return;
@@ -89,8 +91,8 @@ function readBody(request: IncomingMessage): Promise<Buffer> {
   });
 }
 
-async function readJson(request: IncomingMessage, allowEmpty = false): Promise<Record<string, unknown>> {
-  const raw = await readBody(request);
+async function readJson(request: IncomingMessage, allowEmpty = false, maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
+  const raw = await readBody(request, maxBytes);
   if (raw.length === 0 && allowEmpty) return {};
   if (!/^application\/json\s*(?:;|$)/i.test(request.headers["content-type"] ?? "")) {
     throw new HttpError(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type은 application/json이어야 합니다.");
@@ -133,8 +135,8 @@ function requireMember(db: DatabaseSync, room: StoredRoom, user: StoredUser): vo
   }
 }
 
-export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLocationStore() }: {
-  db: DatabaseSync; hub?: RoomEventHub; locations?: RoomLocationStore;
+export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLocationStore(), avatarsDir = avatarDirectory(db) }: {
+  db: DatabaseSync; hub?: RoomEventHub; locations?: RoomLocationStore; avatarsDir?: string;
 }): RequestListener {
   const locationCounts = new Map<string, { accepted: number; dropped: number; rate: number }>();
   let locationLogTimer: ReturnType<typeof setTimeout> | undefined;
@@ -274,7 +276,57 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
 
     if (method === "GET" && path === "/v1/me") {
       const room = findCurrentRoom(db, user.id);
-      json(response, 200, { user: publicUser(user), room: room ? publicRoomDetails(db, room) : null });
+      const details = room ? publicRoomDetails(db, room) : null;
+      json(response, 200, {
+        user: { ...publicUser(user), order: details?.members.find((member) => member.handle === user.handle)?.order ?? null },
+        room: details,
+      });
+      return;
+    }
+
+    if (path === "/v1/me/avatar" && (method === "PUT" || method === "DELETE")) {
+      let kind: StoredUser["avatar"]["kind"] = null;
+      let png: Buffer | undefined;
+      if (method === "PUT") {
+        const body = await readJson(request, false, MAX_AVATAR_BODY_BYTES);
+        if (body.kind === "photo") {
+          png = avatarPng(body.png);
+          if (!png) invalid("프로필 사진은 300KB 이하의 256×256 PNG여야 합니다.");
+          kind = "photo";
+        } else if (isMascotKind(body.kind) && body.png === undefined) {
+          kind = body.kind;
+        } else {
+          invalid("기본 아바타 또는 사진을 선택해 주세요.");
+        }
+      }
+      // 본문을 기다리는 동안 로그아웃된 토큰은 저장에 사용할 수 없다.
+      const current = authenticate(db, request).user;
+      const updated = saveAvatar(db, avatarsDir, current, kind, png);
+      for (const code of userRoomCodes(db, user.id)) {
+        hub.broadcast(code, "member-updated", { handle: user.handle, avatar: updated.avatar });
+      }
+      response.setHeader("cache-control", "no-store");
+      json(response, 200, { user: publicUser(updated) });
+      return;
+    }
+
+    const avatarMatch = /^\/v1\/users\/([^/]+)\/avatar$/.exec(path);
+    if (method === "GET" && avatarMatch) {
+      response.setHeader("cache-control", "no-store");
+      const handle = pathValue(avatarMatch[1]);
+      if (!isValidHandle(handle)) invalid("아이디 형식이 올바르지 않습니다.");
+      const found = findUserByHandle(db, handle);
+      const version = new URL(request.url!, "http://localhost").searchParams.get("v");
+      // 과거 버전 URL에 새 사진을 immutable로 저장하지 않는다.
+      if (!found || found.avatar.kind !== "photo" || version !== String(found.avatar.version)) {
+        throw new HttpError(404, "AVATAR_NOT_FOUND", "프로필 사진을 찾을 수 없습니다.");
+      }
+      const png = readAvatar(avatarsDir, handle);
+      if (!png) throw new HttpError(404, "AVATAR_NOT_FOUND", "프로필 사진을 찾을 수 없습니다.");
+      response.setHeader("content-type", "image/png");
+      response.setHeader("cache-control", "private, max-age=31536000, immutable");
+      response.setHeader("x-content-type-options", "nosniff");
+      response.end(png);
       return;
     }
 
@@ -299,7 +351,11 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
 
     if (path === "/v1/contacts") {
       if (method === "GET") {
-        json(response, 200, { contacts: listContacts(db, user.id) });
+        const room = findCurrentRoom(db, user.id);
+        const orders = new Map(room ? listRoomMembers(db, room.id).map((member) => [member.handle, member.order]) : []);
+        json(response, 200, { contacts: listContacts(db, user.id).map((contact) => ({
+          ...contact, order: orders.get(contact.handle) ?? null,
+        })) });
         return;
       }
       if (method === "POST") {
@@ -485,7 +541,8 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         const stream = openEventStream(response, () => unsubscribe(), () => Boolean(lookupToken(db, token)));
         unsubscribe = hub.subscribe(code, user.handle, tokenHash(token), stream.send, stream.close);
         if (!stream.send("hello", {
-          self: publicUser(user), members: listRoomMembers(db, room.id),
+          self: { ...publicUser(user), order: listRoomMembers(db, room.id).find((member) => member.handle === user.handle)?.order },
+          members: listRoomMembers(db, room.id),
           leader: room.createdBy, ...locations.snapshot(code, user.handle),
           revision: locations.revision(code),
           followTarget: locations.targetOf(code, user.handle),

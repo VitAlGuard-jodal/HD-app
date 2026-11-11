@@ -18,6 +18,28 @@ import 'support/consent_fakes.dart';
 import 'support/icon_bundle.dart';
 
 void main() {
+  testWidgets('M5b는 개인정보 버전 2를 유지하고 항목별 버전 1 동의는 다시 받는다', (tester) async {
+    final services = await ConsentTestServices.create(
+      tester,
+      savedVersion: '1',
+    );
+    try {
+      expect(legalVersion, '2');
+      expect(locationLegalVersion, '1');
+      await _mount(tester, services);
+      expect(find.byType(LegalConsentScreen), findsOneWidget);
+      await _tapKey(tester, 'legal-check-0');
+      await _tapKey(tester, 'legal-accept');
+      final saved = jsonDecode(
+        services.store.preferences.getString(legalConsentKey)!,
+      );
+      expect(saved['privacy'], {'accepted': true, 'version': '2'});
+      expect(saved['location'], {'accepted': false, 'version': '1'});
+    } finally {
+      await _finish(tester, services);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   testWidgets('16-A 위치 미동의로도 입장하며 두 항목의 여부·문서 버전을 따로 저장한다', (tester) async {
     final services = await ConsentTestServices.create(tester);
     try {
