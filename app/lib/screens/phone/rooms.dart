@@ -11,6 +11,7 @@ import '../../ui/widgets/panel_scroll.dart';
 import '../../ui/widgets/room_code.dart';
 import '../../ui/widgets/panel_field.dart';
 import '../../ui/widgets/status_chip.dart';
+import 'map_credits.dart';
 
 class RoomsScreen extends StatefulWidget {
   const RoomsScreen({super.key, required this.services, required this.onRoom});
@@ -255,6 +256,18 @@ class _RoomsScreenState extends State<RoomsScreen> {
               label: '로그아웃',
               icon: 'lock',
               onPressed: _busy ? null : _logout,
+            ),
+            const SizedBox(height: 16),
+            Align(
+              alignment: Alignment.centerRight,
+              child: PanelButton(
+                label: '지도 출처',
+                icon: 'map',
+                iconOnly: true,
+                onPressed: () => Navigator.of(context).push<void>(
+                  MaterialPageRoute(builder: (_) => const MapCreditsScreen()),
+                ),
+              ),
             ),
           ],
         ),

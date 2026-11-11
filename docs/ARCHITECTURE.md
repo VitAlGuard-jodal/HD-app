@@ -168,3 +168,56 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 정차 판정은 3초 동안 모은 표본의 speed가 모두 1m/s 미만이거나 이동이 3m 미만인 경우다. 관측 초기 3초와 표본이 3초 이상 끊긴 상태는 정차로 보지 않는다. 차량 모드에서 따라가기 **켜기**는 `LocationShare.isStationary`가 참일 때만 가능하며, 불가능하면 “정차 후 설정할 수 있습니다”를 표시한다. 끄기는 언제나 가능하고 폰에는 정차 제한이 없다. 그룹장 자신에게는 따라가기 설정이 no-op이다.
 
 **동의 시트·M2.** `showLocationConsentSheet(context, recipients)`는 현재 참여자 표시 이름, “같은 방 참여자에게 내 차 위치를 보여 줍니다”, “방을 나가거나 중지 아이콘을 누르면 끝납니다”, “위치는 방이 있는 동안만 서버에 남습니다”를 보여 준다. 확인/check와 취소/back은 기존 SVG 아이콘만 사용하며 결과를 bool로 돌려준다. 시트는 아직 화면에 연결하지 않는다. M2에서 지도(`flutter_map`), 실제 GPS(`geolocator`), 위치 아이콘·플로팅 바 연결을 구현하며, Android 위치 포그라운드 서비스는 M2 이후에 다룬다.
+
+## 13. 지도 화면(M2)
+
+이 항은 §12의 M1 범위(실제 GPS 없음·소스 null·동의 시트 미연결·handle 단독 seq)를 확장한다.
+
+**공급원 설정.** `app/lib/map/map_tiles.dart`의 `MapTiles.fromEnvironment()`가 `--dart-define`을 읽으며 `fromDefines()`로 같은 파싱을 단위 검증한다. 실제 키는 앱 코드에 넣지 않는다.
+
+| define | 기본값 / 규칙 |
+|---|---|
+| `UNAVO_TILE_URL` | `https://api.vworld.kr/req/wmts/1.0.0/{key}/{layer}/{z}/{y}/{x}.png` |
+| `UNAVO_TILE_KEY` | 빈 문자열. 없거나 공백이면 TileLayer 자체를 만들지 않는다 |
+| `UNAVO_TILE_LAYER_LIGHT` / `UNAVO_TILE_LAYER_DARK` | `Base` / `midnight` |
+| `UNAVO_TILE_ATTRIBUTION` | `© 국토교통부 브이월드`. 빈 설정도 이 출처로 대체한다 |
+| `UNAVO_TILE_MIN_ZOOM` / `UNAVO_TILE_MAX_ZOOM` | `6` / `19`. 다크 상한 18. 잘못된 숫자는 기본값, 역전된 최솟값은 상한으로 보정한다 |
+
+브이월드 WMTS 경로는 **tileMatrix/tileRow/tileCol = z/y/x** 순서다. 키와 레이어만 치환하고 좌표 치환은 flutter_map에 맡긴다. User-Agent 패키지 이름은 `kr.modumoa.hdapp`이다. 키 없음·타일 오류 시 테마에 맞춘 단색 위에 차 아이콘·궤적을 유지한다. 실패 로그는 프로세스당 한 번만 남기고 키가 포함된 URL·예외 본문을 출력하지 않는다.
+
+**타일 이용 규칙.** M2 지시문의 브이월드 2026-10-30 약관 기준으로 원본 타일을 표시한다. 위성 레이어, 색 필터, 블렌드, 재스타일, 타일 Opacity를 사용하지 않으며 `TileDisplay.instantaneous()`로 타일 페이드도 끈다. `UnavoAppearance` 밝기가 바뀌면 제공 레이어 Base/midnight만 바꾼다. 지도 우하단 출처는 접기·숨기기 기능 없는 텍스트이며 키가 없어도 표시한다.
+
+공급자는 기본 클래스 `NetworkTileProvider`이고 추가 캐시 패키지·수동 저장은 없다. **8.3.2에서는 이 공급자도 디스크 캐시가 기본으로 켜져 있으므로 `cachingProvider: const DisabledMapCachingProvider()`를 명시한다.** Flutter 이미지 메모리 캐시만 사용한다. 설치된 패키지 소스와 [공식 캐시 문서](https://docs.fleaflet.dev/layers/raster-tile-layer/caching.md)로 기본 동작을 확인했다. 대상은 Android/iOS 앱이며 브라우저 자체 캐시 정책을 다루는 웹 배포는 이번 범위가 아니다.
+
+**교체 경계·표시.** `app/lib/map/room_map.dart`는 `RoomMap`과 `abstract class RoomMapController`를 제공한다. 컨트롤러의 `moveTo(latitude, longitude, zoom:)`, `follow()`, `recenter()` 및 위젯 입력 positions/trail/leaderHandle/selfHandle/followLeader/brightness/onInteraction으로 연결한다. positions 값은 표시 이름과 LocationFix를 함께 가진 `RoomMapPosition`이다. RoomScreen은 flutter_map·latlong2나 공급자별 카메라·좌표 객체를 사용하지 않는다. 네이버 SDK로 교체할 때 이 경계 안의 구현과 컨트롤러 팩터리를 바꿀 수 있다.
+
+차 SVG에 표시 이름 첫 글자 배지, 자신에게 강조 테두리, 그룹장에게 별 배지를 붙이고 차 아이콘만 heading에 따라 회전한다. 그룹장 궤적은 포인트색·두께 6·둥근 끝의 Polyline이다. 세션의 7,200점 상한을 유지한다.
+
+따라가기는 내 위치와 전방 궤적점 두 개의 경계를 맞춘다. 순수 함수 `followBounds()`는 heading이 있으면 전방 반평면의 가장 가까운 점을, 없으면 최근접 꼭짓점 다음 점을 고른다. 적절한 점이 없으면 그룹장 현재 위치를 쓴다. 내 위치나 그룹장 위치가 없으면 자동 이동하지 않는다. 여백 80px·자동 줌 상한 18이며(최소 줌 설정이 더 높아도 따라가기 동안 18로 제한), 양쪽 여백을 담을 수 없는 160px 이하 패널에서는 여백만 뷰포트 안으로 줄인다. 직선 거리는 `350 m` / `1.2 km` 형식이다. 사용자의 터치가 끝날 때까지 이동을 멈추고 마지막 제스처 뒤 5초 후 따라가기가 켜진 경우에만 재개한다. 꺼짐에서는 위치 갱신으로 카메라를 움직이지 않는다. 재중심은 내 위치로 이동한다.
+
+**GPS·권한.** `AppServices` 기본 소스는 `GeolocatorLocationSource()`이며 테스트용 소스 주입도 유지한다. 서비스 확인 → checkPermission → denied일 때 requestPermission → 앱 권한 상태 변환 순서다. whileInUse/always는 granted, denied/unableToDetermine는 denied, deniedForever는 deniedForever다. 서비스 꺼짐은 serviceOff이며 권한 요청 도중 서비스가 꺼지는 경우도 다시 확인한다.
+
+- Android: `AndroidSettings(forceLocationManager: true, accuracy: high, intervalDuration: 1s, distanceFilter: 0)`. GMS가 없는 Pleos에서도 LocationManager를 사용한다. 앱 Manifest에 COARSE/FINE_LOCATION을 추가한다.
+- iOS: `AppleSettings(accuracy: best, activityType: automotiveNavigation, distanceFilter: 0, allowBackgroundLocationUpdates: false)`. Info.plist의 `NSLocationWhenInUseUsageDescription`은 “같은 방 참여자에게 내 차 위치를 보여 주기 위해 사용합니다”이다. xcodeproj는 변경하지 않는다.
+- hasSpeed/hasHeading/hasAccuracy가 false인 값과 음수·유효하지 않은 선택 필드는 null로 전달한다. watch 구독 취소는 네이티브 위치 스트림 취소로 전파된다.
+- 백그라운드 권한·위치 포그라운드 서비스·iOS location background mode는 추가하지 않는다. M1과 동일하게 앱 프로세스와 Dart 스트림의 포그라운드 수명만 다룬다.
+
+**화면 연결.** 폰은 패널 높이의 지도 45% / 목록 55%다. 차량은 지도 아래 높이 112의 가로 멤버 띠를 놓고 기존 마이크 상태·음량 기능을 유지한다. 플로팅 바에는 location/locationoff(공유), navigation(따라가기), focus(재중심)를 추가하며 좁은 폭에서는 가로 스크롤한다. 공유 꺼짐에서 탭하면 동의 시트 true일 때만 consent() 후 start(), 켜짐에서 탭하면 stop()한다. 사용할 수 없으면 비활성이고 위치 오류·followError는 기존 오류 영역에 표시한다. 그룹장 자신이거나 그룹장 현재 위치가 없으면 따라가기 버튼은 비활성이다. 차량에서 켜기는 M1의 정차 규칙을 지킨다.
+
+방 목록 하단 map 아이콘은 `MapCreditsScreen`을 연다. 공급원 출처, 국토교통부의 “브이월드 배경지도”·공공누리 제1유형·“수정·가공하지 않음”, “위치는 방이 있는 동안만 서버(국내 리전)에 남습니다”를 표시한다. chevron 아이콘은 `showLicensePage`에 연결한다. 새 SVG 7종은 Fable이 공급하고 앱은 이름만 참조한다. 동작 테스트는 메모리 아이콘 번들을 사용하며 픽셀 스모크 테스트도 아직 공급되지 않은 7종을 필수 파일로 요구하지 않는다.
+
+**seq stream.** LocationShare는 프로세스에서 한 번 생성한 암호학적 난수 8바이트를 16자 소문자 hex stream으로 보낸다. 같은 실행의 stop/start·방 변경에도 stream과 기존 세션 seq 증가를 유지한다. POST 본문·위치 응답·SSE·hello의 LocationFix에 stream이 추가된다. 서버는 16자 hex를 검증하고 lastSeq를 `(handle, stream)`별로 보관한다. 새 stream의 seq 0은 이전 stream의 큰 seq와 비교하지 않고, 현재 위치는 여전히 handle당 한 건으로 덮어쓴다. 기존 handle별 400ms 속도 제한은 유지하므로 stream 변경으로 우회할 수 없다. 앱도 stream이 바뀐 위치를 받아들이고 그룹장 궤적은 stream별 마지막 seq로 중복 제거한다. 나머지 궤적·수신 시각·방 삭제 규칙은 M1과 같다. 옛 hello의 stream 누락은 앱에서 빈 문자열로 읽지만 새 서버 POST에는 유효한 stream이 필수다.
+
+검사·빌드 예시:
+
+```sh
+cd /Users/rlaxorhs77/Desktop/HD-app/server
+npm test
+cd /Users/rlaxorhs77/Desktop/HD-app/app
+flutter analyze --no-pub
+flutter test --no-pub test/map_tiles_test.dart test/room_map_test.dart test/geolocator_location_source_test.dart test/models_location_test.dart test/location_share_test.dart test/room_session_location_test.dart
+flutter test --no-pub
+flutter build apk --release --dart-define=UNAVO_TILE_KEY=<키>
+```
+
+`<키>`는 실제 키로 치환한다. 의존성이 이미 준비된 환경에서 자동 pub 실행도 생략하려면 `flutter build apk --release --no-pub --dart-define=UNAVO_TILE_KEY='<실제 키>'`를 사용한다. M2 작업에서는 pub get/add와 Flutter test/build를 실행하지 않고 정적 분석과 포맷까지 검사한다.

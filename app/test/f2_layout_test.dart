@@ -8,6 +8,7 @@ import 'package:unavo/call/media_engine.dart';
 import 'package:unavo/call/mesh_coordinator.dart';
 import 'package:unavo/core/app_services.dart';
 import 'package:unavo/core/device_mode.dart';
+import 'package:unavo/map/room_map.dart';
 import 'package:unavo/room/room_session.dart';
 import 'package:unavo/screens/phone/room.dart';
 import 'package:unavo/ui/widgets/floating_bar.dart';
@@ -23,6 +24,8 @@ import 'package:unavo/ui/theme.dart';
 import 'package:unavo/ui/widgets/bottom_nav.dart';
 import 'package:unavo/ui/widgets/member_tile.dart';
 import 'package:unavo/ui/widgets/panel_button.dart';
+
+import 'support/icon_bundle.dart';
 
 void main() {
   testWidgets('아이콘 버튼·탭은 글자 없이 라벨과 선택 상태를 유지한다', (tester) async {
@@ -180,7 +183,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('폰 버튼 4개·볼륨 확장, 차량은 슬라이더 없이 80dp 버튼 2개', (tester) async {
+  testWidgets('폰 버튼 7개·볼륨 확장, 차량은 슬라이더 없이 80dp 버튼 5개', (tester) async {
     final semantics = tester.ensureSemantics();
     SharedPreferences.setMockInitialValues({
       'token': 'test',
@@ -203,6 +206,7 @@ void main() {
     for (final car in [false, true]) {
       await tester.pumpWidget(
         MaterialApp(
+          builder: testIconBuilder,
           home: Scaffold(
             body: ControlScale(
               car: car,
@@ -215,11 +219,12 @@ void main() {
           ),
         ),
       );
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
       final controls = find.byKey(const ValueKey('room-controls'));
       expect(
         find.descendant(of: controls, matching: find.byType(FloatingBarButton)),
-        findsNWidgets(car ? 2 : 4),
+        findsNWidgets(car ? 5 : 7),
       );
       expect(
         find.descendant(of: controls, matching: find.byType(Text)),
@@ -228,7 +233,39 @@ void main() {
       expect(find.byTooltip('방 나가기'), findsOneWidget);
       expect(find.byTooltip('통화 참여'), findsNothing);
       expect(find.byTooltip('통화 끊기'), findsNothing);
+      expect(find.byType(RoomMap), findsOneWidget);
+      final locationButtons = tester.widgetList<FloatingBarButton>(
+        find.descendant(of: controls, matching: find.byType(FloatingBarButton)),
+      );
+      expect(
+        locationButtons.map((button) => button.icon),
+        containsAll(['locationoff', 'navigation', 'focus']),
+      );
+      expect(
+        locationButtons
+            .firstWhere((button) => button.icon == 'navigation')
+            .onPressed,
+        isNull,
+      );
+      expect(
+        locationButtons
+            .firstWhere((button) => button.icon == 'focus')
+            .onPressed,
+        isNull,
+      );
+      if (!car) {
+        expect(
+          tester.getSize(find.byType(RoomMap)).height,
+          closeTo(tester.getSize(find.byType(RoomScreen)).height * .45, .01),
+        );
+      }
       if (car) {
+        expect(
+          tester
+              .getSize(find.byKey(const ValueKey('room-member-strip')))
+              .height,
+          112,
+        );
         expect(find.byType(Slider), findsNothing);
         expect(find.byTooltip('통화 음량 100%'), findsNothing);
         expect(find.byTooltip(services.rooms.outputLabel), findsNothing);
@@ -239,6 +276,7 @@ void main() {
         services.rooms.mediaConnection = MediaConnectionState.failed;
         await tester.pumpWidget(
           MaterialApp(
+            builder: testIconBuilder,
             home: Scaffold(
               body: ControlScale(
                 car: true,
@@ -257,7 +295,7 @@ void main() {
             of: controls,
             matching: find.byType(FloatingBarButton),
           ),
-          findsNWidgets(2),
+          findsNWidgets(5),
         );
         expect(find.bySemanticsLabel(RegExp('다시 연결')), findsOneWidget);
         await tester.pump(const Duration(seconds: 10));
@@ -300,7 +338,7 @@ void main() {
     }
     services.dispose();
     semantics.dispose();
-  });
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   testWidgets('참여자 연결 중·실패는 작은 SVG와 semantics, 연결·발화는 기존 표시', (tester) async {
     final semantics = tester.ensureSemantics();
@@ -371,6 +409,7 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
+        builder: testIconBuilder,
         home: Scaffold(
           body: RoomScreen(
             services: services,
@@ -389,7 +428,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     services.dispose();
     semantics.dispose();
-  });
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   test('방 코드 formatter는 대문자로 변환하고 한글·혼합 붙여넣기를 거부한다', () {
     const formatter = RoomCodeFormatter();

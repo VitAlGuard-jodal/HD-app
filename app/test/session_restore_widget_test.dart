@@ -20,6 +20,8 @@ import 'package:unavo/ui/appearance.dart';
 import 'package:unavo/ui/widgets/panel_button.dart';
 import 'package:unavo/ui/widgets/room_code.dart';
 
+import 'support/icon_bundle.dart';
+
 void main() {
   for (final car in [false, true]) {
     testWidgets('${car ? '차' : '폰'} 새 실행 복원은 메인에 복귀 카드만 표시하고 자동으로 열지 않는다', (
@@ -195,6 +197,7 @@ class _Fixture {
       UnavoAppearance(
         controller: appearance,
         child: MaterialApp(
+          builder: testIconBuilder,
           home: car
               ? CarDashboard(
                   services: services,

@@ -28,6 +28,9 @@ class LocationShare extends ChangeNotifier {
   final SharedPreferences preferences;
   final DateTime Function() now;
   static const consentKey = 'location.consent.v1';
+  // 중지·방 변경으로 재시작해도 이 실행의 stream과 세션 seq는 유지한다.
+  static final String _processStream = _newStream();
+  final String stream = _processStream;
   bool get available => source != null;
   bool get consented => _consented;
   bool get sharing => _sharing;
@@ -198,6 +201,7 @@ class LocationShare extends ChangeNotifier {
     _pending = null;
     final fix = LocationFix(
       handle: _activeHandle!,
+      stream: stream,
       lat: sample.lat,
       lng: sample.lng,
       acc: sample.accuracy,
@@ -332,6 +336,14 @@ class LocationShare extends ChangeNotifier {
     unawaited(stop());
     super.dispose();
   }
+}
+
+String _newStream() {
+  final random = math.Random.secure();
+  return List.generate(
+    8,
+    (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
 }
 
 double _distance(double lat1, double lng1, double lat2, double lng2) {

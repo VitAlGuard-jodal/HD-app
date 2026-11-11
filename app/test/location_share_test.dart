@@ -113,6 +113,8 @@ void main() {
       final f = _Fixture.create(clock);
       f.start();
       f.add();
+      final stream = f.http.posts.single.body['stream'];
+      expect(stream, matches(RegExp(r'^[0-9a-f]{16}$')));
       clock.elapse(const Duration(milliseconds: 100));
       f.add(lat: 37.001);
       _finish(clock, f.share.stop());
@@ -125,6 +127,7 @@ void main() {
       _finish(clock, f.share.start());
       f.add(lat: 37.002);
       expect(f.http.posts.last.body['seq'], 1);
+      expect(f.http.posts.last.body['stream'], stream);
       f.http.deleteFails = true;
       _finish(clock, f.share.stop());
       expect(f.share.sharing, isFalse);

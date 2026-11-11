@@ -15,8 +15,13 @@ import 'package:unavo/room/room_session.dart';
 
 import 'support/location_fakes.dart';
 
-LocationFix _fix(String handle, int seq) => LocationFix(
+LocationFix _fix(
+  String handle,
+  int seq, {
+  String stream = '0123456789abcdef',
+}) => LocationFix(
   handle: handle,
+  stream: stream,
   lat: 37 + seq / 100000,
   lng: 127,
   speed: 2,
@@ -27,6 +32,30 @@ LocationFix _fix(String handle, int seq) => LocationFix(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('새 stream의 seq 0과 교차 stream 궤적을 받되 같은 stream 중복은 버린다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      final previous = _fix('alice', 100);
+      final restarted = _fix('alice', 0, stream: '1111111111111111');
+      f.open(positions: [previous], trail: [previous]);
+      f.event(LocationUpdated(restarted));
+      expect(f.session.positions['alice'], restarted);
+      expect(f.session.leaderTrail, [previous, restarted]);
+      f.event(LocationUpdated(restarted));
+      expect(f.session.leaderTrail, [previous, restarted]);
+      final resumed = _fix('alice', 101);
+      f.event(LocationUpdated(resumed));
+      expect(f.session.leaderTrail, [previous, restarted, resumed]);
+      f.event(
+        Hello('bob', f.api.members, 'alice', [
+          resumed,
+        ], LocationTrail('alice', [previous, restarted, resumed, previous])),
+      );
+      expect(f.session.leaderTrail, [previous, restarted, resumed]);
+      f.dispose();
+    });
+  });
 
   test('hello 스냅샷·그룹장 궤적을 초기화하고 중복/역순 위치에는 알리지 않는다', () {
     fakeAsync((clock) {

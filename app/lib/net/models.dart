@@ -63,6 +63,7 @@ class RoomDetails {
 class LocationFix {
   const LocationFix({
     required this.handle,
+    this.stream = '',
     required this.lat,
     required this.lng,
     this.acc,
@@ -74,6 +75,7 @@ class LocationFix {
   });
   factory LocationFix.fromJson(JsonMap json) => LocationFix(
     handle: json['handle'] as String,
+    stream: json['stream'] as String? ?? '',
     lat: (json['lat'] as num).toDouble(),
     lng: (json['lng'] as num).toDouble(),
     acc: (json['acc'] as num?)?.toDouble(),
@@ -84,6 +86,7 @@ class LocationFix {
     receivedAt: json['receivedAt'] as num,
   );
   final String handle;
+  final String stream;
   final double lat, lng;
   final double? acc, speed, heading;
   final num at;
@@ -92,6 +95,7 @@ class LocationFix {
   final num receivedAt;
 
   JsonMap toJson() => {
+    'stream': stream,
     'lat': lat,
     'lng': lng,
     if (acc != null) 'acc': acc,
@@ -102,7 +106,7 @@ class LocationFix {
   };
 
   Object get _values =>
-      (handle, lat, lng, acc, speed, heading, at, seq, receivedAt);
+      (handle, stream, lat, lng, acc, speed, heading, at, seq, receivedAt);
   @override
   bool operator ==(Object other) =>
       other is LocationFix && _values == other._values;

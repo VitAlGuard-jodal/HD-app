@@ -131,7 +131,7 @@ class RoomSession extends ChangeNotifier {
   String? get leaderHandle => _leaderHandle;
   final List<LocationFix> _leaderTrail = [];
   List<LocationFix> get leaderTrail => List.unmodifiable(_leaderTrail);
-  int _lastLeaderSeq = -1;
+  final Map<String, int> _lastLeaderSeq = {};
   bool _followLeader = false;
   bool get followLeader => _followLeader;
   String? _followError;
@@ -368,7 +368,7 @@ class RoomSession extends ChangeNotifier {
     if (_leaderHandle == handle) return;
     _leaderHandle = handle;
     _leaderTrail.clear();
-    _lastLeaderSeq = -1;
+    _lastLeaderSeq.clear();
     _followLeader = false;
     _followError = null;
   }
@@ -377,11 +377,14 @@ class RoomSession extends ChangeNotifier {
     _setLeader(event.leader ?? state.room?.leader);
     _positions.clear();
     for (final fix in event.positions) {
-      if (fix.seq > (_positions[fix.handle]?.seq ?? -1))
+      final previous = _positions[fix.handle];
+      if (previous == null ||
+          fix.stream != previous.stream ||
+          fix.seq > previous.seq)
         _positions[fix.handle] = fix;
     }
     _leaderTrail.clear();
-    _lastLeaderSeq = -1;
+    _lastLeaderSeq.clear();
     if (event.trail?.handle == leaderHandle) {
       for (final fix in event.trail?.points ?? const <LocationFix>[]) {
         _appendTrail(fix);
@@ -390,8 +393,10 @@ class RoomSession extends ChangeNotifier {
   }
 
   bool _appendTrail(LocationFix fix) {
-    if (fix.handle != leaderHandle || fix.seq <= _lastLeaderSeq) return false;
-    _lastLeaderSeq = fix.seq;
+    if (fix.handle != leaderHandle ||
+        fix.seq <= (_lastLeaderSeq[fix.stream] ?? -1))
+      return false;
+    _lastLeaderSeq[fix.stream] = fix.seq;
     _leaderTrail.add(fix);
     if (_leaderTrail.length > 7200)
       _leaderTrail.removeRange(0, _leaderTrail.length - 7200);
@@ -399,7 +404,11 @@ class RoomSession extends ChangeNotifier {
   }
 
   bool _updateLocation(LocationFix fix) {
-    if (fix.seq <= (_positions[fix.handle]?.seq ?? -1)) return false;
+    final previous = _positions[fix.handle];
+    if (previous != null &&
+        fix.stream == previous.stream &&
+        fix.seq <= previous.seq)
+      return false;
     _positions[fix.handle] = fix;
     _appendTrail(fix);
     return true;
@@ -452,7 +461,7 @@ class RoomSession extends ChangeNotifier {
     _positions.clear();
     _leaderHandle = null;
     _leaderTrail.clear();
-    _lastLeaderSeq = -1;
+    _lastLeaderSeq.clear();
     _followLeader = false;
     _followError = null;
   }

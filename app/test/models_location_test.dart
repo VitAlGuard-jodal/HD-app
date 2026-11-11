@@ -9,6 +9,7 @@ import 'support/location_fakes.dart';
 
 const _fixJson = <String, dynamic>{
   'handle': 'alice',
+  'stream': '0123456789abcdef',
   'lat': 37.5,
   'lng': 127,
   'acc': 3,
@@ -25,9 +26,19 @@ void main() {
     expect(fix.lng, 127.0);
     expect(fix.acc, 3.0);
     expect(fix.receivedAt, 1001);
+    expect(fix.stream, '0123456789abcdef');
     expect(
       fix.toJson().keys,
-      unorderedEquals(['lat', 'lng', 'acc', 'speed', 'heading', 'at', 'seq']),
+      unorderedEquals([
+        'stream',
+        'lat',
+        'lng',
+        'acc',
+        'speed',
+        'heading',
+        'at',
+        'seq',
+      ]),
     );
     expect(
       LocationFix.fromJson({
@@ -45,7 +56,13 @@ void main() {
       'seq': 0,
       'receivedAt': 1,
     });
-    expect(minimal.toJson(), {'lat': 0.0, 'lng': 0.0, 'at': 0, 'seq': 0});
+    expect(minimal.toJson(), {
+      'stream': '',
+      'lat': 0.0,
+      'lng': 0.0,
+      'at': 0,
+      'seq': 0,
+    });
     expect(
       Room.fromJson({'code': 'ABC123', 'leader': 'alice'}).leader,
       'alice',

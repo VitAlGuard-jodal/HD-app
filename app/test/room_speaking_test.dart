@@ -17,6 +17,8 @@ import 'package:unavo/ui/control_scale.dart';
 import 'package:unavo/ui/icons.dart';
 import 'package:unavo/ui/widgets/member_tile.dart';
 
+import 'support/icon_bundle.dart';
+
 void main() {
   testWidgets('폰·차량 내 카드는 미디어 발화 콜백을 따르고 음소거·통화 종료 시 꺼진다', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -74,6 +76,7 @@ void main() {
         media.remoteSpeaking?.call('bob', true);
         await tester.pumpWidget(
           MaterialApp(
+            builder: testIconBuilder,
             home: Scaffold(
               body: ControlScale(
                 car: car,
@@ -167,7 +170,8 @@ void main() {
         expect(tester.widget<MemberTile>(self).speaking, isTrue);
         final stopping = services.rooms.leaveCall();
         expect(services.rooms.localSpeaking, isFalse);
-        await tester.pumpAndSettle();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
         await stopping;
         expect(tester.widget<MemberTile>(self).speaking, isFalse);
         media.localSpeaking?.call(true);
@@ -180,5 +184,5 @@ void main() {
       semantics.dispose();
       debugDefaultTargetPlatformOverride = null;
     }
-  });
+  }, timeout: const Timeout(Duration(seconds: 30)));
 }

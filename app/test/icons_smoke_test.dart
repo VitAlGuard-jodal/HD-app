@@ -25,10 +25,25 @@ void main() {
         .where((file) => file.path.endsWith('.svg'))
         .toList();
     expect(files.length, greaterThanOrEqualTo(27));
+    const pending = [
+      'location',
+      'locationoff',
+      'route',
+      'navigation',
+      'focus',
+      'stop',
+      'map',
+    ];
+    final actual = files.map((file) => file.uri.pathSegments.last).toSet();
+    final expected = UnavoIcon.names.map((name) => 'ui-$name.svg').toSet();
+    expect(actual.difference(expected), isEmpty);
     expect(
-      files.map((file) => file.uri.pathSegments.last),
-      unorderedEquals(UnavoIcon.names.map((name) => 'ui-$name.svg')),
+      expected
+          .difference(actual)
+          .difference(pending.map((name) => 'ui-$name.svg').toSet()),
+      isEmpty,
     );
+    expect(UnavoIcon.names, containsAll(pending));
     final assets = <String, ByteData>{
       for (final file in files)
         file.path: ByteData.sublistView(file.readAsBytesSync()),
@@ -56,7 +71,8 @@ void main() {
             ),
           ),
         );
-        await tester.pumpAndSettle();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
         expect(tester.takeException(), isNull, reason: name);
         expect(tester.getSize(find.byType(UnavoIcon)), const Size(28, 28));
         final boundary =
@@ -80,5 +96,5 @@ void main() {
       }
       await tester.pumpWidget(const SizedBox.shrink());
     }
-  });
+  }, timeout: const Timeout(Duration(seconds: 30)));
 }

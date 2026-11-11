@@ -1,5 +1,6 @@
 export interface LocationFix {
   handle: string;
+  stream: string;
   lat: number;
   lng: number;
   acc?: number;
@@ -34,6 +35,7 @@ function valid(value: unknown): value is Omit<LocationFix, "receivedAt"> {
   if (!value || typeof value !== "object") return false;
   const fix = value as Record<string, unknown>;
   return typeof fix.handle === "string" && fix.handle.length > 0
+    && typeof fix.stream === "string" && /^[0-9a-f]{16}$/.test(fix.stream)
     && finite(fix.lat) && fix.lat >= -90 && fix.lat <= 90
     && finite(fix.lng) && fix.lng >= -180 && fix.lng <= 180
     && (fix.acc === undefined || finite(fix.acc) && fix.acc >= 0)
@@ -57,17 +59,18 @@ export class RoomLocationStore {
       return { ok: false, reason: "rate" };
     }
     room.lastReceivedAt.set(fix.handle, now);
-    if (fix.seq <= (room.lastSeq.get(fix.handle) ?? -1)) return { ok: true, dropped: true };
+    const sequenceKey = JSON.stringify([fix.handle, fix.stream]);
+    if (fix.seq <= (room.lastSeq.get(sequenceKey) ?? -1)) return { ok: true, dropped: true };
 
     const stored: LocationFix = {
-      handle: fix.handle, lat: fix.lat, lng: fix.lng,
+      handle: fix.handle, stream: fix.stream, lat: fix.lat, lng: fix.lng,
       ...(fix.acc === undefined ? {} : { acc: fix.acc }),
       ...(fix.speed === undefined ? {} : { speed: fix.speed }),
       ...(fix.heading === undefined ? {} : { heading: fix.heading }),
       at: fix.at, seq: fix.seq, receivedAt: now,
     };
     room.positions.set(fix.handle, stored);
-    room.lastSeq.set(fix.handle, fix.seq);
+    room.lastSeq.set(sequenceKey, fix.seq);
     if (fix.handle === leaderHandle) {
       room.trail ??= { handle: leaderHandle, points: [] };
       room.trail.points.push(stored);

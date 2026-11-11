@@ -12,12 +12,14 @@ import { LOCATION_TRAIL_LIMIT, RoomLocationStore } from "../../src/locations.ts"
 import { RoomEventHub } from "../../src/rooms.ts";
 import { createRoom, createUser, findRoomByCode, isRoomMember, joinRoom } from "../../src/store.ts";
 
-const sample = { handle: "alice", lat: 37.5, lng: 127, acc: 3, speed: 2, heading: 90, at: 1000, seq: 0 };
+const sample = { handle: "alice", stream: "0123456789abcdef", lat: 37.5, lng: 127, acc: 3, speed: 2, heading: 90, at: 1000, seq: 0 };
 
 test("위치 표본은 필수 값·유한수·범위·정수 순번을 검증한다", () => {
   const store = new RoomLocationStore();
   for (const fix of [
     null, [], {}, { ...sample, handle: 1 }, { ...sample, handle: "" },
+    ...[undefined, null, 123, "", "short", "0123456789abcdeg", "0123456789abcdef0"]
+      .map((stream) => ({ ...sample, stream })),
     ...["lat", "lng", "at", "seq", "acc", "speed", "heading"].flatMap((field) =>
       [NaN, Infinity, -Infinity, "1", null].map((value) => ({ ...sample, [field]: value }))),
     ...[{ lat: 90.1 }, { lat: -90.1 }, { lng: 180.1 }, { lng: -180.1 },
@@ -30,8 +32,27 @@ test("위치 표본은 필수 값·유한수·범위·정수 순번을 검증한
   assert.deepEqual(store.accept("ROOM", { ...sample, lat: -90, lng: 180, heading: 360, acc: 0, speed: 0 }, "alice", 0),
     { ok: true, dropped: false });
   assert.equal(store.snapshot("ROOM").positions[0].receivedAt, 0);
-  assert.deepEqual(store.accept("OTHER", { handle: "bob", lat: 90, lng: -180, at: 0, seq: 0 }, "alice", 0),
+  assert.deepEqual(store.accept("OTHER", { handle: "bob", stream: sample.stream, lat: 90, lng: -180, at: 0, seq: 0 }, "alice", 0),
     { ok: true, dropped: false });
+});
+
+test("새 stream의 seq 0은 이전 stream 위치를 덮고 각 순번 공간은 보존한다", () => {
+  const store = new RoomLocationStore();
+  const restarted = { ...sample, stream: "fedcba9876543210", seq: 0, lat: 38 };
+  store.accept("ROOM", { ...sample, seq: 100 }, "alice", 0);
+  // stream을 바꾸어도 handle별 속도 제한은 우회하지 못한다.
+  assert.deepEqual(store.accept("ROOM", restarted, "alice", 399), { ok: false, reason: "rate" });
+  assert.deepEqual(store.accept("ROOM", restarted, "alice", 400), { ok: true, dropped: false });
+  assert.equal(store.snapshot("ROOM").positions.length, 1);
+  assert.equal(store.position("ROOM", "alice")?.stream, restarted.stream);
+  assert.equal(store.position("ROOM", "alice")?.lat, 38);
+  assert.deepEqual(store.snapshot("ROOM").trail?.points.map((fix) => [fix.stream, fix.seq]),
+    [[sample.stream, 100], [restarted.stream, 0]]);
+  assert.deepEqual(store.accept("ROOM", restarted, "alice", 800), { ok: true, dropped: true });
+  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 99 }, "alice", 1200), { ok: true, dropped: true });
+  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 101 }, "alice", 1600), { ok: true, dropped: false });
+  store.remove("ROOM", "alice");
+  assert.deepEqual(store.accept("ROOM", { ...restarted, seq: 1 }, "alice", 2000), { ok: true, dropped: false });
 });
 
 test("400ms 미만은 제한하고 사용자·방별로 독립적으로 순번 역순을 버린다", () => {
@@ -149,6 +170,24 @@ function fixture(t: TestContext) {
   }
   return { db, hub, locations, room, users, send, api };
 }
+
+test("POST 재실행 stream은 seq 0으로 저장되고 SSE와 hello에 그대로 전달된다", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 100000 });
+  const { api, send } = fixture(t);
+  const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
+  await api("POST", "/location", "alice", { ...sample, seq: 100 });
+  t.mock.timers.tick(400);
+  const restarted = { ...sample, stream: "1111111111111111", seq: 0 };
+  assert.deepEqual((await api("POST", "/location", "alice", restarted)).body,
+    { accepted: true, dropped: false });
+  assert.equal(bob.events().at(-1)?.data.stream, restarted.stream);
+  const snapshot = (await api("GET", "/positions", "bob")).body;
+  assert.equal(snapshot.positions.length, 1);
+  assert.equal(snapshot.positions[0].stream, restarted.stream);
+  assert.equal(snapshot.trail.points.length, 2);
+  const hello = send("GET", "/v1/rooms/ABC234/events", "bob").events()[0].data;
+  assert.deepEqual(hello.positions, snapshot.positions);
+});
 
 test("위치 POST/GET/DELETE는 멤버만 허용하고 본문으로 송신자를 사칭할 수 없다", async (t) => {
   const { api } = fixture(t);
