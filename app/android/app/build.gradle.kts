@@ -36,6 +36,13 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    // 결정 17-(b): 제출 APK 는 arm64-v8a + x86_64 만. 32비트 플러그인 라이브러리(약 27 MB)는 제외.
+    packaging {
+        jniLibs {
+            excludes += setOf("lib/armeabi-v7a/**")
+        }
+    }
 }
 
 kotlin {
