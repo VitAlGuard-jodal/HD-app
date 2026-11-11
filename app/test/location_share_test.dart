@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unavo/location/location_share.dart';
 import 'package:unavo/location/location_source.dart';
 import 'package:unavo/net/api_client.dart';
@@ -200,19 +199,19 @@ void main() {
     });
   });
 
-  test('동의 이력이 있어도 이번 실행은 동의·명시 시작을 각각 기다린다', () {
+  test('동의 저장소 없이 명시적 start마다 권한을 요청하고 공유한다', () {
     fakeAsync((clock) {
-      final f = _Fixture.create(clock, savedConsent: true);
-      expect(f.share.consented, isFalse);
+      final f = _Fixture.create(clock);
       expect(f.share.sharing, isFalse);
-      _finish(clock, f.share.start());
       expect(f.source.requests, 0);
-      expect(f.share.error, '위치 공유 동의가 필요합니다');
-      _finish(clock, f.share.consent());
-      expect(f.preferences.getBool(LocationShare.consentKey), isTrue);
-      expect(f.source.requests, 0);
-      expect(f.share.sharing, isFalse);
       _finish(clock, f.share.start());
+      expect(f.source.requests, 1);
+      expect(f.share.sharing, isTrue);
+      expect(f.share.error, isNull);
+      _finish(clock, f.share.stop());
+      _finish(clock, f.share.start());
+      expect(f.source.requests, 2);
+      expect(f.source.watches, 2);
       expect(f.share.sharing, isTrue);
       f.dispose();
     });
@@ -251,7 +250,6 @@ void main() {
 
       final f = _Fixture.create(clock);
       f.source.pendingPermission = Completer<LocationPermissionState>();
-      _finish(clock, f.share.consent());
       final starting = f.share.start();
       clock.flushMicrotasks();
       f.code = null;
@@ -280,7 +278,7 @@ T _finish<T>(FakeAsync clock, Future<T> future) {
 }
 
 class _Fixture {
-  _Fixture(this.clock, this.preferences, {required bool available}) {
+  _Fixture(this.clock, {required bool available}) {
     share = LocationShare(
       api: ApiClient(
         tokenStore: LocationTestTokenStore(),
@@ -289,34 +287,19 @@ class _Fixture {
       source: available ? source : null,
       roomCode: () => code,
       selfHandle: () => 'alice',
-      preferences: preferences,
       now: now,
     );
   }
-  static _Fixture create(
-    FakeAsync clock, {
-    bool available = true,
-    bool savedConsent = false,
-  }) {
-    SharedPreferences.setMockInitialValues({
-      LocationShare.consentKey: savedConsent,
-    });
-    return _Fixture(
-      clock,
-      _finish(clock, SharedPreferences.getInstance()),
-      available: available,
-    );
-  }
+  static _Fixture create(FakeAsync clock, {bool available = true}) =>
+      _Fixture(clock, available: available);
 
   final FakeAsync clock;
-  final SharedPreferences preferences;
   final source = FakeLocationSource();
   final http = FakeLocationHttp();
   late final LocationShare share;
   String? code = 'ABC123';
   DateTime now() => DateTime.utc(2026).add(clock.elapsed);
   void start() {
-    _finish(clock, share.consent());
     _finish(clock, share.start());
   }
 

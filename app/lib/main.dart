@@ -14,6 +14,7 @@ import 'screens/car/car_dashboard.dart';
 import 'screens/phone/auth.dart';
 import 'screens/phone/cover.dart';
 import 'screens/phone/friends.dart';
+import 'screens/phone/legal_consent.dart';
 import 'screens/phone/mic.dart';
 import 'screens/phone/room.dart';
 import 'screens/phone/rooms.dart';
@@ -78,9 +79,13 @@ class _UnavoAppState extends State<UnavoApp> {
   bool _cover = true;
   bool _roomVisible = false;
   bool _carRoomVisible = false;
+  late bool _legalAccepted;
   @override
   void initState() {
     super.initState();
+    _legalAccepted =
+        widget.services.store.preferences.getString(legalConsentKey) ==
+        legalVersion;
     _carRoomVisible = widget.services.rooms.state.code != null;
     widget.services.store.addListener(_sessionChanged);
     widget.services.calls.onOpenRoom = _openRoom;
@@ -105,6 +110,7 @@ class _UnavoAppState extends State<UnavoApp> {
 
   void _openRoom(String code) {
     if (_cover ||
+        !_legalAccepted ||
         widget.services.store.session == null ||
         _roomVisible ||
         !mounted)
@@ -142,6 +148,14 @@ class _UnavoAppState extends State<UnavoApp> {
     });
   }
 
+  void _acceptLegal() {
+    setState(() => _legalAccepted = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final pending = widget.services.calls.pendingOpenRoom;
+      if (mounted && pending != null) _openRoom(pending);
+    });
+  }
+
   @override
   void dispose() {
     widget.services.store.removeListener(_sessionChanged);
@@ -170,6 +184,13 @@ class _UnavoAppState extends State<UnavoApp> {
                 api: widget.services.api,
                 store: widget.services.store,
                 mode: widget.mode,
+              )
+            : !_legalAccepted
+            ? LegalConsentScreen(
+                key: ValueKey(widget.services.store.token),
+                services: widget.services,
+                mode: widget.mode,
+                onAccepted: _acceptLegal,
               )
             : widget.mode == DeviceMode.car
             ? CarDashboard(

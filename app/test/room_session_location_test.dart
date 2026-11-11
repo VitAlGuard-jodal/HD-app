@@ -327,7 +327,6 @@ class _Fixture {
   }
 
   void startSharing() {
-    _finish(clock, session.locationShare.consent());
     _finish(clock, session.locationShare.start());
   }
 

@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/errors.dart';
 import '../net/api_client.dart';
@@ -15,7 +14,6 @@ class LocationShare extends ChangeNotifier {
     required this.source,
     required this.roomCode,
     required this.selfHandle,
-    required this.preferences,
     DateTime Function()? now,
   }) : now = now ?? DateTime.now {
     _lastState = _stateValues();
@@ -25,21 +23,18 @@ class LocationShare extends ChangeNotifier {
   final LocationSource? source;
   final String? Function() roomCode;
   final String? Function() selfHandle;
-  final SharedPreferences preferences;
   final DateTime Function() now;
-  static const consentKey = 'location.consent.v1';
   // 중지·방 변경으로 재시작해도 이 실행의 stream과 세션 seq는 유지한다.
   static final String _processStream = _newStream();
   final String stream = _processStream;
   bool get available => source != null;
-  bool get consented => _consented;
   bool get sharing => _sharing;
   LocationPermissionState? get permission => _permission;
   String? get error => _error;
   LocationFix? get lastSent => _lastSent;
   bool get isStationary => _isStationary;
 
-  bool _consented = false, _sharing = false, _isStationary = false;
+  bool _sharing = false, _isStationary = false;
   bool _disposed = false;
   LocationPermissionState? _permission;
   String? _error, _activeCode, _activeHandle;
@@ -52,14 +47,7 @@ class LocationShare extends ChangeNotifier {
   Timer? _sendTimer, _stationaryTimer;
   Future<void>? _starting, _stopping, _sending;
 
-  // 저장값은 동의 이력이다. 새 실행의 동의나 공유 시작으로 복원하지 않는다.
-  Future<void> consent() async {
-    await preferences.setBool(consentKey, true);
-    if (_disposed || _consented) return;
-    _consented = true;
-    _notify();
-  }
-
+  // 기능을 켤 때마다 화면이 먼저 동의를 받는다. 공유는 자동 복원하지 않는다.
   Future<void> start() {
     if (_disposed || sharing) return Future<void>.value();
     if (_starting != null) return _starting!;
@@ -80,10 +68,6 @@ class LocationShare extends ChangeNotifier {
       return;
     if (!available) {
       _setError('위치 공유를 사용할 수 없습니다');
-      return;
-    }
-    if (!consented) {
-      _setError('위치 공유 동의가 필요합니다');
       return;
     }
     if (code == null || handle == null) {
@@ -313,7 +297,6 @@ class LocationShare extends ChangeNotifier {
 
   List<Object?> _stateValues() => [
     available,
-    consented,
     sharing,
     permission,
     error,

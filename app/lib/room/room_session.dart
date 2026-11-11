@@ -65,7 +65,6 @@ class RoomSession extends ChangeNotifier {
       source: locationSource,
       roomCode: () => state.isLeaving ? null : state.code,
       selfHandle: () => store.handle,
-      preferences: store.preferences,
       now: locationNow,
     );
     _lastLocationState = _locationState();
@@ -414,15 +413,17 @@ class RoomSession extends ChangeNotifier {
     return true;
   }
 
+  bool get followNeedsStop =>
+      (deviceMode ??
+              (micRouter.isAutomotive ? DeviceMode.car : DeviceMode.phone)) ==
+          DeviceMode.car &&
+      !locationShare.isStationary;
+
   void setFollowLeader(bool value) {
     if (_disposed || leaderHandle == null || leaderHandle == store.handle)
       return;
     if (value == _followLeader && _followError == null) return;
-    final car =
-        (deviceMode ??
-            (micRouter.isAutomotive ? DeviceMode.car : DeviceMode.phone)) ==
-        DeviceMode.car;
-    final blocked = value && car && !locationShare.isStationary;
+    final blocked = value && followNeedsStop;
     final next = blocked ? _followLeader : value;
     final message = blocked ? '정차 후 설정할 수 있습니다' : null;
     if (_followLeader == next && _followError == message) return;
@@ -433,7 +434,6 @@ class RoomSession extends ChangeNotifier {
 
   List<Object?> _locationState() => [
     locationShare.available,
-    locationShare.consented,
     locationShare.sharing,
     locationShare.permission,
     locationShare.error,
@@ -444,8 +444,8 @@ class RoomSession extends ChangeNotifier {
   void _locationChanged() {
     final next = _locationState();
     if (listEquals(next, _lastLocationState)) return;
-    final previousFix = _lastLocationState[5];
-    final wasSharing = _lastLocationState[2] as bool;
+    final previousFix = _lastLocationState[4];
+    final wasSharing = _lastLocationState[1] as bool;
     _lastLocationState = next;
     final fix = locationShare.lastSent;
     if (locationShare.sharing && fix != null && fix != previousFix) {

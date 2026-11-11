@@ -29,6 +29,7 @@ flutter:
   assets:
     - assets/backdrop/
     - assets/icons/
+    - assets/legal/
   fonts:
     - family: Rye
       fonts:

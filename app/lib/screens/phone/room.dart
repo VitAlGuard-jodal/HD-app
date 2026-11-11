@@ -16,7 +16,7 @@ import '../../ui/icons.dart';
 import '../../ui/theme.dart';
 import '../../ui/widgets/floating_bar.dart';
 import '../../ui/widgets/member_tile.dart';
-import '../../ui/widgets/location_consent_sheet.dart';
+import '../../ui/widgets/unavo_dialog.dart';
 import '../../ui/widgets/panel_scroll.dart';
 import '../../ui/widgets/phone_frame.dart';
 import '../../ui/widgets/room_code.dart';
@@ -76,6 +76,7 @@ class _RoomScreenState extends State<RoomScreen> {
     if (mounted &&
         !widget.embedded &&
         !_popped &&
+        ModalRoute.of(context)?.isCurrent == true &&
         widget.services.rooms.state.code == null) {
       _popped = true;
       Navigator.of(context).pop();
@@ -87,23 +88,76 @@ class _RoomScreenState extends State<RoomScreen> {
     _closeIfLeft();
   }
 
-  Future<void> _toggleLocation() async {
+  Future<void> _toggleLocation(BuildContext dialogContext) async {
     final share = widget.services.locationShare;
     if (share.sharing) {
       await share.stop();
       return;
     }
+    await _startLocation(dialogContext);
+  }
+
+  Future<bool> _startLocation(
+    BuildContext dialogContext, {
+    String feature = '위치 공유',
+  }) async {
     final session = widget.services.rooms;
     final code = session.state.code;
-    final accepted = await showLocationConsentSheet(
-      context,
-      session.state.members.map((member) => member.displayName).toList(),
+    final handle = widget.services.store.handle;
+    if (code == null || session.state.isLeaving) return false;
+    final recipients = session.state.members
+        .where((member) => member.handle != handle)
+        .map((member) => member.displayName)
+        .toList();
+    final accepted = await showConsentDialog(
+      dialogContext,
+      title: '위치 공유',
+      lines: [
+        recipients.isEmpty ? '현재 다른 참여자가 없습니다' : recipients.join(', '),
+        '같은 방 참여자에게 내 차 위치를 보여 줍니다',
+        '방을 나가거나 위치 공유 아이콘을 다시 누르면 끝납니다',
+        '위치는 방이 있는 동안만 서버(국내)에 남습니다',
+      ],
     );
-    if (!mounted || !accepted || code == null || session.state.code != code)
+    if (!mounted || !dialogContext.mounted) return false;
+    if (!accepted) {
+      await showNoticeDialog(
+        dialogContext,
+        message: '동의하지 않아 $feature 기능을 사용할 수 없습니다',
+      );
+      return false;
+    }
+    if (session.state.code != code ||
+        session.state.isLeaving ||
+        widget.services.store.handle != handle)
+      return false;
+    await session.locationShare.start();
+    return mounted &&
+        session.state.code == code &&
+        !session.state.isLeaving &&
+        session.locationShare.sharing;
+  }
+
+  Future<void> _toggleFollowLeader(BuildContext dialogContext) async {
+    final session = widget.services.rooms;
+    if (session.followLeader) {
+      session.setFollowLeader(false);
       return;
-    await share.consent();
-    if (!mounted || session.state.code != code) return;
-    await share.start();
+    }
+    if (session.followNeedsStop) {
+      session.setFollowLeader(true); // 기존 정차 오류를 동의 팝업 전에 표시한다.
+      return;
+    }
+    final leader = session.leaderHandle;
+    if (!session.locationShare.sharing &&
+        !await _startLocation(dialogContext, feature: '그룹장 따라가기'))
+      return;
+    if (!mounted ||
+        session.state.isLeaving ||
+        session.leaderHandle != leader ||
+        !session.positions.containsKey(leader))
+      return;
+    session.setFollowLeader(true);
   }
 
   void _mapInteracted() {
@@ -356,30 +410,36 @@ class _RoomScreenState extends State<RoomScreen> {
                       ? () => _run(session.cycleOutputRoute)
                       : null,
                 ),
-              FloatingBarButton(
-                label: session.locationShare.sharing ? '위치 공유 중지' : '위치 공유',
-                icon: session.locationShare.sharing
-                    ? 'location'
-                    : 'locationoff',
-                selected: session.locationShare.sharing,
-                onPressed:
-                    session.locationShare.available &&
-                        !_busy &&
-                        !state.isLeaving
-                    ? () => _run(_toggleLocation)
-                    : null,
+              Builder(
+                builder: (context) => FloatingBarButton(
+                  label: session.locationShare.sharing ? '위치 공유 중지' : '위치 공유',
+                  icon: session.locationShare.sharing
+                      ? 'location'
+                      : 'locationoff',
+                  selected: session.locationShare.sharing,
+                  onPressed:
+                      session.locationShare.available &&
+                          !_busy &&
+                          !state.isLeaving
+                      ? () => _run(() => _toggleLocation(context))
+                      : null,
+                ),
               ),
-              FloatingBarButton(
-                label: '그룹장 따라가기',
-                icon: 'navigation',
-                selected: session.followLeader,
-                onPressed:
-                    session.leaderHandle != null &&
-                        session.leaderHandle != widget.services.store.handle &&
-                        session.positions.containsKey(session.leaderHandle) &&
-                        !state.isLeaving
-                    ? () => session.setFollowLeader(!session.followLeader)
-                    : null,
+              Builder(
+                builder: (context) => FloatingBarButton(
+                  label: '그룹장 따라가기',
+                  icon: 'navigation',
+                  selected: session.followLeader,
+                  onPressed:
+                      session.leaderHandle != null &&
+                          session.leaderHandle !=
+                              widget.services.store.handle &&
+                          session.positions.containsKey(session.leaderHandle) &&
+                          !_busy &&
+                          !state.isLeaving
+                      ? () => _run(() => _toggleFollowLeader(context))
+                      : null,
+                ),
               ),
               FloatingBarButton(
                 label: '내 위치로',
