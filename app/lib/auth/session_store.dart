@@ -24,11 +24,23 @@ class Session {
   final Avatar avatar;
 }
 
+String resolveDefaultBaseUrl({
+  required String environment,
+  required bool isIOS,
+}) {
+  final baseUrl = environment.trim();
+  if (baseUrl.isNotEmpty) return baseUrl;
+  return isIOS ? 'http://127.0.0.1:8787' : 'http://10.0.2.2:8787';
+}
+
 class SessionStore extends ChangeNotifier implements TokenStore {
   SessionStore(this.preferences, {String? defaultBaseUrl})
     : defaultBaseUrl =
           defaultBaseUrl ??
-          (Platform.isIOS ? 'http://127.0.0.1:8787' : 'http://10.0.2.2:8787') {
+          resolveDefaultBaseUrl(
+            environment: const String.fromEnvironment('UNAVO_SERVER_URL'),
+            isIOS: Platform.isIOS,
+          ) {
     final token = preferences.getString('token');
     final handle = preferences.getString('handle');
     if (token != null && token.trim().isNotEmpty && handle != null) {

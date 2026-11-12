@@ -1,7 +1,11 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:unavo/auth/session_store.dart';
 import 'package:unavo/core/server_address.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   test('normalizesWhitespaceTrailingSlashAndKeepsBasePath', () {
     expect(
       ServerAddress.normalize(' https://voice.example.com/base/// '),
@@ -97,5 +101,75 @@ void main() {
         reason: address,
       );
     }
+  });
+
+  group('resolveDefaultBaseUrl', () {
+    test('usesTrimmedEnvironmentUrlForBothPlatforms', () {
+      for (final isIOS in [true, false]) {
+        expect(
+          resolveDefaultBaseUrl(
+            environment: ' \thttps://voice.example.com/base\n ',
+            isIOS: isIOS,
+          ),
+          'https://voice.example.com/base',
+        );
+      }
+    });
+
+    test('emptyEnvironmentUsesIosLoopback', () {
+      expect(
+        resolveDefaultBaseUrl(environment: '', isIOS: true),
+        'http://127.0.0.1:8787',
+      );
+    });
+
+    test('emptyEnvironmentUsesAndroidEmulator', () {
+      expect(
+        resolveDefaultBaseUrl(environment: '', isIOS: false),
+        'http://10.0.2.2:8787',
+      );
+    });
+
+    test('blankEnvironmentUsesIosLoopback', () {
+      expect(
+        resolveDefaultBaseUrl(environment: ' \t\n ', isIOS: true),
+        'http://127.0.0.1:8787',
+      );
+    });
+
+    test('blankEnvironmentUsesAndroidEmulator', () {
+      expect(
+        resolveDefaultBaseUrl(environment: ' \t\n ', isIOS: false),
+        'http://10.0.2.2:8787',
+      );
+    });
+  });
+
+  group('SessionStore', () {
+    test('explicitDefaultBaseUrlOverridesBuildAndPlatformDefaults', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = SessionStore(
+        await SharedPreferences.getInstance(),
+        defaultBaseUrl: 'https://constructor.example.com',
+      );
+      addTearDown(store.dispose);
+
+      expect(store.defaultBaseUrl, 'https://constructor.example.com');
+      expect(store.baseUrl, 'https://constructor.example.com');
+    });
+
+    test('savedBaseUrlOverridesDefaultBaseUrl', () async {
+      SharedPreferences.setMockInitialValues({
+        'baseUrl': 'https://saved.example.com',
+      });
+      final store = SessionStore(
+        await SharedPreferences.getInstance(),
+        defaultBaseUrl: 'https://constructor.example.com',
+      );
+      addTearDown(store.dispose);
+
+      expect(store.defaultBaseUrl, 'https://constructor.example.com');
+      expect(store.baseUrl, 'https://saved.example.com');
+    });
   });
 }

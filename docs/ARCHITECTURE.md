@@ -360,3 +360,16 @@ hello는 `{self,members,leader,positions,trails,revision,followTarget,pendingFol
 **폰·사용 불가.** 폰은 이동 여부와 무관하게 주행 이벤트를 구독하지 않고 항상 `restricted=false`다. UI도 차량 모드를 재확인하므로 제한 상태를 잘못 전달해도 폰을 잠그지 않는다. 자동차가 아니거나 `android.car`가 없거나 Car 연결·조회에 실패하면 네이티브는 `{restricted:false, available:false}`를 한 번 보내고 스트림을 끝낸다. Flutter는 unavailable·잘못된 이벤트·채널 오류·스트림 종료 시 잠금을 해제한다. 구독 cancel과 Activity의 엔진 정리 경로에서 리스너와 Car 연결을 해제하고 `AppServices.dispose()`에서 Dart 구독도 해제한다.
 
 **근거·검증.** [Pleos SDK 안내](https://document.pleos.ai/docs/pleos-only/vehicle-app-planning-guide/pleos-connect-sdk-api)는 차속·기어 등의 표준 데이터를 AAOS Car API로 안내한다. [Pleos 주행 규제 개발 가이드](https://document.pleos.ai/docs/pleos-only/vehicle-app-developer-guide/driving-restriction-development-guide)는 DO 선언 앱도 CarUxRestrictions와 ActiveRestrictions에 따라 UX 제한을 직접 적용하도록 한다. [Android CarUxRestrictionsManager](https://developer.android.com/reference/android/car/drivingstate/CarUxRestrictionsManager)의 현재 값·리스너 API를 사용한다. 로컬 근거는 `pleos-sdk-inventory.md` §0.3, `contest-recheck-2026-10-23.md` §4(h), `emulator-handson-modumoa.md` §4.1이다. 상태 파싱·오류·폰 미구독·구독 해제는 `driving_state_test.dart`, 전체 터치 차단·즉시 해제·폰 예외·다이얼로그 보존은 `driving_lock_test.dart`로 검사한다. Pleos 에뮬레이터의 Drive/40 km/h → Park/0 km/h 및 실제 기기의 터치·통화·위치 전송 유지는 별도 확인 대상이다.
+
+## 18. 접수용 release 빌드(G9, 2026-11-13)
+
+**release 서명.** `app/android/app/build.gradle.kts`는 Flutter 표준 위치 `app/android/key.properties`(gitignore 대상)가 있으면 release 빌드를 그 키로 서명하고, 없으면 지금처럼 debug 키로 서명한다(다른 개발자의 `flutter run --release`를 깨지 않기 위해). 파일은 `storeFile`·`storePassword`·`keyAlias`·`keyPassword` 네 키의 Properties 형식이며, `storeFile` 절대경로에 한글·공백이 들어갈 수 있어 ISO-8859-1인 `Properties.load(InputStream)` 대신 UTF-8 Reader로 읽는다. 파일이 있는데 네 값 중 하나라도 비면 debug로 넘어가지 않고 키 이름만 적은 오류로 빌드를 멈춘다. 키스토어와 비밀번호는 저장소 밖 개인 보관 폴더에 두고 저장소에는 심볼릭 링크도 커밋하지 않는다. 인증서 주체는 `CN=UnaVo, OU=UnaVo, O=UnaVo, C=KR`로 실명을 넣지 않았다(공개 APK에서 누구나 읽을 수 있는 값).
+
+**빌드 때 기본 서버 주소.** `SessionStore`의 기본 주소는 생성자 인자 `defaultBaseUrl` > `--dart-define=UNAVO_SERVER_URL=<주소>`(앞뒤 공백 제거 후 비어 있지 않을 때) > 플랫폼 기본값(iOS `http://127.0.0.1:8787`, 그 외 `http://10.0.2.2:8787`) 순이다(`resolveDefaultBaseUrl`). 사용자가 설정에서 저장한 주소가 기본값보다 우선인 규칙은 그대로다. 접수 APK는 심사 환경에서 주소를 손으로 바꾸지 않도록 공개 테스트 서버를 이 값으로 넣어 빌드한다.
+
+접수 빌드 명령(arm64-v8a·x86_64 포함, 약 134 MB라 GitHub 파일 한도 100 MB를 넘어 Releases에 올린다):
+
+```sh
+cd app
+flutter build apk --release --no-pub --dart-define-from-file=<지도 키 JSON> --dart-define=UNAVO_SERVER_URL=<공개 테스트 서버 주소>
+```
