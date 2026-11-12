@@ -103,29 +103,55 @@ void main() {
     await pumpConsentUi(tester);
   }
 
-  void expectCenteredPlus(WidgetTester tester, {double diameter = 120}) {
-    final plus = find.byKey(const ValueKey('profile-edit-plus'));
-    expect(plus, findsOneWidget);
-    final disk = tester.widget<Container>(plus);
-    final decoration = disk.decoration! as BoxDecoration;
+  void expectCameraBadge(WidgetTester tester, {double diameter = 120}) {
+    final preview = find.byKey(const ValueKey('profile-preview'));
+    final badge = find.byKey(const ValueKey('profile-edit-badge'));
+    expect(badge, findsOneWidget);
+    expect(find.byKey(const ValueKey('profile-edit-plus')), findsNothing);
+    final decoration =
+        tester.widget<Container>(badge).decoration! as BoxDecoration;
     expect(decoration.shape, BoxShape.circle);
-    expect(decoration.color, UnavoColors.ink.withValues(alpha: .45));
-    expect(decoration.color!.a, closeTo(.45, .001));
-    expect(tester.getSize(plus), Size.square(diameter * .4));
+    expect(decoration.color, UnavoColors.gold);
     expect(
-      tester.getCenter(plus),
-      tester.getCenter(find.byKey(const ValueKey('profile-preview'))),
+      decoration.border,
+      Border.all(
+        color: Theme.of(tester.element(badge)).scaffoldBackgroundColor,
+        width: 2,
+      ),
+    );
+    expect(tester.getSize(preview), Size.square(diameter));
+    expect(tester.getSize(badge), Size.square(diameter * .32));
+    final previewRect = tester.getRect(preview);
+    final previewCenter = tester.getCenter(preview);
+    final badgeRect = tester.getRect(badge);
+    final badgeCenter = tester.getCenter(badge);
+    expect(badgeCenter.dx, greaterThan(previewCenter.dx));
+    expect(badgeCenter.dy, greaterThan(previewCenter.dy));
+    expect(badgeCenter.dx, closeTo(previewRect.left + diameter * .86, .001));
+    expect(badgeCenter.dy, closeTo(previewRect.top + diameter * .86, .001));
+    expect(badgeRect.right, greaterThan(previewRect.right));
+    expect(badgeRect.bottom, greaterThan(previewRect.bottom));
+    final editRect = tester.getRect(find.byKey(const ValueKey('profile-edit')));
+    expect(badgeRect.right, lessThanOrEqualTo(editRect.right + .001));
+    expect(badgeRect.bottom, lessThanOrEqualTo(editRect.bottom + .001));
+    expect(
+      find.ancestor(
+        of: badge,
+        matching: find.byKey(const ValueKey('profile-edit')),
+      ),
+      findsOneWidget,
     );
     final icon = tester.widget<UnavoIcon>(
-      find.descendant(of: plus, matching: find.byType(UnavoIcon)),
+      find.descendant(of: badge, matching: find.byType(UnavoIcon)),
     );
-    expect(icon.name, 'plus');
-    expect(icon.color, Colors.white.withValues(alpha: .9));
-    expect(icon.color.a, closeTo(.9, .001));
-    expect(icon.size, closeTo(diameter * .4 * .55, .001));
+    expect(icon.name, 'camera');
+    expect(icon.color, UnavoColors.ink);
+    expect(icon.size, closeTo(diameter * .32 * .58, .001));
   }
 
-  testWidgets('초기 본문은 선택 버튼 없이 미리보기와 가운데 반투명 plus만 표시한다', (tester) async {
+  testWidgets('초기 본문은 미리보기와 우하단 38.4dp 카메라 배지를 표시하고 가운데 plus는 없다', (
+    tester,
+  ) async {
     await setup(tester);
     expect(find.byKey(const ValueKey('profile-gallery')), findsNothing);
     expect(find.byKey(const ValueKey('profile-source-dialog')), findsNothing);
@@ -137,7 +163,7 @@ void main() {
     );
     expect(preview.diameter, 120);
     expect(preview.showBorder, isFalse);
-    expectCenteredPlus(tester);
+    expectCameraBadge(tester);
     expect(
       find.byWidgetPredicate(
         (widget) =>
@@ -156,11 +182,38 @@ void main() {
     );
   }, timeout: const Timeout(Duration(seconds: 30)));
 
+  for (final car in [false, true]) {
+    testWidgets('${car ? '차량' : '폰'} 카메라 배지와 원 밖 돌출 영역 탭도 선택 모달을 연다', (
+      tester,
+    ) async {
+      await setup(tester, car: car);
+      final dialog = find.byKey(const ValueKey('profile-source-dialog'));
+      await tap(tester, 'profile-edit-badge');
+      expect(dialog, findsOneWidget);
+      await closeSource(tester);
+      expect(dialog, findsNothing);
+      final previewRect = tester.getRect(
+        find.byKey(const ValueKey('profile-preview')),
+      );
+      final badgeRect = tester.getRect(
+        find.byKey(const ValueKey('profile-edit-badge')),
+      );
+      await tester.tapAt(
+        Offset((previewRect.right + badgeRect.right) / 2, badgeRect.center.dy),
+      );
+      await pumpConsentUi(tester);
+      expect(dialog, findsOneWidget);
+      await closeSource(tester);
+      expect(dialog, findsNothing);
+      expect(tester.takeException(), isNull);
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
   testWidgets('프로필 원은 사진첩과 마스코트 5종의 아이콘 모달을 열고 바깥 탭·시스템 back으로 닫힌다', (
     tester,
   ) async {
     await setup(tester);
-    await tap(tester, 'profile-edit');
+    await tap(tester, 'profile-preview');
     final dialog = find.byKey(const ValueKey('profile-source-dialog'));
     expect(dialog, findsOneWidget);
     final gallery = find.descendant(
@@ -224,7 +277,7 @@ void main() {
           .kind,
       'mascot-03',
     );
-    expectCenteredPlus(tester);
+    expectCameraBadge(tester);
     await tap(tester, 'profile-edit');
     for (final kind in ['01', '02', '03', '04', '05']) {
       final mascot = tester.widget<MemberAvatar>(
@@ -253,7 +306,7 @@ void main() {
     expect(find.byType(ProfileScreen), findsNothing);
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  testWidgets('차량은 미리보기 160·마스코트 96·모달 버튼 80dp이고 back은 변경을 버린다', (
+  testWidgets('차량은 미리보기 160·배지 51.2·마스코트 96·모달 버튼 80dp이고 back은 변경을 버린다', (
     tester,
   ) async {
     final (store, http, _) = await setup(tester, car: true);
@@ -263,7 +316,7 @@ void main() {
           .diameter,
       160,
     );
-    expectCenteredPlus(tester, diameter: 160);
+    expectCameraBadge(tester, diameter: 160);
     await tap(tester, 'profile-edit');
     for (final kind in ['01', '02', '03', '04', '05']) {
       final mascot = find.byKey(ValueKey('profile-mascot-$kind'));
@@ -359,14 +412,16 @@ void main() {
         isNull,
       );
     }
-    final plus = tester.widget<UnavoIcon>(
-      find.descendant(
-        of: find.byKey(const ValueKey('profile-edit-plus')),
-        matching: find.byType(UnavoIcon),
-      ),
+    final badge = find.byKey(const ValueKey('profile-edit-badge'));
+    final decoration =
+        tester.widget<Container>(badge).decoration! as BoxDecoration;
+    expect(decoration.color, UnavoColors.panel);
+    final camera = tester.widget<UnavoIcon>(
+      find.descendant(of: badge, matching: find.byType(UnavoIcon)),
     );
-    expect(plus.color, UnavoColors.text.withValues(alpha: .4));
-    await tester.tap(edit);
+    expect(camera.name, 'camera');
+    expect(camera.color, UnavoColors.ink);
+    await tester.tap(badge);
     await pumpConsentUi(tester);
     expect(find.byKey(const ValueKey('profile-source-dialog')), findsNothing);
     expect(calls, hasLength(1));
@@ -379,7 +434,7 @@ void main() {
           .onPressed,
       isNull,
     );
-    expectCenteredPlus(tester);
+    expectCameraBadge(tester);
     expect(http.requests, isEmpty);
   }, timeout: const Timeout(Duration(seconds: 30)));
 
@@ -436,7 +491,7 @@ void main() {
     );
     expect(preview.member.avatar.kind, 'photo');
     expect(preview.preview, isNotNull);
-    expectCenteredPlus(tester);
+    expectCameraBadge(tester);
     expect(http.requests, isEmpty);
     await tap(tester, 'profile-save');
     final body =

@@ -165,6 +165,67 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  Widget _buildEditButton(BuildContext context) {
+    final diameter = widget.car ? 160.0 : 120.0;
+    final badgeDiameter = diameter * .32;
+    final badgeOffset = diameter * .86 - badgeDiameter / 2;
+    // 원 밖으로 나온 배지까지 같은 버튼의 탭 영역에 포함한다.
+    final editDiameter = badgeOffset + badgeDiameter;
+    return Semantics(
+      label: '프로필 사진 바꾸기',
+      button: true,
+      enabled: !_busy,
+      child: IconButton(
+        key: const ValueKey('profile-edit'),
+        padding: EdgeInsets.zero,
+        iconSize: editDiameter,
+        onPressed: _busy ? null : () async => _showSourceDialog(context),
+        icon: SizedBox.square(
+          dimension: editDiameter,
+          child: Stack(
+            alignment: Alignment.topLeft,
+            clipBehavior: Clip.none,
+            children: [
+              MemberAvatar(
+                key: const ValueKey('profile-preview'),
+                member: _member(_selection),
+                diameter: diameter,
+                showBorder: false,
+                defaultMascot: true,
+                api: widget.api,
+                preview: _photo,
+              ),
+              Positioned(
+                left: badgeOffset,
+                top: badgeOffset,
+                child: Container(
+                  key: const ValueKey('profile-edit-badge'),
+                  width: badgeDiameter,
+                  height: badgeDiameter,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _busy ? UnavoColors.panel : UnavoColors.gold,
+                    border: Border.all(
+                      color: Theme.of(context).scaffoldBackgroundColor,
+                      width: 2,
+                    ),
+                  ),
+                  child: Center(
+                    child: UnavoIcon(
+                      'camera',
+                      size: badgeDiameter * .58,
+                      color: UnavoColors.ink,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => ControlScale(
     car: widget.car,
@@ -182,57 +243,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       child: Column(
                         children: [
                           const SizedBox(height: 12),
-                          Semantics(
-                            label: '프로필 사진 바꾸기',
-                            button: true,
-                            enabled: !_busy,
-                            child: IconButton(
-                              key: const ValueKey('profile-edit'),
-                              padding: EdgeInsets.zero,
-                              onPressed: _busy
-                                  ? null
-                                  : () async => _showSourceDialog(context),
-                              icon: Stack(
-                                alignment: Alignment.center,
-                                children: [
-                                  MemberAvatar(
-                                    key: const ValueKey('profile-preview'),
-                                    member: _member(_selection),
-                                    diameter: widget.car ? 160 : 120,
-                                    showBorder: false,
-                                    defaultMascot: true,
-                                    api: widget.api,
-                                    preview: _photo,
-                                  ),
-                                  Container(
-                                    key: const ValueKey('profile-edit-plus'),
-                                    width: (widget.car ? 160 : 120) * .4,
-                                    height: (widget.car ? 160 : 120) * .4,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      color: UnavoColors.ink.withValues(
-                                        alpha: .45,
-                                      ),
-                                    ),
-                                    child: Center(
-                                      child: UnavoIcon(
-                                        'plus',
-                                        size:
-                                            (widget.car ? 160 : 120) * .4 * .55,
-                                        color: _busy
-                                            ? UnavoColors.text.withValues(
-                                                alpha: .4,
-                                              )
-                                            : Colors.white.withValues(
-                                                alpha: .9,
-                                              ),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
+                          _buildEditButton(context),
                         ],
                       ),
                     ),

@@ -216,7 +216,7 @@ void main() {
           car ? 80 : 56,
         );
         expect(find.byKey(const ValueKey('profile-gallery')), findsNothing);
-        expect(find.byKey(const ValueKey('profile-edit-plus')), findsOneWidget);
+        expect(find.byKey(const ValueKey('profile-edit-badge')), findsOneWidget);
         await _tapKey(tester, 'profile-edit');
         expect(
           find.byKey(const ValueKey('profile-source-dialog')),

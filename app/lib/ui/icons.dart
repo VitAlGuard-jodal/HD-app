@@ -20,6 +20,7 @@ class UnavoIcon extends StatelessWidget {
     'arrow',
     'back',
     'bluetooth',
+    'camera',
     'car',
     'carplay',
     'check',
