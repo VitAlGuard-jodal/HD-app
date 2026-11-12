@@ -55,7 +55,7 @@ async function fixture(t: TestContext) {
 
   async function signup(handle: string, displayName: string) {
     const result = await api("POST", "/v1/auth/signup", undefined, {
-      handle, displayName, password: "password123!",
+      handle, displayName, password: "password123!", over14: true,
     });
     assert.equal(result.status, 201);
     assert.deepEqual(result.body.user, { handle, displayName: displayName.trim(), avatar: { kind: null, version: 0 } });
@@ -127,6 +127,80 @@ function assertError(result: { status: number; body: unknown }, status: number):
   assert.ok(body.error.message.length > 0);
 }
 
+test("회원가입은 over14 true만 허용하고 연령 확인 시각을 ISO 문자열로 저장한다", { timeout: 15_000 }, async (t) => {
+  const { api, signup, db } = await fixture(t);
+  for (const age of [{}, { over14: false }, { over14: "true" }, { over14: 1 }, { over14: null }]) {
+    const result = await api("POST", "/v1/auth/signup", undefined, {
+      handle: "alice", displayName: "앨리스", password: "password123!", ...age,
+    });
+    assertError(result, 400);
+    assert.deepEqual(result.body.error, { code: "AGE_REQUIRED", message: "만 14세 이상만 가입할 수 있습니다." });
+    assert.equal(findUserByHandle(db, "alice"), undefined);
+  }
+  await signup("alice", "앨리스");
+  const row = db.prepare("SELECT age_confirmed_at, created_at FROM users WHERE handle = ?").get("alice")!;
+  assert.equal(typeof row.age_confirmed_at, "string");
+  assert.equal(new Date(row.age_confirmed_at as string).toISOString(), row.age_confirmed_at);
+  assert.equal(row.age_confirmed_at, row.created_at);
+});
+
+test("PUT /v1/me/consent는 항목별 동의를 보존하고 GET /v1/me에 반환한다", { timeout: 15_000 }, async (t) => {
+  const { api, signup, db } = await fixture(t);
+  const alice = await signup("alice", "앨리스");
+  const bob = await signup("bob", "보비");
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body.consent, { privacy: null, location: null });
+  const privacy = await api("PUT", "/v1/me/consent", alice, { privacy: { version: "3" } });
+  assert.equal(privacy.status, 200);
+  assert.equal(privacy.body.consent.privacy.version, "3");
+  assert.equal(new Date(privacy.body.consent.privacy.at).toISOString(), privacy.body.consent.privacy.at);
+  assert.equal(privacy.body.consent.location, null);
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body.consent, privacy.body.consent);
+  const location = await api("PUT", "/v1/me/consent", alice, { location: { version: "3" } });
+  assert.equal(location.status, 200);
+  assert.deepEqual(location.body.consent.privacy, privacy.body.consent.privacy);
+  assert.equal(location.body.consent.location.version, "3");
+  assert.equal(new Date(location.body.consent.location.at).toISOString(), location.body.consent.location.at);
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body.consent, location.body.consent);
+  const stored = db.prepare(`SELECT privacy_version, privacy_consented_at, location_version, location_consented_at
+    FROM users WHERE handle = ?`).get("alice")!;
+  assert.deepEqual({ ...stored }, {
+    privacy_version: "3", privacy_consented_at: privacy.body.consent.privacy.at,
+    location_version: "3", location_consented_at: location.body.consent.location.at,
+  });
+  assert.deepEqual((await api("GET", "/v1/me", bob)).body.consent, { privacy: null, location: null });
+  const both = await api("PUT", "/v1/me/consent", alice, {
+    privacy: { version: "12345678" }, location: { version: "4" },
+  });
+  assert.equal(both.status, 200);
+  assert.equal(both.body.consent.privacy.version, "12345678");
+  assert.equal(both.body.consent.location.version, "4");
+  assert.equal(both.body.consent.privacy.at, both.body.consent.location.at);
+});
+
+test("PUT /v1/me/consent는 인증과 유효한 본문이 필요하며 오류 시 기존 기록을 유지한다", { timeout: 15_000 }, async (t) => {
+  const { api, signup, base } = await fixture(t);
+  assertError(await api("PUT", "/v1/me/consent", undefined, { privacy: { version: "3" } }), 401);
+  const alice = await signup("alice", "앨리스");
+  const initial = await api("PUT", "/v1/me/consent", alice, { privacy: { version: "3" } });
+  for (const body of [undefined, {}, null, [], "3", { privacy: null }, { privacy: [] }, { privacy: {} },
+    { privacy: { version: 3 } }, { privacy: { version: "" } }, { privacy: { version: " " } },
+    { privacy: { version: "3\n" } }, { location: { version: "\t3" } },
+    { privacy: { version: "3 4" } }, { privacy: { version: "123456789" } },
+    { location: { version: "123456789" } }, { privacy: { version: "4" }, location: { version: "" } },
+    { unknown: { version: "3" } }, { privacy: { version: "3", accepted: false } }]) {
+    const result = await api("PUT", "/v1/me/consent", alice, body);
+    assertError(result, 400);
+    assert.equal(result.body.error.code, "INVALID_CONSENT");
+  }
+  const malformed = await fetch(`${base}/v1/me/consent`, {
+    method: "PUT", headers: { authorization: `Bearer ${alice}`, "content-type": "application/json" },
+    body: "{", signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(malformed.status, 400);
+  assert.equal((await malformed.json() as { error: { code: string } }).error.code, "INVALID_CONSENT");
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body.consent, initial.body.consent);
+});
+
 test("TURN 자격 발급은 로그인 필수이고 응답을 캐시하지 않는다", async (t) => {
   const { api, signup, base } = await fixture(t);
   assertError(await api("GET", "/v1/turn"), 401);
@@ -148,7 +222,7 @@ test("GET /v1/me는 참여 전 null, 참여 중 방 요약, 나간 뒤 null을 �
   const alice = await signup("alice", "앨리스");
   const bob = await signup("bob", "보비");
   assert.deepEqual((await api("GET", "/v1/me", bob)).body, {
-    user: { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 }, order: null }, room: null,
+    user: { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 }, order: null }, room: null, consent: { privacy: null, location: null },
   });
 
   const created = await api("POST", "/v1/rooms", alice, { name: "자동 복귀" });
@@ -164,6 +238,7 @@ test("GET /v1/me는 참여 전 null, 참여 중 방 요약, 나간 뒤 null을 �
   assert.deepEqual(restored.body, {
     user: { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 }, order: 1 },
     room: { ...details.room, members: details.members },
+    consent: { privacy: null, location: null },
   });
   // 재참여로 joinedAt을 바꾸거나 다른 사람의 방을 복구하지 않는다.
   assert.equal((await api("POST", `/v1/rooms/${code}/join`, bob)).status, 200);
@@ -199,7 +274,7 @@ test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가�
   assert.equal(login.status, 200);
   const alice = login.body.token as string;
   assert.notEqual(alice, signupToken);
-  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { user: { handle: "alice", displayName: "앨리스", avatar: { kind: null, version: 0 }, order: null }, room: null });
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { user: { handle: "alice", displayName: "앨리스", avatar: { kind: null, version: 0 }, order: null }, room: null, consent: { privacy: null, location: null } });
   assert.deepEqual((await api("GET", "/v1/users/bob", alice)).body, { user: { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 } } });
 
   const added = await api("POST", "/v1/contacts", alice, { handle: "bob" });
@@ -442,16 +517,16 @@ test("PATCH /v1/me는 표시 이름만 변경하고 회원가입과 같은 이�
   });
   assert.equal(updated.status, 200);
   assert.deepEqual(updated.body, { user: { handle: "alice", displayName: "새 이름", avatar: { kind: null, version: 0 } } });
-  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { user: { ...updated.body.user, order: null }, room: null });
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { user: { ...updated.body.user, order: null }, room: null, consent: { privacy: null, location: null } });
   assert.deepEqual((await api("GET", "/v1/users/alice", bob)).body, updated.body);
-  assert.deepEqual((await api("GET", "/v1/me", bob)).body, { user: { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 }, order: null }, room: null });
+  assert.deepEqual((await api("GET", "/v1/me", bob)).body, { user: { handle: "bob", displayName: "보비", avatar: { kind: null, version: 0 }, order: null }, room: null, consent: { privacy: null, location: null } });
   assert.equal((await api("POST", "/v1/auth/login", undefined, { handle: "alice", password: "password123!" })).status, 200);
 
   for (const body of [{}, { displayName: "가" }, { displayName: "  가  " }, { displayName: "" },
     { displayName: "가".repeat(21) }, { displayName: null }, { displayName: 123 }]) {
     assertError(await api("PATCH", "/v1/me", alice, body), 400);
   }
-  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { user: { ...updated.body.user, order: null }, room: null });
+  assert.deepEqual((await api("GET", "/v1/me", alice)).body, { user: { ...updated.body.user, order: null }, room: null, consent: { privacy: null, location: null } });
   for (const displayName of ["새봄", "🚗".repeat(20)]) {
     const boundary = await api("PATCH", "/v1/me", alice, { displayName });
     assert.equal(boundary.status, 200);
@@ -465,12 +540,12 @@ test("입력 오류·충돌·미존재·폐기 및 만료 토큰을 정해진 JS
   assertError(await api("GET", "/v1/me", "invalid-token"), 401);
   const alice = await signup("alice", "앨리스");
   await signup("bob", "보비");
-  assertError(await api("POST", "/v1/auth/signup", undefined, { handle: "alice", displayName: "앨리스", password: "password123!" }), 409);
+  assertError(await api("POST", "/v1/auth/signup", undefined, { handle: "alice", displayName: "앨리스", password: "password123!", over14: true }), 409);
   for (const body of [
     { handle: "Alice", displayName: "앨리스", password: "password123!" },
     { handle: "new_user", displayName: "가", password: "password123!" },
     { handle: "new_user", displayName: "앨리스", password: "short" },
-  ]) assertError(await api("POST", "/v1/auth/signup", undefined, body), 400);
+  ]) assertError(await api("POST", "/v1/auth/signup", undefined, { ...body, over14: true }), 400);
   assertError(await api("POST", "/v1/auth/login", undefined, { handle: "alice", password: "incorrect123" }), 401);
   assertError(await api("POST", "/v1/auth/login", undefined, { handle: "missing", password: "password123!" }), 401);
   assertError(await api("POST", "/v1/auth/login", undefined, {}), 400);

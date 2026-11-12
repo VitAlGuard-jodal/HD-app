@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unavo/audio/mic_router.dart';
+import 'package:unavo/auth/legal_consent_store.dart';
 import 'package:unavo/auth/session_restore.dart';
 import 'package:unavo/auth/session_store.dart';
 import 'package:unavo/call/call_service.dart';
@@ -22,8 +24,107 @@ import 'package:unavo/ui/widgets/panel_button.dart';
 import 'package:unavo/ui/widgets/room_code.dart';
 
 import 'support/icon_bundle.dart';
+import 'support/consent_fakes.dart';
 
 void main() {
+  for (final serverVersion in <String?>[null, '2', '3']) {
+    testWidgets(
+      '세션 복원은 로컬 동의 3·서버 ${serverVersion ?? "동의 없음"}일 때 PUT ${serverVersion == "3" ? 0 : 1}회로 동기화한다',
+      (tester) async {
+        final services = await ConsentTestServices.create(tester);
+        try {
+          await completeConsentFuture(
+            tester,
+            saveLegalConsent(
+              services.store.preferences,
+              privacy: true,
+              location: true,
+            ),
+          );
+          if (serverVersion != null) {
+            services.api.consent = ConsentRecord(
+              privacy: (version: serverVersion, at: '2026-11-11T00:00:00.000Z'),
+              location: (
+                version: serverVersion,
+                at: '2026-11-11T00:00:00.000Z',
+              ),
+            );
+          }
+          await completeConsentFuture(
+            tester,
+            restoreSession(
+              api: services.api,
+              store: services.store,
+              rooms: services.rooms,
+              isCurrent: () => true,
+            ),
+          );
+          await pumpConsentUi(tester);
+          final requests = services.api.http.requests;
+          expect(requests, hasLength(serverVersion == '3' ? 0 : 1));
+          if (requests.isNotEmpty) {
+            expect(requests.single.method, 'PUT');
+            expect(requests.single.uri.path, '/v1/me/consent');
+            expect(jsonDecode(utf8.decode(requests.single.body)), {
+              'privacy': {'version': '3'},
+              'location': {'version': '3'},
+            });
+          }
+          expect(services.store.token, 'test');
+          expect(services.store.displayName, '보비');
+        } finally {
+          await services.finish(tester);
+        }
+      },
+      timeout: const Timeout(Duration(seconds: 30)),
+    );
+  }
+
+  for (final locallyAccepted in [false, true]) {
+    testWidgets(
+      '세션 복원은 로컬 미동의를 보내지 않고 ${locallyAccepted ? "개인정보만 동의한 경우 서버 500에도 복원한다" : "동의가 없으면 PUT을 보내지 않는다"}',
+      (tester) async {
+        final services = await ConsentTestServices.create(tester);
+        services.api.http.status = 500;
+        try {
+          if (locallyAccepted) {
+            await completeConsentFuture(
+              tester,
+              saveLegalConsent(
+                services.store.preferences,
+                privacy: true,
+                location: false,
+              ),
+            );
+          }
+          await completeConsentFuture(
+            tester,
+            restoreSession(
+              api: services.api,
+              store: services.store,
+              rooms: services.rooms,
+              isCurrent: () => true,
+            ),
+          );
+          await pumpConsentUi(tester);
+          final requests = services.api.http.requests;
+          expect(requests, hasLength(locallyAccepted ? 1 : 0));
+          if (locallyAccepted) {
+            expect(jsonDecode(utf8.decode(requests.single.body)), {
+              'privacy': {'version': '3'},
+            });
+          }
+          expect(services.store.token, 'test');
+          expect(services.store.displayName, '보비');
+          expect(tester.takeException(), isNull);
+        } finally {
+          await services.finish(tester);
+        }
+      },
+      timeout: const Timeout(Duration(seconds: 30)),
+    );
+  }
+
   for (final car in [false, true]) {
     testWidgets('${car ? '차' : '폰'} 새 실행 복원은 메인에 복귀 카드만 표시하고 자동으로 열지 않는다', (
       tester,

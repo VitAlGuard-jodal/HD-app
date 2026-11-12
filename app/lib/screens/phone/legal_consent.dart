@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -17,8 +19,27 @@ import '../../ui/widgets/status_chip.dart';
 import '../../ui/widgets/unavo_dialog.dart';
 
 const _documents = [
-  (title: '개인정보 처리방침', asset: 'assets/legal/privacy.md'),
-  (title: '위치정보 수집·이용 동의', asset: 'assets/legal/location.md'),
+  (
+    title: '개인정보 처리방침',
+    asset: 'assets/legal/privacy.md',
+    summary: <(String, String)>[
+      ('항목', '아이디·비밀번호(해시)·표시 이름·프로필 사진(선택)·친구·방·통화 연결 신호·위치(공유 중)·서비스 이용 기록'),
+      ('목적', '같은 방 음성 통화, 내 차 위치·이동 경로 표시, 친구 초대, 장애 확인'),
+      ('보유', '방·위치는 방이 사라질 때까지, 계정·친구는 삭제 요청까지, 이용 기록 30일'),
+      ('제공', '같은 방 참여자(표시 이름·사진·통화 상태·위치), 네이버 지도 SDK(지도 영역 좌표)'),
+      ('거부', '필수 항목이라 동의하지 않으면 서비스를 이용할 수 없습니다'),
+    ],
+  ),
+  (
+    title: '위치정보 수집·이용 동의',
+    asset: 'assets/legal/location.md',
+    summary: <(String, String)>[
+      ('항목', '위치 공유 중의 위도·경도·정확도·속도·진행 방향·시각(화면 꺼짐·앱 전환 중에도 전송)'),
+      ('제공', '같은 방 참여자, 같은 방 안 위치 표시·따라가기 목적'),
+      ('보유', '방이 유지되는 동안 서버 메모리에만, 공유 중지·퇴장 시 즉시, 통신 두절 시 최대 2분 내 삭제'),
+      ('거부', '선택 항목이라 동의하지 않아도 통화는 쓸 수 있고 위치 공유·따라가기만 쓸 수 없습니다'),
+    ],
+  ),
 ];
 
 class LegalConsentScreen extends StatefulWidget {
@@ -56,6 +77,19 @@ class _LegalConsentScreenState extends State<LegalConsentScreen> {
         widget.services.store.preferences,
         privacy: _checked[0],
         location: _checked[1],
+      );
+      unawaited(
+        widget.services.api
+            .recordConsent(
+              privacyVersion: legalVersion,
+              locationVersion: _checked[1] ? locationLegalVersion : null,
+            )
+            .then<void>(
+              (_) {},
+              onError: (Object error, StackTrace stack) {
+                debugPrint('동의 기록 전송 실패: $error');
+              },
+            ),
       );
       if (mounted) widget.onAccepted();
     } catch (error) {
@@ -158,6 +192,32 @@ class _LegalConsentScreenState extends State<LegalConsentScreen> {
                           ),
                         ],
                       ),
+                      for (
+                        var line = 0;
+                        line < _documents[index].summary.length;
+                        line++
+                      ) ...[
+                        if (line > 0) const SizedBox(height: 4),
+                        Text.rich(
+                          key: ValueKey('legal-summary-$index-$line'),
+                          TextSpan(
+                            children: [
+                              TextSpan(
+                                text: '${_documents[index].summary[line].$1}: ',
+                                style: UnavoType.body.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                  color: UnavoColors.gold,
+                                ),
+                              ),
+                              TextSpan(
+                                text: _documents[index].summary[line].$2,
+                              ),
+                            ],
+                          ),
+                          style: UnavoType.body,
+                        ),
+                      ],
+                      const SizedBox(height: 8),
                       if (_expanded[index] && snapshot.hasData) ...[
                         const SizedBox(height: 12),
                         Container(

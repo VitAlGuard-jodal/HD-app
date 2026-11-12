@@ -8,11 +8,22 @@ import 'package:unavo/net/api_client.dart';
 import 'package:unavo/net/models.dart';
 
 void main() {
-  test('me는 사용자와 선택적인 방을 읽고 기존 가입·로그인 모델은 유지한다', () async {
+  test('me는 사용자·방·동의를 읽고 consent가 없는 옛 서버와 호환된다', () async {
     const user = {'handle': 'alice', 'displayName': 'Alice'};
     for (final body in <JsonMap>[
       {'user': user, 'room': null},
       {'user': user}, // A server deployed before room restoration.
+      {
+        'user': user,
+        'consent': {'privacy': null, 'location': null},
+      },
+      {
+        'user': user,
+        'consent': {
+          'privacy': {'version': '3', 'at': '2026-11-12T00:00:00.000Z'},
+          'location': {'version': '2', 'at': '2026-11-11T00:00:00.000Z'},
+        },
+      },
       {
         'user': user,
         'room': {
@@ -41,6 +52,16 @@ void main() {
       expect(me.user.displayName, 'Alice');
       expect(me.room?.code, body['room'] == null ? null : 'ABC123');
       expect(me.room?.name, body['room'] == null ? null : '이전 방');
+      final consent = body['consent'] as JsonMap?;
+      if (consent == null) {
+        expect(me.consent, isNull);
+      } else {
+        expect(me.consent, isNotNull);
+        expect(me.consent!.privacy?.version, consent['privacy']?['version']);
+        expect(me.consent!.privacy?.at, consent['privacy']?['at']);
+        expect(me.consent!.location?.version, consent['location']?['version']);
+        expect(me.consent!.location?.at, consent['location']?['at']);
+      }
       expect(clients.single.opens, 1);
       expect(clients.single.closed, isFalse);
       api.close();
@@ -89,8 +110,14 @@ void main() {
     expect(clients.single.closed, isTrue);
   });
 
-  test('방 참여만 재시도하고 방 생성·시그널·401은 반복하지 않는다', () async {
-    for (final action in ['join', 'create', 'signal', 'unauthorized']) {
+  test('방 참여만 재시도하고 방 생성·시그널·동의 PUT·401은 반복하지 않는다', () async {
+    for (final action in [
+      'join',
+      'create',
+      'signal',
+      'consent',
+      'unauthorized',
+    ]) {
       final clients = <_Client>[];
       final api = ApiClient(
         tokenStore: _Store(),
@@ -115,6 +142,11 @@ void main() {
             api.sendSignal('ABC123', 'bob', 'offer', {}),
             throwsA(isA<SocketException>()),
           );
+        case 'consent':
+          await expectLater(
+            api.recordConsent(privacyVersion: '3'),
+            throwsA(isA<SocketException>()),
+          );
         case 'unauthorized':
           await expectLater(
             api.getRoom('ABC123'),
@@ -126,6 +158,21 @@ void main() {
       api.close();
       expect(clients.single.closed, isTrue);
     }
+  });
+
+  test('recordConsent는 두 버전이 모두 없으면 요청 없이 ArgumentError를 반환한다', () async {
+    final clients = <_Client>[];
+    final api = ApiClient(
+      tokenStore: _Store(),
+      clientFactory: () {
+        final client = _Client();
+        clients.add(client);
+        return client;
+      },
+    );
+    addTearDown(api.close);
+    await expectLater(api.recordConsent(), throwsArgumentError);
+    expect(clients, isEmpty);
   });
 
   test('위치 전송을 20회 보내도 HttpClient 는 1개를 재사용한다', () async {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
@@ -8,7 +9,7 @@ import { openDb } from "../../src/db.ts";
 import {
   addContact, createRoom, createUser, deleteContact, findRoomByCode, findRoomMembership,
   findUserByHandle, isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicUser,
-  updateDisplayName,
+  initializeSchema, updateDisplayName,
 } from "../../src/store.ts";
 
 function fixture(t: TestContext) {
@@ -18,6 +19,33 @@ function fixture(t: TestContext) {
   const bob = createUser(db, { handle: "bob", displayName: "보비", passwordHash: "bob-hash" })!;
   return { db, alice, bob };
 }
+
+test("옛 users 스키마에 동의 열 5개를 추가하고 반복 초기화는 스키마와 기록을 보존한다", (t) => {
+  const db = new DatabaseSync(":memory:");
+  t.after(() => db.close());
+  db.exec(`CREATE TABLE users (
+    id INTEGER PRIMARY KEY, handle TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
+    password_hash TEXT NOT NULL, created_at TEXT NOT NULL
+  );
+  INSERT INTO users VALUES (1, 'alice', '앨리스', 'stored-hash', '2026-01-01T00:00:00.000Z');`);
+  const names = ["age_confirmed_at", "privacy_version", "privacy_consented_at", "location_version", "location_consented_at"];
+  initializeSchema(db);
+  const columns = db.prepare("PRAGMA table_info(users)").all();
+  for (const name of names) {
+    const column = columns.find((entry) => entry.name === name);
+    assert.ok(column);
+    assert.equal(column.type, "TEXT");
+    assert.equal(column.notnull, 0);
+    assert.equal(db.prepare(`SELECT ${name} AS value FROM users WHERE id = 1`).get()!.value, null);
+  }
+  db.exec("UPDATE users SET privacy_version = '3', privacy_consented_at = '2026-11-12T00:00:00.000Z' WHERE id = 1");
+  const before = db.prepare("SELECT * FROM users").all();
+  const schemaVersion = db.prepare("PRAGMA schema_version").get();
+  initializeSchema(db);
+  assert.deepEqual(db.prepare("PRAGMA table_info(users)").all(), columns);
+  assert.deepEqual(db.prepare("PRAGMA schema_version").get(), schemaVersion);
+  assert.deepEqual(db.prepare("SELECT * FROM users").all(), before);
+});
 
 test("사용자를 저장하고 공개 정보에서 내부 식별자와 해시를 숨긴다", (t) => {
   const { db, alice } = fixture(t);

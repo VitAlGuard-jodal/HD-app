@@ -10,7 +10,7 @@ import { issueIceServers } from "./turn.ts";
 import {
   addContact, createRoom, createUser, deleteContact, deleteEmptyRoom, findCurrentRoom, findRoomByCode, findUserByHandle,
   findRoomMembership, isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicRoomDetails, publicUser,
-  updateDisplayName, userRoomCodes,
+  readUserConsent, updateDisplayName, updateUserConsent, userRoomCodes,
 } from "./store.ts";
 import type { StoredRoom, StoredUser } from "./store.ts";
 
@@ -30,6 +30,19 @@ class HttpError extends Error {
 
 function invalid(message: string): never {
   throw new HttpError(400, "INVALID_INPUT", message);
+}
+
+function invalidConsent(): never {
+  throw new HttpError(400, "INVALID_CONSENT", "동의 항목과 1~8자의 공백 없는 문서 버전이 필요합니다.");
+}
+
+function consentVersion(value: unknown): string {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) invalidConsent();
+  const entry = value as Record<string, unknown>;
+  if (Object.keys(entry).some((key) => key !== "version") ||
+      typeof entry.version !== "string" || entry.version.length === 0 ||
+      Array.from(entry.version).length > 8 || /\s/u.test(entry.version)) invalidConsent();
+  return entry.version;
 }
 
 function json(response: ServerResponse, status: number, body?: unknown): void {
@@ -241,6 +254,9 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
 
     if (method === "POST" && path === "/v1/auth/signup") {
       const body = await readJson(request);
+      if (body.over14 !== true) {
+        throw new HttpError(400, "AGE_REQUIRED", "만 14세 이상만 가입할 수 있습니다.");
+      }
       if (!isValidHandle(body.handle)) invalid("아이디는 소문자 영문·숫자·밑줄 3~20자여야 합니다.");
       if (!isValidDisplayName(body.displayName)) invalid("표시 이름은 앞뒤 공백을 제외하고 2~20자여야 합니다.");
       if (!isValidPassword(body.password)) invalid("비밀번호는 8~72자여야 합니다.");
@@ -248,7 +264,10 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         throw new HttpError(409, "HANDLE_TAKEN", "이미 사용 중인 아이디입니다.");
       }
       const passwordHash = await hashPassword(body.password);
-      const user = createUser(db, { handle: body.handle, displayName: body.displayName, passwordHash });
+      const now = new Date().toISOString();
+      const user = createUser(db, {
+        handle: body.handle, displayName: body.displayName, passwordHash, ageConfirmedAt: now,
+      }, now);
       // 비밀번호 해시를 계산하는 동안 같은 아이디가 생성될 수도 있다.
       if (!user) throw new HttpError(409, "HANDLE_TAKEN", "이미 사용 중인 아이디입니다.");
       json(response, 201, { user: publicUser(user), token: issueToken(db, user.id) });
@@ -293,7 +312,24 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       json(response, 200, {
         user: { ...publicUser(user), order: details?.members.find((member) => member.handle === user.handle)?.order ?? null },
         room: details,
+        consent: readUserConsent(db, user.id),
       });
+      return;
+    }
+
+    if (method === "PUT" && path === "/v1/me/consent") {
+      let body: Record<string, unknown>;
+      try {
+        body = await readJson(request, true);
+      } catch (error) {
+        if (error instanceof HttpError && error.status === 400) invalidConsent();
+        throw error;
+      }
+      if (Object.keys(body).some((key) => key !== "privacy" && key !== "location") ||
+          (body.privacy === undefined && body.location === undefined)) invalidConsent();
+      const privacyVersion = body.privacy === undefined ? undefined : consentVersion(body.privacy);
+      const locationVersion = body.location === undefined ? undefined : consentVersion(body.location);
+      json(response, 200, { consent: updateUserConsent(db, user.id, { privacyVersion, locationVersion }) });
       return;
     }
 

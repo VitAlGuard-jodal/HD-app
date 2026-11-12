@@ -19,6 +19,7 @@ import 'package:unavo/net/models.dart';
 import 'package:unavo/room/room_session.dart';
 
 import 'location_fakes.dart';
+import 'avatar_fakes.dart';
 
 // 메모리 응답의 완료와 root-zone microtask만 기다린다. 네트워크·타이머 대기 없음.
 Future<T> completeConsentFuture<T>(
@@ -97,7 +98,7 @@ class ConsentTestServices implements AppServices {
       if (savedVersion != null)
         'legal.consent.v1': jsonEncode({
           'privacy': {'accepted': true, 'version': savedVersion},
-          'location': {'accepted': true, 'version': '1'},
+          'location': {'accepted': true, 'version': '2'},
         }),
     });
     final preferences = await completeConsentFuture(
@@ -186,9 +187,41 @@ class ConsentTestServices implements AppServices {
 }
 
 class ConsentTestApi extends ApiClient {
-  ConsentTestApi(SessionStore store) : super(tokenStore: store) {
+  ConsentTestApi(SessionStore store) : this._(store, AvatarTestHttp());
+  ConsentTestApi._(SessionStore store, this.http)
+    : super(tokenStore: store, clientFactory: http.createClient) {
     unawaited(events.done);
+    http.jsonResponse = (request) {
+      final body = jsonDecode(utf8.decode(request.body)) as JsonMap;
+      const at = '2026-11-12T00:00:00.000Z';
+      consent = ConsentRecord(
+        privacy: body['privacy'] == null
+            ? consent?.privacy
+            : (version: body['privacy']['version'] as String, at: at),
+        location: body['location'] == null
+            ? consent?.location
+            : (version: body['location']['version'] as String, at: at),
+      );
+      return {
+        'consent': {
+          'privacy': consent?.privacy == null
+              ? null
+              : {
+                  'version': consent!.privacy!.version,
+                  'at': consent!.privacy!.at,
+                },
+          'location': consent?.location == null
+              ? null
+              : {
+                  'version': consent!.location!.version,
+                  'at': consent!.location!.at,
+                },
+        },
+      };
+    };
   }
+  final AvatarTestHttp http;
+  ConsentRecord? consent;
   final events = StreamController<RoomEvent>.broadcast();
   List<Member> members = const [
     Member('alice', '앨리스', '1'),
@@ -227,7 +260,10 @@ class ConsentTestApi extends ApiClient {
     return ++revision;
   }
 
-  Future<void> close() => events.close();
+  Future<void> close() {
+    super.close();
+    return events.close();
+  }
 
   @override
   Future<AuthResult> login(String handle, String password) async {
@@ -248,7 +284,7 @@ class ConsentTestApi extends ApiClient {
   @override
   Future<MeResult> me() async {
     meReads++;
-    return const MeResult(User('bob', '보비'), null);
+    return MeResult(const User('bob', '보비'), null, consent: consent);
   }
 
   @override

@@ -18,6 +18,11 @@ export interface StoredUser extends PublicUser {
   createdAt: string;
 }
 
+export interface ConsentRecord {
+  privacy: { version: string; at: string } | null;
+  location: { version: string; at: string } | null;
+}
+
 export interface PublicRoom {
   code: string;
   name: string;
@@ -94,6 +99,11 @@ export function initializeSchema(db: DatabaseSync): void {
   if (!columns.some((column) => column.name === "avatar_version")) {
     db.exec("ALTER TABLE users ADD COLUMN avatar_version INTEGER NOT NULL DEFAULT 0 CHECK (avatar_version >= 0)");
   }
+  for (const name of ["age_confirmed_at", "privacy_version", "privacy_consented_at", "location_version", "location_consented_at"]) {
+    if (!columns.some((column) => column.name === name)) {
+      db.exec(`ALTER TABLE users ADD COLUMN ${name} TEXT`);
+    }
+  }
 }
 
 export function publicUser(user: PublicUser): PublicUser {
@@ -126,14 +136,48 @@ export function findUserByHandle(db: DatabaseSync, handle: string): StoredUser |
 
 export function createUser(
   db: DatabaseSync,
-  input: { handle: string; displayName: string; passwordHash: string },
+  input: { handle: string; displayName: string; passwordHash: string; ageConfirmedAt?: string },
   now = new Date().toISOString(),
 ): StoredUser | undefined {
   const result = db.prepare(`
-    INSERT INTO users (handle, display_name, password_hash, created_at)
-    VALUES (?, ?, ?, ?) ON CONFLICT(handle) DO NOTHING
-  `).run(input.handle, input.displayName.trim(), input.passwordHash, now);
+    INSERT INTO users (handle, display_name, password_hash, created_at, age_confirmed_at)
+    VALUES (?, ?, ?, ?, ?) ON CONFLICT(handle) DO NOTHING
+  `).run(input.handle, input.displayName.trim(), input.passwordHash, now, input.ageConfirmedAt ?? null);
   return result.changes ? findUserByHandle(db, input.handle) : undefined;
+}
+
+export function readUserConsent(db: DatabaseSync, userId: number): ConsentRecord {
+  const row = db.prepare(`
+    SELECT privacy_version AS privacyVersion, privacy_consented_at AS privacyAt,
+           location_version AS locationVersion, location_consented_at AS locationAt
+    FROM users WHERE id = ?
+  `).get(userId) as {
+    privacyVersion: string | null; privacyAt: string | null;
+    locationVersion: string | null; locationAt: string | null;
+  } | undefined;
+  return {
+    privacy: row?.privacyVersion && row.privacyAt ? { version: row.privacyVersion, at: row.privacyAt } : null,
+    location: row?.locationVersion && row.locationAt ? { version: row.locationVersion, at: row.locationAt } : null,
+  };
+}
+
+export function updateUserConsent(
+  db: DatabaseSync,
+  userId: number,
+  input: { privacyVersion?: string; locationVersion?: string },
+  now = new Date().toISOString(),
+): ConsentRecord {
+  // 두 항목은 한 UPDATE로 저장하며, 생략한 항목의 버전·시각은 보존한다.
+  db.prepare(`
+    UPDATE users SET
+      privacy_version = COALESCE(?, privacy_version),
+      privacy_consented_at = CASE WHEN ? IS NOT NULL THEN ? ELSE privacy_consented_at END,
+      location_version = COALESCE(?, location_version),
+      location_consented_at = CASE WHEN ? IS NOT NULL THEN ? ELSE location_consented_at END
+    WHERE id = ?
+  `).run(input.privacyVersion ?? null, input.privacyVersion ?? null, now,
+    input.locationVersion ?? null, input.locationVersion ?? null, now, userId);
+  return readUserConsent(db, userId);
 }
 
 export function updateDisplayName(db: DatabaseSync, userId: number, displayName: string): StoredUser | undefined {

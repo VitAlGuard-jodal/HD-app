@@ -19,9 +19,12 @@ class AvatarTestHttp {
   Object? openError;
   Uint8List? photo;
   Stream<List<int>>? eventStream;
+  Object? Function(AvatarTestRequest request)? jsonResponse;
 
   ApiClient api(TokenStore store) =>
-      ApiClient(tokenStore: store, clientFactory: () => _Client(this));
+      ApiClient(tokenStore: store, clientFactory: createClient);
+
+  HttpClient createClient() => _Client(this);
 
   HttpClientResponse respond(AvatarTestRequest request) {
     if (request.uri.path.endsWith('/events') && eventStream != null) {
@@ -37,6 +40,12 @@ class AvatarTestHttp {
             }),
           ),
         ),
+      );
+    }
+    if (jsonResponse != null) {
+      return _Response(
+        200,
+        Stream.value(utf8.encode(jsonEncode(jsonResponse!(request)))),
       );
     }
     if (request.method == 'GET') {

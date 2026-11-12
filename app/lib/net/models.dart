@@ -60,16 +60,37 @@ class AuthResult {
 }
 
 class MeResult {
-  const MeResult(this.user, this.room);
+  const MeResult(this.user, this.room, {this.consent});
   factory MeResult.fromJson(JsonMap json) {
     final room = json['room'] as JsonMap?;
+    final consent = json['consent'] as JsonMap?;
     return MeResult(
       User.fromJson(json['user'] as JsonMap),
       room == null ? null : Room.fromJson(room),
+      consent: consent == null ? null : ConsentRecord.fromJson(consent),
     );
   }
   final User user;
   final Room? room;
+  final ConsentRecord? consent;
+}
+
+class ConsentRecord {
+  const ConsentRecord({this.privacy, this.location});
+  factory ConsentRecord.fromJson(JsonMap json) {
+    ({String version, String at})? entry(Object? value) {
+      if (value == null) return null;
+      final data = value as JsonMap;
+      return (version: data['version'] as String, at: data['at'] as String);
+    }
+
+    return ConsentRecord(
+      privacy: entry(json['privacy']),
+      location: entry(json['location']),
+    );
+  }
+  final ({String version, String at})? privacy;
+  final ({String version, String at})? location;
 }
 
 class Room {

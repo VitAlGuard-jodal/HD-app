@@ -107,6 +107,7 @@ class ApiClient {
     'handle': handle,
     'password': password,
     'displayName': displayName,
+    'over14': true,
   });
   Future<AuthResult> login(String handle, String password) =>
       _auth('/v1/auth/login', {'handle': handle, 'password': password});
@@ -116,6 +117,20 @@ class ApiClient {
 
   Future<MeResult> me() async =>
       MeResult.fromJson(await _response('GET', '/v1/me'));
+  Future<ConsentRecord> recordConsent({
+    String? privacyVersion,
+    String? locationVersion,
+  }) async {
+    if (privacyVersion == null && locationVersion == null) {
+      throw ArgumentError('동의할 문서 버전이 필요합니다.');
+    }
+    final result = await _response('PUT', '/v1/me/consent', {
+      if (privacyVersion != null) 'privacy': {'version': privacyVersion},
+      if (locationVersion != null) 'location': {'version': locationVersion},
+    });
+    return ConsentRecord.fromJson(result['consent'] as JsonMap);
+  }
+
   Future<IceServerCredentials> fetchIceServers() async =>
       IceServerCredentials.fromJson(await _response('GET', '/v1/turn'));
   Future<User> getUser(String handle) async => User.fromJson(

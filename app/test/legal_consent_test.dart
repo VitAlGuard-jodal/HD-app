@@ -10,6 +10,7 @@ import 'package:unavo/screens/phone/auth.dart';
 import 'package:unavo/screens/phone/legal_consent.dart';
 import 'package:unavo/screens/phone/room.dart';
 import 'package:unavo/screens/phone/rooms.dart';
+import 'package:unavo/ui/appearance.dart';
 import 'package:unavo/ui/icons.dart';
 import 'package:unavo/ui/theme.dart';
 import 'package:unavo/ui/widgets/panel_button.dart';
@@ -18,14 +19,96 @@ import 'support/consent_fakes.dart';
 import 'support/icon_bundle.dart';
 
 void main() {
-  testWidgets('M7은 개인정보·위치 버전 2를 저장하고 항목별 버전 1 동의는 다시 받는다', (tester) async {
+  for (final car in [false, true]) {
+    testWidgets(
+      '${car ? "차량 주 패널" : "360dp 폰"}에서 접힌 문서의 요약 라벨은 굵게·gold이며 줄바꿈한다',
+      (tester) async {
+        final services = await ConsentTestServices.create(
+          tester,
+          mode: car ? DeviceMode.car : DeviceMode.phone,
+        );
+        try {
+          await _mount(tester, services, car: car, phoneWidth: 360);
+          const labels = [
+            ['항목', '목적', '보유', '제공', '거부'],
+            ['항목', '제공', '보유', '거부'],
+          ];
+          for (var document = 0; document < labels.length; document++) {
+            expect(
+              find.byKey(ValueKey('legal-detail-$document')),
+              findsNothing,
+            );
+            for (var line = 0; line < labels[document].length; line++) {
+              final summary = find.byKey(
+                ValueKey('legal-summary-$document-$line'),
+              );
+              await tester.ensureVisible(summary);
+              await pumpConsentUi(tester);
+              final text = tester.widget<Text>(summary);
+              final spans = (text.textSpan! as TextSpan).children!;
+              final label = spans.first as TextSpan;
+              expect(label.text, '${labels[document][line]}: ');
+              expect(label.style!.fontWeight, FontWeight.bold);
+              expect(label.style!.color, UnavoColors.gold);
+              expect(label.style!.fontSize, UnavoType.body.fontSize);
+              expect(text.style, UnavoType.body);
+              final rect = tester.getRect(summary);
+              expect(rect.left, greaterThanOrEqualTo(0));
+              expect(rect.right, lessThanOrEqualTo(car ? 1320 : 360));
+              expect(summary.hitTestable(), findsOneWidget);
+            }
+          }
+          expect(tester.takeException(), isNull);
+        } finally {
+          await _finish(tester, services);
+        }
+      },
+      timeout: const Timeout(Duration(seconds: 30)),
+    );
+  }
+
+  for (final location in [false, true]) {
+    for (final serverFails in [false, true]) {
+      testWidgets(
+        '동의는 PUT 1회로 개인정보 3·위치 ${location ? "3" : "생략"}을 보내고 ${serverFails ? "서버 500에도 " : ""}onAccepted를 호출한다',
+        (tester) async {
+          final services = await ConsentTestServices.create(tester);
+          services.api.http.status = serverFails ? 500 : 200;
+          var accepted = 0;
+          try {
+            await _mount(tester, services, onAccepted: () => accepted++);
+            await _tapKey(tester, 'legal-check-0');
+            if (location) await _tapKey(tester, 'legal-check-1');
+            await _tapKey(tester, 'legal-accept');
+            final requests = services.api.http.requests;
+            expect(requests, hasLength(1));
+            expect(requests.single.method, 'PUT');
+            expect(requests.single.uri.path, '/v1/me/consent');
+            expect(jsonDecode(utf8.decode(requests.single.body)), {
+              'privacy': {'version': '3'},
+              if (location) 'location': {'version': '3'},
+            });
+            expect(accepted, 1);
+            expect(hasPrivacyConsent(services.store.preferences), isTrue);
+            expect(hasLocationConsent(services.store.preferences), location);
+            expect(tester.takeException(), isNull);
+          } finally {
+            await _finish(tester, services);
+          }
+        },
+        timeout: const Timeout(Duration(seconds: 30)),
+      );
+    }
+  }
+
+  testWidgets('M10은 개인정보·위치 버전 3을 저장하고 항목별 버전 2 동의는 다시 받는다', (tester) async {
     final services = await ConsentTestServices.create(
       tester,
-      savedVersion: '1',
+      savedVersion: '2',
     );
     try {
-      expect(legalVersion, '2');
-      expect(locationLegalVersion, '2');
+      expect(legalVersion, '3');
+      expect(locationLegalVersion, '3');
       await _mount(tester, services);
       expect(find.byType(LegalConsentScreen), findsOneWidget);
       await _tapKey(tester, 'legal-check-0');
@@ -33,14 +116,14 @@ void main() {
       final saved = jsonDecode(
         services.store.preferences.getString(legalConsentKey)!,
       );
-      expect(saved['privacy'], {'accepted': true, 'version': '2'});
-      expect(saved['location'], {'accepted': false, 'version': '2'});
+      expect(saved['privacy'], {'accepted': true, 'version': '3'});
+      expect(saved['location'], {'accepted': false, 'version': '3'});
     } finally {
       await _finish(tester, services);
     }
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  testWidgets('위치 버전 1 동의는 미동의로 판정하고 재동의하면 버전 2만 갱신한다', (tester) async {
+  testWidgets('위치 버전 2 동의는 미동의로 판정하고 재동의하면 버전 3만 갱신한다', (tester) async {
     final services = await ConsentTestServices.create(
       tester,
       savedVersion: legalVersion,
@@ -53,8 +136,8 @@ void main() {
       expect(hasPrivacyConsent(preferences), isTrue);
       expect(hasLocationConsent(preferences), isTrue);
       final saved = jsonDecode(preferences.getString(legalConsentKey)!);
-      expect(saved['privacy'], {'accepted': true, 'version': '2'});
-      expect(saved['location'], {'accepted': true, 'version': '2'});
+      expect(saved['privacy'], {'accepted': true, 'version': '3'});
+      expect(saved['location'], {'accepted': true, 'version': '3'});
       expect(services.locationSource.requests, 0);
       expect(services.locationSource.watches, 0);
     } finally {
@@ -77,8 +160,8 @@ void main() {
       final saved = jsonDecode(
         services.store.preferences.getString(legalConsentKey)!,
       );
-      expect(saved['privacy'], {'accepted': true, 'version': '2'});
-      expect(saved['location'], {'accepted': false, 'version': '2'});
+      expect(saved['privacy'], {'accepted': true, 'version': '3'});
+      expect(saved['location'], {'accepted': false, 'version': '3'});
       expect(services.locationSource.requests, 0);
     } finally {
       await _finish(tester, services);
@@ -162,17 +245,26 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('우나보 개인정보 처리방침'), findsOneWidget);
-      expect(find.text('1. 수집하는 정보'), findsOneWidget);
-      expect(
-        find.text('• 계정: 로그인 아이디, 비밀번호(서버에는 해시 값만 저장), 표시 이름'),
-        findsOneWidget,
-      );
+      final privacy = (await tester.runAsync(
+        () => rootBundle.loadString('assets/legal/privacy.md'),
+      ))!;
+      final privacyLines = const LineSplitter().convert(privacy);
+      final heading = privacyLines.firstWhere((line) => line.startsWith('## '));
+      final bullet = privacyLines.firstWhere((line) => line.startsWith('- '));
+      expect(find.text(heading.substring(3)), findsOneWidget);
+      expect(find.text('• ${bullet.substring(2)}'), findsOneWidget);
       expect(find.text('# 우나보 개인정보 처리방침'), findsNothing);
       await _tapKey(tester, 'legal-expand-0');
       expect(detail, findsNothing);
       await _tapKey(tester, 'legal-expand-1');
       expect(find.byKey(const ValueKey('legal-detail-1')), findsOneWidget);
-      expect(find.text('1. 수집하는 위치정보'), findsOneWidget);
+      final location = (await tester.runAsync(
+        () => rootBundle.loadString('assets/legal/location.md'),
+      ))!;
+      final locationHeading = const LineSplitter()
+          .convert(location)
+          .firstWhere((line) => line.startsWith('## '));
+      expect(find.text(locationHeading.substring(3)), findsOneWidget);
       expect(_acceptButton(tester).onPressed, isNull);
       await tester.binding.handlePopRoute();
       await pumpConsentUi(tester);
@@ -369,6 +461,7 @@ Future<void> _login(WidgetTester tester, {bool signup = false}) async {
   if (signup) {
     await tester.ensureVisible(find.byType(TextField).at(2));
     await tester.enterText(find.byType(TextField).at(2), '보비');
+    await _tapKey(tester, 'signup-age-check');
   }
   await tester.tap(find.byTooltip(signup ? '가입하고 시작' : '시작'));
   await pumpConsentUi(tester);
@@ -378,8 +471,12 @@ Future<void> _mount(
   WidgetTester tester,
   ConsentTestServices services, {
   bool car = false,
+  double phoneWidth = 412,
+  VoidCallback? onAccepted,
 }) async {
-  tester.view.physicalSize = car ? const Size(1320, 940) : const Size(412, 915);
+  tester.view.physicalSize = car
+      ? const Size(1320, 940)
+      : Size(phoneWidth, 915);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -390,13 +487,27 @@ Future<void> _mount(
       rootBundle.loadString('assets/legal/location.md'),
     ]);
   });
+  final appearance = AppearanceController();
+  addTearDown(appearance.dispose);
   await tester.pumpWidget(
     DefaultAssetBundle(
       bundle: TestIconBundle(),
-      child: UnavoApp(
-        services: services,
-        mode: car ? DeviceMode.car : DeviceMode.phone,
-      ),
+      child: onAccepted == null
+          ? UnavoApp(
+              services: services,
+              mode: car ? DeviceMode.car : DeviceMode.phone,
+            )
+          : UnavoAppearance(
+              controller: appearance,
+              child: MaterialApp(
+                theme: unavoTheme(Brightness.dark),
+                home: LegalConsentScreen(
+                  services: services,
+                  mode: car ? DeviceMode.car : DeviceMode.phone,
+                  onAccepted: onAccepted,
+                ),
+              ),
+            ),
     ),
   );
   await tester.pump(const Duration(milliseconds: 1200));

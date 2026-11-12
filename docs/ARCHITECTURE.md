@@ -12,10 +12,11 @@
 
 | 메서드·경로 | 본문 | 응답 | 비고 |
 |---|---|---|---|
-| `POST /v1/auth/signup` | `{handle, password, displayName}` | `201 {user, token}` | 중복 아이디 `409` |
+| `POST /v1/auth/signup` | `{handle, password, displayName, over14: true}` | `201 {user, token}` | 연령 확인 누락·false는 `400 AGE_REQUIRED`, 중복 아이디 `409` |
 | `POST /v1/auth/login` | `{handle, password}` | `200 {user, token}` | 실패 `401` |
 | `POST /v1/auth/logout` | — | `204` | 토큰 폐기. 그 토큰으로 열린 SSE 연결도 즉시 닫는다(다른 기기의 토큰은 유지) |
-| `GET /v1/me` | — | `{user, room: null 또는 {code, name, createdBy, createdAt, members}}` | `left_at IS NULL`인 방 중 `joined_at`이 가장 최근인 하나(동률은 방 ID 내림차순) |
+| `GET /v1/me` | — | `{user, room: null 또는 {code, name, createdBy, createdAt, members}, consent}` | `left_at IS NULL`인 방 중 `joined_at`이 가장 최근인 하나(동률은 방 ID 내림차순) |
+| `PUT /v1/me/consent` | `{privacy?:{version}, location?:{version}}` | `200 {consent:{privacy:{version,at} 또는 null, location:{version,at} 또는 null}}` | 인증 필수. 하나 이상, 버전 1~8자·공백 불가. 잘못된 본문 `400 INVALID_CONSENT`. 생략 항목 보존 |
 | `GET /v1/users/{handle}` | — | `{user}` 공개 정보(handle, displayName) | 없으면 `404`, 아이디 형식이 틀리면 `400` |
 | `PATCH /v1/me` | `{displayName}` | `200 {user}` | 표시 이름 변경 |
 | `GET /v1/contacts` | — | `{contacts:[user]}` | |
@@ -127,7 +128,7 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 **offer 시한과 돌아온 쪽의 재제안.** `meshOfferTimeout = 8초` 안에 answer 가 없으면 피어를 닫고 새 negotiationId 로 재오퍼(간격 8·16·24초, 최대 3회, 56초에 종단 실패). `MeshCoordinator.reconcile(members)` 는 살아 있는 피어도 진행 중 협상도 없는 상대에게 **새 멤버 규칙과 무관하게** offer 를 보낸다. `RoomSession` 은 SSE 재접속 뒤 `Hello`·`Reconnected` 에서 이미 미디어에 참여한 경우 `mediaEngine.reconcilePeers()` 를 부른다. 11/9 실측(상대 SSE 가 내려간 사이 보낸 offer 유실 → 양쪽 영구 대기)의 수정이다. 글레어는 기존 규칙(사전순으로 작은 handle 이 자기 offer 유지·재전송)대로.
 
-**복귀 정책(태곤 님 결정 11/9).** 프로세스가 살아 있는 채 통신만 끊겼다 돌아오면(터널) 같은 방에 자동 재입장하고 통화를 잇는다(위 reconcile). 앱을 **새로 켠 경우**(사용자가 끈 것이든 시스템이 죽인 것이든)는 메인 화면에 머물고 마이크·통화를 자동으로 켜지 않는다. `restoreSession` 은 `/v1/me` 만 읽어 `RoomSession.restorableRoom` 에 두고, 폰 방 목록·차 대시보드가 "참여 중인 방" 카드(방 이름·코드 + 입장 아이콘) 한 장을 보여 준다. 카드 탭 → 기존 입장 경로(`open` → hello → 자동 통화). `AppServices.initialize()` 의 네이티브 통화 상태 기반 자동 open 도 제거했다.
+**복귀 정책(태곤 님 결정 11/9).** 프로세스가 살아 있는 채 통신만 끊겼다 돌아오면(터널) 같은 방에 자동 재입장하고 통화를 잇는다(위 reconcile). 앱을 **새로 켠 경우**(사용자가 끈 것이든 시스템이 죽인 것이든)는 메인 화면에 머물고 마이크·통화를 자동으로 켜지 않는다. `restoreSession` 은 `/v1/me` 를 읽어 `RoomSession.restorableRoom` 에 두고, 폰 방 목록·차 대시보드가 "참여 중인 방" 카드(방 이름·코드 + 입장 아이콘) 한 장을 보여 준다. 카드 탭 → 기존 입장 경로(`open` → hello → 자동 통화). `AppServices.initialize()` 의 네이티브 통화 상태 기반 자동 open 도 제거했다.
 
 **수신 이득 상한 100%.** libwebrtc 는 수신 볼륨을 saturated cast 로 곱하므로 ×2.0 이면 −6 dBFS 위 샘플이 전부 잘리고, 차 송신 피크는 0 dBFS 로 실측됐다. `callVolume` 0~100(저장값 200 은 읽을 때 100), 슬라이더 max 100, 엔진 `_playbackVolume ≤ 1.0`. 소리 크기는 출력 경로(스피커/수화부) 결함을 고쳐 확보한다(묶음 2).
 
@@ -185,7 +186,9 @@ Android는 공유 스트림에만 `ForegroundNotificationConfig`를 전달한다
 
 동의 후 `start()`가 완료되면 다시 검사한다. unknown에서 follow POST를 보낸 경우에도 최초 moving/stationary 판정 때 한 번 더 확인한다. 첫 판정이 moving이면 followTarget을 비우고 같은 문구를 표시하며, 이미 보낸 POST 뒤에 follow DELETE를 직렬화해 관계를 정리한다. 내 위치 공유는 유지한다. 첫 stationary 판정 이후에는 이동 중에도 따라가기를 유지하며 중지는 언제나 가능하다. 첫 판정 대기는 해당 따라가기 시도에만 적용하고 중지·거절·대상 변경·방 변경 후 늦은 표본으로 이전 시도를 되살리지 않는다. 폰에는 이 제한과 최초 판정 취소를 적용하지 않는다.
 
-**동의 체계(결정 16-A·M7).** 이 설치의 첫 로그인·회원가입·저장 세션 복원 시 개인정보 처리방침만 필수로 받는다. 위치정보 수집·이용 동의는 선택이며 미체크 상태로도 음성 통화·방 목록에 진입할 수 있다. `legal.consent.v1`에는 `{privacy:{accepted,version},location:{accepted,version}}` JSON을 저장한다. 개인정보 `legalVersion = '2'`를 유지하고 위치 문서는 배경 전송·시스템 표시 안내를 추가해 `locationLegalVersion = '2'`, 시행일 2026-11-12로 올린다. 위치 버전 1의 기존 동의는 현재 위치 동의로 인정하지 않으며 다음 공유 시작 모달에서 다시 동의받고 버전 2를 저장한다. 따라가기 시작·요청 수락 모달에는 “화면이 꺼져 있어도 공유 중에는 위치를 보냅니다”를 표시한다. 법률 문구는 초안이며 별도 검토가 필요하다. 이전 버전 문자열 또는 현재 개인정보 동의가 없는 저장값은 전체 동의 화면을 다시 표시한다. 로그아웃해도 설치의 문서 동의는 보존한다. 개인정보 미동의는 기존 안내·로그아웃 경로이며 알림의 방 열기도 필수 동의 완료까지 보류한다.
+**동의 체계(결정 16-A·M7·M10).** 이 설치의 첫 로그인·회원가입·저장 세션 복원 시 개인정보 처리방침만 필수로 받는다. 위치정보 수집·이용 동의는 선택이며 미체크 상태로도 음성 통화·방 목록에 진입할 수 있다. `legal.consent.v1`에는 `{privacy:{accepted,version},location:{accepted,version}}` JSON을 저장한다. M10의 문서 버전은 개인정보 `legalVersion = '3'`, 위치 `locationLegalVersion = '3'`이다. 버전 2 이하의 개인정보 동의는 전체 동의 화면에서 다시 받고, 이전 위치 동의는 현재 동의로 인정하지 않아 다음 공유 시작 모달에서 다시 동의받고 버전 3을 저장한다. 따라가기 시작·요청 수락 모달에는 “화면이 꺼져 있어도 공유 중에는 위치를 보냅니다”를 표시한다. 법률 문구는 2026-11-12 검토(scratchpad review/legal-review-2026-11-12.md)를 반영한 버전 3이며 책임자 표기는 「우나보 팀 개인정보 담당」·이메일, 공개는 앱 안 「약관·동의 문서」 화면으로만 한다(결정 11/12). 이전 버전 문자열 또는 현재 개인정보 동의가 없는 저장값은 전체 동의 화면을 다시 표시한다. 로그아웃해도 설치의 문서 동의는 보존한다. 개인정보 미동의는 기존 안내·로그아웃 경로이며 알림의 방 열기도 필수 동의 완료까지 보류한다.
+
+M10은 가입 화면에서 만 14세 이상 확인을 받으며 가입 본문 `over14: true`를 서버가 검사하고 계정 생성과 함께 `users.age_confirmed_at`에 ISO 시각을 저장한다. 동의는 로컬 저장 성공 뒤 `PUT /v1/me/consent`로 서버의 `privacy_version`·`privacy_consented_at`·`location_version`·`location_consented_at`에도 보관한다. `GET /v1/me`의 `consent`는 각 항목의 `{version, at}` 또는 null을 반환한다. 앱은 전송을 기다리지 않고 진행하며 실패는 debugPrint 한 줄로 처리한다(best-effort, PUT 자동 재시도 없음). 세션 복원 시 현재 로컬 동의가 있고 서버 버전이 다르거나 없으면 해당 항목만 묶어 한 번 동기화하며, 로컬 미동의 항목은 전송하지 않는다. 기존 DB의 다섯 열은 NULL 허용 ALTER로 추가하고 반복 초기화는 저장값을 변경하지 않는다.
 
 위치 항목을 체크하지 않았어도 §15의 따라가기·요청 수락 모달에서 기능별 동의를 받으면 그때 위치 항목의 동의 여부·버전을 저장한다. 저장 성공 후에만 권한 요청으로 진행한다. 선택 동의의 저장은 자동 공유 허가가 아니며 매 새 기능 시작의 모달과 취소 토큰 규칙을 유지한다. `app/assets/legal/location.md`의 “동의하지 않을 권리” 문단은 변경하지 않는다.
 
@@ -268,13 +271,15 @@ M5a는 프로필의 따라가기·따라가기 요청·따라가기 중지에 �
 
 검증 대상은 `unavo_dialog_test.dart`, `room_consent_flow_test.dart`, `legal_consent_test.dart`, 갱신한 `location_share_test.dart`·`room_session_location_test.dart`다. 새 위젯 테스트는 30초 timeout과 유한한 pump를 사용하고 이벤트 핸들러 안에서 expect하지 않는다. M4 작업에서는 format·analyze만 수행하며 Flutter test/build는 Fable이 별도로 실행한다.
 
+M10은 중요 내용 표시(고시 제4조)를 위해 전문을 접어도 개인정보 요약 5줄(항목·목적·보유·제공·거부)과 위치 요약 4줄(항목·제공·보유·거부)을 항상 표시한다. 라벨은 `UnavoType.body`의 굵은 gold, 본문은 같은 본문 스타일이며 줄 간격 4dp·블록 아래 8dp를 둔다. 360dp 폰과 차량 주 패널에서 줄바꿈하며 기존 전문 펼치기를 유지한다. 따라가기·따라가기 요청 모달의 마지막 줄에는 “동의하지 않아도 통화는 계속됩니다”를 추가하고 따라가기 중지에는 넣지 않는다. 가입 연령 확인과 문서 버전 3의 서버 보관·best-effort 전송·세션 복원 동기화는 §12를 따른다.
+
 ## 15. 방 화면 UX(M5a)
 
 **입장·따라가기.** 입장 시 지도 없이 멤버 카드와 음성·방 관리 바를 표시한다. 방 화면의 “우나보 UNAVO” 상단 제목만 제거하고 메인 화면의 제목·기존 워드마크는 유지한다. `MemberAvatar`는 표시 이름 첫 글자의 원형 아바타이며 이후 사진으로 바꿀 경계다. 공유 중인 내 카드 탭은 아래의 공유 중지 모달을 열고, 공유 중이 아니면 무동작이다. 다른 카드 탭은 `showConsentDialog(title: '따라가기')`를 열고 표시 이름, “○○ 님의 위치를 따라갑니다”, “내 위치도 같은 방 참여자에게 보입니다”, “방을 나가거나 위치 공유를 중지하면 공유가 끝납니다”, “위치는 방이 있는 동안만 서버(국내)에 남습니다”를 표시한다. 이것이 요청자의 위치 공유 동의다. 동의 → 꺼져 있으면 `LocationShare.start(token:, stillValid:)` → 성공 및 차량 moving 아님을 확인 → follow POST → pending 대기 → 수락 확인 → 지도 표시 순서다. 이미 공유 중인 대상은 POST 응답에서 즉시 수락된다. 차량의 표본 없는 unknown도 모달과 POST를 허용하며, 동의 후 최초 이동 판정 시 취소·공유 유지 규칙은 §12를 따른다. 미동의는 “동의하지 않아 따라가기 기능을 사용할 수 없습니다” 안내다.
 
 대상은 follow-request를 받으면 “따라가기 요청” 모달로 요청자 이름·공유 범위·종료 조건·보관 기간을 확인한다. 수락은 `start()` 성공 후 accepted:true, 미동의나 권한 실패는 accepted:false를 보낸다. 이미 공유 중이면 추가 모달 없이 수락한다. 서버도 현재 fix 또는 이전 수락으로 공유 중임을 아는 대상은 즉시 수락한다. 요청자의 거절 안내는 “○○ 님이 위치 공유에 동의하지 않았습니다”이며 followTarget과 지도를 해제한다. 대기 중 취소·방 변경·퇴장 뒤의 늦은 응답은 적용하지 않는다.
 
-같은 대상 카드를 다시 탭하면 “따라가기 중지” 모달이다. check 선택 시 follow DELETE·지도 닫힘이며 내 공유는 계속한다. 공유 중인 내 카드와 지도 안 locationoff 버튼은 동일한 `showConsentDialog(title: '위치 공유 중지', lines: ['내 위치 공유를 중지합니다'])`를 연다. 선택 인자 `note`로 본문 아래에 “위치 공유를 중단하게 되면 그룹 안에 있는 파트너와 연결이 끊기게 됩니다. 그래도 하시겠습니까?”를 `UnavoType.caption` 회색 보조 스타일로 표시한다. check 선택은 내 공유·따라가기와 지도를 닫고, 나를 따르던 팔로워는 서버 종료 이벤트로 해제한다. back 선택은 상태를 유지한다. 방을 나가면 모두 종료한다. 동의 모달은 가운데·차단형·아이콘 버튼만 사용하는 M4 규칙을 유지한다.
+같은 대상 카드를 다시 탭하면 “따라가기 중지” 모달이다. check 선택 시 follow DELETE·지도 닫힘이며 내 공유는 계속한다. 공유 중인 내 카드와 지도 안 locationoff 버튼은 동일한 `showConsentDialog(title: '위치 공유 중지', lines: ['내 위치 공유를 중지합니다'])`를 연다. 선택 인자 `note`로 본문 아래에 “위치 공유를 중단하면 그룹 안 파트너와의 따라가기 연결이 끊깁니다. 통화는 계속됩니다. 그래도 하시겠습니까?”를 `UnavoType.caption` 회색 보조 스타일로 표시한다. check 선택은 내 공유·따라가기와 지도를 닫고, 나를 따르던 팔로워는 서버 종료 이벤트로 해제한다. back 선택은 상태를 유지한다. 방을 나가면 모두 종료한다. 동의 모달은 가운데·차단형·아이콘 버튼만 사용하는 M4 규칙을 유지한다.
 
 **배치.** 폰은 SafeArea 전체를 사용한다. 세로 지도:통화 방 7:3(상/하), 가로는 7:3(좌/우)다. 차량은 CarShell 주 패널을 7:3(좌/우)로 쓴다. 폰 세로의 작은 통화 영역에는 가로 멤버 띠, 옆 통화 영역에는 세로 목록을 둔다. 바는 폰 SafeArea 바닥 또는 차량 주 패널 바닥 +8dp에 고정한다. M8a 일반 바는 왼쪽 [음소거·필요 시 재연결(폰)·음량], 가운데 [홈], 오른쪽 [출력 경로(폰)·나가기]다. 양쪽에 같은 폭을 배분해 홈을 기하학적 가운데에 두고, 부족한 폭은 가로 스크롤한다. 음량 펼침 모드는 [음량·슬라이더·나가기]를 유지하며 홈을 숨긴다. 음량은 폰·차량 모두 표시하고 수신 이득 상한 100%와 기존 차량 시스템 음량 연동 스위치는 유지한다. 좁은 패널의 버튼과 확장 음량 조작은 가로 스크롤한다.
 
@@ -332,7 +337,7 @@ hello는 `{self,members,leader,positions,trails,revision,followTarget,pendingFol
 
 `ApiClient.avatarPhoto`는 인증 헤더를 포함한 version URL로 가져오며 서버 주소·로그인 토큰·handle·version별 메모리 캐시를 사용한다. 새 버전은 재요청하고 실패한 요청은 캐시에서 제거한다. 네이버 `NOverlayImage.fromWidget` 키에는 handle·표시 이름·나 여부·heading 유무·밝기·차량 여부와 avatar kind·version·색을 포함한다. 사진/마스코트는 `ui.Image`로 완전히 디코딩한 후 `RawImage`로 캡처하므로 비어 있는 첫 프레임을 저장하지 않는다. 로딩 실패 시 임시 차 마커를 사용하고 이후 성공하면 동일 버전이어도 아이콘을 교체한다. SDK alpha와 위젯 opacity를 중복 적용하지 않는다. 앱 수동 디스크 캐시는 없으며 SDK의 캡처용 임시 캐시는 §13과 같다. 브이월드도 facade로 전달된 avatar·order·API와 공통 마커 위젯을 사용한다.
 
-**동의·검증.** M5b 당시 개인정보 `legalVersion='2'`, 위치 문서 `locationLegalVersion='1'`과 M6의 항목별 동의 저장을 유지했고 법률 Markdown은 변경하지 않았다. 이후 M7의 위치 문서 버전 2·배경 전송 동의는 §12를 따른다. 추가 검증은 `member_colors_test.dart`, `member_avatar_test.dart`, `profile_screen_test.dart`, 지도 캐시 키·내 GPS 색 테스트, 개인정보 버전 2 재동의 테스트, 서버 `avatars.test.ts`이다. 서버 테스트에는 마이그레이션, 300KB/PNG/IHDR 검사, 버전 증가·사진 삭제, 인증·캐시 헤더, 첫 입장 순서와 재입장, 공개 직렬화·참여 방 SSE를 포함한다. 새 테스트는 30초 timeout과 유한 pump를 사용하고 비동기 핸들러 밖에서 검증한다. 이 작업에서는 정적 분석·구문·포맷만 검사하며 테스트 실행과 빌드는 Fable이 담당한다. 실제 갤러리·네이티브 지도 캡처와 폰/차량 배치는 기기 확인 대상이다.
+**동의·검증.** M5b 당시 개인정보 `legalVersion='2'`, 위치 문서 `locationLegalVersion='1'`과 M6의 항목별 동의 저장을 유지했고 법률 Markdown은 변경하지 않았다. 이후 M7의 배경 전송 동의와 M10의 두 문서 버전 3·서버 동의 기록은 §12를 따른다. 추가 검증은 `member_colors_test.dart`, `member_avatar_test.dart`, `profile_screen_test.dart`, 지도 캐시 키·내 GPS 색 테스트, 개인정보 버전 2 재동의 테스트, 서버 `avatars.test.ts`이다. 서버 테스트에는 마이그레이션, 300KB/PNG/IHDR 검사, 버전 증가·사진 삭제, 인증·캐시 헤더, 첫 입장 순서와 재입장, 공개 직렬화·참여 방 SSE를 포함한다. 새 테스트는 30초 timeout과 유한 pump를 사용하고 비동기 핸들러 밖에서 검증한다. 이 작업에서는 정적 분석·구문·포맷만 검사하며 테스트 실행과 빌드는 Fable이 담당한다. 실제 갤러리·네이티브 지도 캡처와 폰/차량 배치는 기기 확인 대상이다.
 
 ## 17. 차량 모드 주행 중 조작 잠금(M8b)
 

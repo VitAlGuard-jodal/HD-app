@@ -121,6 +121,7 @@ class _RoomScreenState extends State<RoomScreen> {
                 '화면이 꺼져 있어도 공유 중에는 위치를 보냅니다',
                 '방을 나가거나 위치 공유를 중지하면 공유가 끝납니다',
                 '위치는 방이 있는 동안만 서버(국내)에 남습니다',
+                '동의하지 않아도 통화는 계속됩니다',
               ],
       );
       if (!mounted ||
@@ -142,6 +143,16 @@ class _RoomScreenState extends State<RoomScreen> {
       }
       if (!valid()) return;
       await saveLocationConsent(widget.services.store.preferences);
+      unawaited(
+        widget.services.api
+            .recordConsent(locationVersion: locationLegalVersion)
+            .then<void>(
+              (_) {},
+              onError: (Object error, StackTrace stack) {
+                debugPrint('위치 동의 기록 전송 실패: $error');
+              },
+            ),
+      );
       if (!valid()) return;
       await session.locationShare.start(token: token, stillValid: valid);
       if (!valid() || !session.locationShare.sharing) return;
@@ -163,7 +174,7 @@ class _RoomScreenState extends State<RoomScreen> {
       dialogContext,
       title: '위치 공유 중지',
       lines: ['내 위치 공유를 중지합니다'],
-      note: '위치 공유를 중단하게 되면 그룹 안에 있는 파트너와 연결이 끊기게 됩니다. 그래도 하시겠습니까?',
+      note: '위치 공유를 중단하면 그룹 안 파트너와의 따라가기 연결이 끊깁니다. 통화는 계속됩니다. 그래도 하시겠습니까?',
     );
     if (accepted &&
         mounted &&
@@ -230,12 +241,23 @@ class _RoomScreenState extends State<RoomScreen> {
                     '화면이 꺼져 있어도 공유 중에는 위치를 보냅니다',
                     '방을 나가거나 위치 공유를 중지하면 끝납니다',
                     '위치는 방이 있는 동안만 서버(국내)에 남습니다',
+                    '동의하지 않아도 통화는 계속됩니다',
                   ],
                 );
               }
               if (!valid()) continue;
               if (accepted) {
                 await saveLocationConsent(widget.services.store.preferences);
+                unawaited(
+                  widget.services.api
+                      .recordConsent(locationVersion: locationLegalVersion)
+                      .then<void>(
+                        (_) {},
+                        onError: (Object error, StackTrace stack) {
+                          debugPrint('위치 동의 기록 전송 실패: $error');
+                        },
+                      ),
+                );
                 if (!valid()) continue;
                 await session.locationShare.start(
                   token: token,

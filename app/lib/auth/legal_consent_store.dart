@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const legalConsentKey = 'legal.consent.v1';
-const legalVersion = '2';
-const locationLegalVersion = '2';
+const legalVersion = '3';
+const locationLegalVersion = '3';
 
 Map<String, dynamic> _consents(SharedPreferences preferences) {
   try {

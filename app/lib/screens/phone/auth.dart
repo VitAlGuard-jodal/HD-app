@@ -9,6 +9,7 @@ import '../../core/server_address.dart';
 import '../../net/api_client.dart';
 import '../../ui/icons.dart';
 import '../../ui/control_scale.dart';
+import '../../ui/theme.dart';
 import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/panel_scroll.dart';
 import '../../ui/widgets/panel_field.dart';
@@ -38,6 +39,7 @@ class _AuthScreenState extends State<AuthScreen> {
   late final TextEditingController _server;
   final _scroll = ScrollController();
   bool _signup = false;
+  bool _over14 = false;
   bool _serverExpanded = false;
   bool _busy = false;
   String? _error;
@@ -93,6 +95,9 @@ class _AuthScreenState extends State<AuthScreen> {
         await _saveServer();
         if (mounted) Navigator.of(context).pop();
         return;
+      }
+      if (_signup && !_over14) {
+        throw const FormatException('만 14세 이상만 가입할 수 있습니다.');
       }
       final id = _handle.text.trim();
       if (!HandleRules.isValid(id))
@@ -268,6 +273,27 @@ class _AuthScreenState extends State<AuthScreen> {
                       autofillHints: const [AutofillHints.nickname],
                       textInputAction: TextInputAction.done,
                       onSubmitted: (_) => _submit(),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        PanelButton(
+                          key: const ValueKey('signup-age-check'),
+                          icon: 'check',
+                          label: '만 14세 이상 확인',
+                          selected: _over14,
+                          style: _over14
+                              ? PanelButtonStyle.gold
+                              : PanelButtonStyle.neutral,
+                          onPressed: _busy
+                              ? null
+                              : () => setState(() => _over14 = !_over14),
+                        ),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Text('만 14세 이상입니다', style: UnavoType.body),
+                        ),
+                      ],
                     ),
                   ],
                   const SizedBox(height: 12),

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:unavo/auth/legal_consent_store.dart';
@@ -117,7 +118,7 @@ void main() {
         expect(find.text('위치 공유 중지'), findsOneWidget);
         expect(find.text('내 위치 공유를 중지합니다'), findsOneWidget);
         final note = find.text(
-          '위치 공유를 중단하게 되면 그룹 안에 있는 파트너와 연결이 끊기게 됩니다. 그래도 하시겠습니까?',
+          '위치 공유를 중단하면 그룹 안 파트너와의 따라가기 연결이 끊깁니다. 통화는 계속됩니다. 그래도 하시겠습니까?',
         );
         expect(note, findsOneWidget);
         expect(tester.widget<Text>(note).style?.color, UnavoColors.muted);
@@ -299,6 +300,7 @@ void main() {
       expect(find.text('앨리스 님의 위치를 따라갑니다'), findsOneWidget);
       expect(find.text('내 위치도 같은 방 참여자에게 보입니다'), findsOneWidget);
       expect(find.text('화면이 꺼져 있어도 공유 중에는 위치를 보냅니다'), findsOneWidget);
+      expect(find.text('동의하지 않아도 통화는 계속됩니다'), findsOneWidget);
       expect(f.services.locationSource.requests, 0);
       expect(f.services.api.follows, isEmpty);
       await _tap(tester, '동의');
@@ -306,10 +308,18 @@ void main() {
       expect(f.services.locationSource.watches, 1);
       expect(f.services.api.follows, ['alice']);
       expect(hasLocationConsent(f.services.store.preferences), isTrue);
+      final consentRequests = f.services.api.http.requests;
+      expect(consentRequests, hasLength(1));
+      expect(consentRequests.single.method, 'PUT');
+      expect(consentRequests.single.uri.path, '/v1/me/consent');
+      expect(jsonDecode(utf8.decode(consentRequests.single.body)), {
+        'location': {'version': '3'},
+      });
       expect(f.services.rooms.followTarget, 'alice');
       expect(find.byType(RoomMap), findsOneWidget);
       await _member(tester, 'alice');
       expect(find.text('따라가기 중지'), findsOneWidget);
+      expect(find.text('동의하지 않아도 통화는 계속됩니다'), findsNothing);
       await _tap(tester, '미동의');
       expect(f.services.rooms.followTarget, 'alice');
       await _member(tester, 'alice');
@@ -395,9 +405,21 @@ void main() {
         expect(find.text('따라가기 요청'), findsOneWidget);
         expect(find.text('보비 님이 내 위치를 따라가려 합니다'), findsOneWidget);
         expect(find.text('화면이 꺼져 있어도 공유 중에는 위치를 보냅니다'), findsOneWidget);
+        expect(find.text('동의하지 않아도 통화는 계속됩니다'), findsOneWidget);
         await _tap(tester, accepted ? '동의' : '미동의');
         expect(f.services.api.followResponses, [('bob-request', accepted)]);
         expect(f.services.locationSource.watches, accepted ? 1 : 0);
+        if (accepted) {
+          final consentRequests = f.services.api.http.requests;
+          expect(consentRequests, hasLength(1));
+          expect(consentRequests.single.method, 'PUT');
+          expect(consentRequests.single.uri.path, '/v1/me/consent');
+          expect(jsonDecode(utf8.decode(consentRequests.single.body)), {
+            'location': {'version': '3'},
+          });
+        } else {
+          expect(f.services.api.http.requests, isEmpty);
+        }
         expect(find.byType(RoomMap), findsNothing);
         if (accepted) {
           f.services.api.events.add(
