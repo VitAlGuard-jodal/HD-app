@@ -77,6 +77,7 @@ class AppServices {
     await api.logout();
     await rooms.forget();
     await store.clear();
+    api.close();
   }
 
   void dispose() {
@@ -87,5 +88,6 @@ class AppServices {
     calls.dispose();
     mic.dispose();
     store.dispose();
+    api.close();
   }
 }

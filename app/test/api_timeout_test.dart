@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 // Match api_retry_test and sse_silence_timeout_test: no real sockets or waits.
@@ -40,7 +41,19 @@ void main() {
         expect(exceptionMessage(failure!, 'fallback'), '서버 응답 없음');
         expect(errorMessage(failure!), '서버 응답 없음');
         expect(clients, hasLength(1)); // Room creation is never replayed.
-        expect(clients.single.closed, isTrue);
+        final client = clients.single;
+        expect(client.opens, 1);
+        expect(client.closed, isFalse);
+        if (stage == 'headers') {
+          expect(client.requests.single.aborted, isTrue);
+          expect(client.requests.single.abortError, same(failure));
+        } else if (stage == 'body' || stage == 'error-body') {
+          expect(client.requests.single.response!.cancelled, isTrue);
+          expect(client.requests.single.aborted, isFalse);
+        }
+        api.close();
+        clock.flushMicrotasks();
+        expect(client.closed, isTrue);
         expect(clock.pendingTimers, isEmpty);
       });
     });
@@ -69,11 +82,190 @@ void main() {
       );
       clock.flushMicrotasks();
       clock.elapse(const Duration(seconds: 15));
-      expect(clients, hasLength(2));
+      expect(clients.single.opens, 2);
       expect(failure, isNull);
       clock.elapse(const Duration(seconds: 15));
       expect(exceptionMessage(failure!, 'fallback'), '서버 응답 없음');
-      expect(clients.every((client) => client.closed), isTrue);
+      expect(clients.single.closed, isFalse);
+      expect(
+        clients.single.requests.every((request) => request.aborted),
+        isTrue,
+      );
+      api.close();
+      expect(clients.single.closed, isTrue);
+      expect(clock.pendingTimers, isEmpty);
+    });
+  });
+
+  for (final lateError in [false, true]) {
+    test('open 타임아웃 뒤 늦은 ${lateError ? '실패는 무시한다' : '요청은 그 요청만 abort한다'}', () {
+      fakeAsync((clock) {
+        final client = _Client('open');
+        final api = ApiClient(
+          tokenStore: _Store(),
+          clientFactory: () => client,
+        );
+        Object? failure;
+        unawaited(
+          api.createRoom().then<void>(
+            (_) => fail('must time out'),
+            onError: (Object error) => failure = error,
+          ),
+        );
+        clock.flushMicrotasks();
+        clock.elapse(const Duration(seconds: 15));
+        expect(failure, isA<ApiException>());
+        expect(client.closed, isFalse);
+        final request = client.requests.single;
+        expect(request.aborted, isFalse);
+        if (lateError) {
+          client.openGate!.completeError(const SocketException('late failure'));
+        } else {
+          client.openGate!.complete(request);
+        }
+        clock.flushMicrotasks();
+        expect(request.aborted, !lateError);
+        if (!lateError) expect(request.abortError, same(failure));
+        expect(client.closed, isFalse);
+        expect(clock.pendingTimers, isEmpty);
+        api.close();
+      });
+    });
+  }
+
+  test('한 요청의 타임아웃은 같은 클라이언트의 다른 진행 중 요청을 끊지 않는다', () {
+    fakeAsync((clock) {
+      final clients = <_Client>[];
+      final api = ApiClient(
+        tokenStore: _Store(),
+        clientFactory: () {
+          final client = _Client('headers', nextStage: 'success');
+          clients.add(client);
+          return client;
+        },
+      );
+      Object? failureA, failureB;
+      Room? resultB;
+      unawaited(
+        api.createRoom().then<void>(
+          (_) => fail('A must time out'),
+          onError: (Object error) => failureA = error,
+        ),
+      );
+      unawaited(
+        api.createRoom().then<void>(
+          (room) => resultB = room,
+          onError: (Object error) => failureB = error,
+        ),
+      );
+      clock.flushMicrotasks();
+      final client = clients.single;
+      expect(client.opens, 2);
+      expect(resultB, isNull);
+      clock.elapse(const Duration(seconds: 1));
+      expect(resultB?.code, 'ABC123');
+      expect(failureA, isNull);
+      clock.elapse(const Duration(seconds: 14));
+      expect(
+        failureA,
+        isA<ApiException>().having((e) => e.code, 'code', 'timeout'),
+      );
+      expect(failureB, isNull);
+      expect(resultB?.code, 'ABC123');
+      expect(client.closed, isFalse);
+      expect(client.requests.first.aborted, isTrue);
+      expect(client.requests.last.aborted, isFalse);
+      expect(clock.pendingTimers, isEmpty);
+      api.close();
+    });
+  });
+
+  for (final stage in ['open', 'headers', 'body', 'error-body']) {
+    test('아바타 $stage 타임아웃도 공유 클라이언트 대신 해당 요청만 정리한다', () {
+      fakeAsync((clock) {
+        final clients = <_Client>[];
+        final api = ApiClient(
+          tokenStore: _Store(),
+          clientFactory: () {
+            final client = _Client(stage, nextStage: 'success');
+            clients.add(client);
+            return client;
+          },
+        );
+        Object? failure;
+        unawaited(
+          api
+              .avatarPhoto('alice', 1)
+              .then<void>(
+                (_) => fail('must time out'),
+                onError: (Object error) => failure = error,
+              ),
+        );
+        clock.flushMicrotasks();
+        clock.elapse(const Duration(seconds: 15));
+        expect(
+          failure,
+          isA<ApiException>().having((e) => e.code, 'code', 'timeout'),
+        );
+        final client = clients.single;
+        expect(client.closed, isFalse);
+        if (stage == 'headers') {
+          expect(client.requests.single.aborted, isTrue);
+          expect(client.requests.single.abortError, same(failure));
+        } else if (stage == 'body' || stage == 'error-body') {
+          expect(client.requests.single.response!.cancelled, isTrue);
+        }
+        Room? room;
+        unawaited(api.createRoom().then((value) => room = value));
+        clock.flushMicrotasks();
+        clock.elapse(const Duration(seconds: 1));
+        expect(room?.code, 'ABC123');
+        expect(clients.single.opens, 2);
+        expect(client.closed, isFalse);
+        api.close();
+        clock.flushMicrotasks();
+        expect(clock.pendingTimers, isEmpty);
+      });
+    });
+  }
+
+  test('HTTP 타임아웃과 close는 별도 SSE 클라이언트를 닫지 않는다', () {
+    fakeAsync((clock) {
+      final clients = <_Client>[];
+      final api = ApiClient(
+        tokenStore: _Store(),
+        clientFactory: () {
+          final client = _Client(clients.isEmpty ? 'body' : 'headers');
+          clients.add(client);
+          return client;
+        },
+      );
+      final events = <RoomEvent>[];
+      final subscription = api.subscribeEvents('ABC123').listen(events.add);
+      clock.flushMicrotasks();
+      final sse = clients.single;
+      Object? failure;
+      unawaited(
+        api.createRoom().then<void>(
+          (_) => fail('must time out'),
+          onError: (Object error) => failure = error,
+        ),
+      );
+      clock.flushMicrotasks();
+      expect(clients, hasLength(2));
+      clock.elapse(const Duration(seconds: 15));
+      expect(failure, isA<ApiException>());
+      expect(clients.last.requests.single.aborted, isTrue);
+      expect(clients.last.closed, isFalse);
+      api.close();
+      expect(clients.last.closed, isTrue);
+      expect(sse.closed, isFalse);
+      expect(sse.requests.single.response!.cancelled, isFalse);
+      expect(events, isEmpty);
+      unawaited(subscription.cancel());
+      clock.flushMicrotasks();
+      expect(sse.closed, isTrue);
+      expect(sse.requests.single.response!.cancelled, isTrue);
       expect(clock.pendingTimers, isEmpty);
     });
   });
@@ -122,23 +314,35 @@ class _Store implements TokenStore {
 }
 
 class _Client implements HttpClient {
-  _Client(this.stage);
+  _Client(this.stage, {this.nextStage});
   final String stage;
-  _Response? response;
+  final String? nextStage;
+  int opens = 0;
+  final requests = <_Request>[];
+  Completer<HttpClientRequest>? openGate;
   bool closed = false;
   @override
   set connectionTimeout(Duration? value) {}
   @override
   Future<HttpClientRequest> openUrl(String method, Uri url) async {
-    if (stage == 'open') return Completer<HttpClientRequest>().future;
-    return _Request(this);
+    if (closed) throw StateError('client is closed');
+    final currentStage = opens++ == 0 ? stage : nextStage ?? stage;
+    final request = _Request(this, currentStage);
+    requests.add(request);
+    if (currentStage == 'open') {
+      openGate = Completer<HttpClientRequest>();
+      return openGate!.future;
+    }
+    return request;
   }
 
   @override
   void close({bool force = false}) {
     if (closed) return;
     closed = true;
-    response?.close();
+    for (final request in requests) {
+      request.response?.close();
+    }
   }
 
   @override
@@ -146,8 +350,13 @@ class _Client implements HttpClient {
 }
 
 class _Request implements HttpClientRequest {
-  _Request(this.client);
+  _Request(this.client, this.stage);
   final _Client client;
+  final String stage;
+  _Response? response;
+  bool aborted = false;
+  Object? abortError;
+  Completer<HttpClientResponse>? _headers;
   @override
   HttpHeaders get headers => _Headers();
   @override
@@ -156,11 +365,34 @@ class _Request implements HttpClientRequest {
   void add(List<int> data) {}
   @override
   Future<HttpClientResponse> close() async {
-    if (client.stage == 'headers')
-      return Completer<HttpClientResponse>().future;
-    return client.response = _Response(
-      client.stage == 'error-body' ? 500 : 200,
-    );
+    if (stage == 'headers') {
+      _headers = Completer<HttpClientResponse>();
+      return _headers!.future;
+    }
+    if (stage == 'success') {
+      await Future<void>.delayed(const Duration(seconds: 1));
+      if (client.closed) throw const SocketException('client was closed');
+      return response = _Response(
+        200,
+        body: {
+          'room': {'code': 'ABC123'},
+        },
+      );
+    }
+    return response = _Response(stage == 'error-body' ? 500 : 200);
+  }
+
+  @override
+  void abort([Object? exception, StackTrace? stackTrace]) {
+    aborted = true;
+    abortError = exception;
+    final headers = _headers;
+    if (headers != null && !headers.isCompleted) {
+      headers.completeError(
+        exception ?? const HttpException('aborted'),
+        stackTrace,
+      );
+    }
   }
 
   @override
@@ -175,10 +407,20 @@ class _Headers implements HttpHeaders {
 }
 
 class _Response extends Stream<List<int>> implements HttpClientResponse {
-  _Response(this.statusCode) {
+  _Response(this.statusCode, {JsonMap? body}) {
+    _bytes = StreamController<List<int>>(
+      onCancel: () async {
+        cancelled = true;
+      },
+    );
     unawaited(_bytes.done);
+    if (body != null) {
+      _bytes.add(utf8.encode(jsonEncode(body)));
+      close();
+    }
   }
-  final _bytes = StreamController<List<int>>(onCancel: () async {});
+  late final StreamController<List<int>> _bytes;
+  bool cancelled = false;
   void close() => unawaited(_bytes.close());
   @override
   final int statusCode;

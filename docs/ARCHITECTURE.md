@@ -77,7 +77,7 @@ SSE 이벤트(`event:` 이름 / `data:` JSON): `hello{self}`, `member-joined{han
 
 앱은 `app/`의 Flutter 단일 프로젝트다. Android applicationId와 iOS bundle ID는 `kr.modumoa.hdapp`이다. 폰 레이아웃을 기본으로 사용하고, Android `FEATURE_AUTOMOTIVE`가 true이면 `DeviceMode.car`로 분기한다. F1의 `CarShell`은 같은 폰 화면을 감싸며 F2에서 차량 레이아웃으로 교체한다. 별도 폰/차량 앱을 만들지 않는다.
 
-Dart는 인증·서버 주소·HTTP/SSE·방 세션·미디어 엔진 인터페이스 및 화면 상태를 소유한다. 상태 관리는 ChangeNotifier, 화면 이동은 기본 Navigator다. HTTP/SSE는 dart:io HttpClient, 영속 저장은 shared_preferences, SVG 아이콘은 flutter_svg를 사용한다.
+Dart는 인증·서버 주소·HTTP/SSE·방 세션·미디어 엔진 인터페이스 및 화면 상태를 소유한다. 상태 관리는 ChangeNotifier, 화면 이동은 기본 Navigator다. HTTP/SSE는 dart:io HttpClient, 영속 저장은 shared_preferences, SVG 아이콘은 flutter_svg를 사용한다. 일반 요청·아바타 다운로드는 `ApiClient` 수명의 HttpClient 하나를 재사용하고 타임아웃은 해당 요청만 abort하거나 본문 구독을 취소하며, SSE는 구독 시도마다 별도 클라이언트를 쓰고 `AppServices.dispose/logout`은 `api.close()`로 공유 클라이언트를 정리한다.
 
 **화면 구성(M8a).** 통화·방은 앱 수준의 `AppServices.rooms`·`calls`가 소유하며 화면 수명과 분리된다. `RoomScreen.onHome`은 폰에서는 방 route와 그 아래 설정 route를 루트까지 pop하고 홈 탭을 로비로 돌리며, 차량에서는 `_carRoomVisible=false`로 바꾼다. 방 나가기·통화 종료는 호출하지 않는다. 로비의 참여 중인 방 카드와 통화 중 상태 칩을 유지하고 카드에서 기존 `_openRoom`으로 복귀한다. 폰은 새 방 route를 push하고 차량은 `_carRoomVisible=true`로 전환한다.
 
@@ -223,7 +223,7 @@ NAVER 로고는 왼쪽 아래에 상시 유지하고 플로팅 바 여백을 확
 
 두 구현은 `room_map_geometry.dart`의 전방점·거리 계산과 `room_map_widgets.dart`의 GPS/차량 마커·거리 라벨·원형 버튼을 공유한다. 내 마커는 파란 GPS 점·흰 테두리·옅은 바깥 원이며 heading이 있을 때만 부채꼴을 그린다. 상대는 폰 32dp·차량 44dp 차 아이콘과 작은 표시 이름, 불투명도 0.55다. 네이버는 `NOverlayImage.fromWidget`을 `(handle, 표시 이름, 나 여부, heading 유무, brightness, car)`별로 캐시하고, car SVG는 먼저 디코딩한다. 위치·방위는 `setPosition`/`setAngle`, 스타일은 `setIcon`/`setSize`/`setAlpha`로 갱신한다. `NMarker(alpha:)`를 써 위젯과 SDK에서 alpha를 이중 적용하지 않는다. `setGlobalZIndex(300000)`으로 내 마커를 상대(200000) 위에 둔다. 네이버는 중심 anchor·`isFlat: true`이고 캡처 위젯에는 heading을 다시 적용하지 않는다. 브이월드는 내 마커를 MarkerLayer의 마지막에 배치한다.
 
-네이버 궤적은 금색 폭 8·테마 대비색 외곽선 폭 2의 `NPathOverlay`이며 2점 미만이면 생략한다. 이후 `setCoords`로 갱신한다. 브이월드는 기존 금색 폭 6의 둥근 Polyline이다. 지도에는 `trailOf(followTarget)`만 전달한다.
+네이버 궤적은 금색 폭 8·테마 대비색 외곽선 폭 2의 `NPathOverlay`이며 2점 미만이면 생략한다. 이후 `setCoords`로 갱신한다. 브이월드는 기존 금색 폭 6의 둥근 Polyline이다. 지도에는 `trailOf(followTarget)`만 전달한다. 세션은 위치·궤적이 바뀔 때만 새 불변 스냅샷을 만들고 그 사이에는 같은 객체를 돌려주므로 네이버의 `listEquals`는 identical로 단락되고 브이월드는 궤적 참조가 바뀔 때만 투영한 `LatLng` 목록을 다시 만든다.
 
 **따라가기 공통 규칙.** `roomForwardPoint()`는 heading이 있으면 전방 반평면의 가장 가까운 점을, 없으면 최근접 꼭짓점 다음 점을 고른다. 적절한 점이 없으면 따라가는 대상의 현재 위치를 쓴다. 직선 거리는 `350 m` / `1.2 km` 형식이며 좌상단에 표시한다. 사용자 터치가 끝날 때까지 자동 이동을 멈추고 마지막 제스처/카메라 정지 뒤 5초 후 따라가기가 켜진 경우에만 재개한다. 따라가기 꺼짐에서는 새 표본·테마 변경으로 카메라를 자동 이동하지 않는다.
 

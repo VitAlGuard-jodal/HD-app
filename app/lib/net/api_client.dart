@@ -24,6 +24,15 @@ class ApiClient {
   final Duration retryDelay;
   final Duration _sseSilenceTimeout;
   final HttpClient Function() _clientFactory;
+  HttpClient? _shared;
+  HttpClient get _client =>
+      _shared ??= (_clientFactory()..connectionTimeout = _timeout);
+
+  void close() {
+    _shared?.close(force: true);
+    _shared = null;
+  }
+
   static const _timeout = Duration(seconds: 15);
   static const _timeoutError = ApiException(0, 'timeout', '서버 응답 없음');
   static Never _onTimeout() => throw _timeoutError;
@@ -70,33 +79,24 @@ class ApiClient {
   }
 
   Future<Uint8List> _readAvatar(String handle, int version) async {
-    final client = _clientFactory()..connectionTimeout = _timeout;
-    try {
-      final request = await _open(
-        client,
-        'GET',
-        '/v1/users/${_segment(handle)}/avatar?v=$version',
-      );
-      request.headers.set(HttpHeaders.acceptHeader, 'image/png');
-      final response = await request.close().timeout(
-        _timeout,
-        onTimeout: _onTimeout,
-      );
-      if (response.statusCode != 200) throw await _responseError(response);
-      final bytes = BytesBuilder(copy: false);
-      await for (final chunk in response.timeout(
-        _timeout,
-        onTimeout: _onStreamTimeout,
-      )) {
-        bytes.add(chunk);
-        if (bytes.length > 300 * 1024) {
-          throw const FormatException('프로필 사진은 300KB 이하여야 합니다.');
-        }
+    final request = await _openShared(
+      'GET',
+      '/v1/users/${_segment(handle)}/avatar?v=$version',
+    );
+    request.headers.set(HttpHeaders.acceptHeader, 'image/png');
+    final response = await _closeRequest(request);
+    if (response.statusCode != 200) throw await _responseError(response);
+    final bytes = BytesBuilder(copy: false);
+    await for (final chunk in response.timeout(
+      _timeout,
+      onTimeout: _onStreamTimeout,
+    )) {
+      bytes.add(chunk);
+      if (bytes.length > 300 * 1024) {
+        throw const FormatException('프로필 사진은 300KB 이하여야 합니다.');
       }
-      return bytes.takeBytes();
-    } finally {
-      client.close(force: true);
     }
+    return bytes.takeBytes();
   }
 
   Future<AuthResult> signup(
@@ -367,9 +367,8 @@ class ApiClient {
     String path,
     JsonMap? body,
   ) async {
-    final client = _clientFactory()..connectionTimeout = _timeout;
+    final request = await _openShared(method, path);
     try {
-      final request = await _open(client, method, path);
       if (body != null) {
         request.headers.set(
           HttpHeaders.contentTypeHeader,
@@ -377,31 +376,65 @@ class ApiClient {
         );
         request.add(utf8.encode(jsonEncode(body)));
       }
-      final response = await request.close().timeout(
-        _timeout,
-        onTimeout: _onTimeout,
-      );
-      if (response.statusCode < 200 || response.statusCode >= 300)
-        throw await _responseError(response);
-      final text = await response
-          .timeout(_timeout, onTimeout: _onStreamTimeout)
-          .transform(utf8.decoder)
-          .join();
-      if (response.statusCode == 204 || text.trim().isEmpty) return null;
-      try {
-        final value = jsonDecode(text);
-        if (value is JsonMap) return value;
-      } on FormatException {
-        // 동일한 invalid_response 오류로 처리한다.
-      }
-      throw ApiException(
-        response.statusCode,
-        'invalid_response',
-        '서버 응답 형식을 확인해 주세요.',
-      );
-    } finally {
-      client.close(force: true);
+    } catch (error, stack) {
+      request.abort(error, stack);
+      rethrow;
     }
+    final response = await _closeRequest(request);
+    if (response.statusCode < 200 || response.statusCode >= 300)
+      throw await _responseError(response);
+    final text = await response
+        .timeout(_timeout, onTimeout: _onStreamTimeout)
+        .transform(utf8.decoder)
+        .join();
+    if (response.statusCode == 204 || text.trim().isEmpty) return null;
+    try {
+      final value = jsonDecode(text);
+      if (value is JsonMap) return value;
+    } on FormatException {
+      // 동일한 invalid_response 오류로 처리한다.
+    }
+    throw ApiException(
+      response.statusCode,
+      'invalid_response',
+      '서버 응답 형식을 확인해 주세요.',
+    );
+  }
+
+  Future<HttpClientResponse> _closeRequest(HttpClientRequest request) =>
+      request.close().timeout(
+        _timeout,
+        onTimeout: () {
+          request.abort(_timeoutError);
+          throw _timeoutError;
+        },
+      );
+
+  // SSE의 _open/클라이언트 수명은 유지하고 공유 풀의 요청만 개별 취소한다.
+  Future<HttpClientRequest> _openShared(String method, String path) async {
+    final base = ServerAddress.normalize(
+      tokenStore.baseUrl,
+      allowPrivateCleartext: allowPrivateCleartext,
+    );
+    final pending = _client.openUrl(method, Uri.parse('$base$path'));
+    final request = await pending.timeout(
+      _timeout,
+      onTimeout: () {
+        unawaited(
+          pending.then<void>(
+            (request) => request.abort(_timeoutError),
+            onError: (Object _) {},
+          ),
+        );
+        throw _timeoutError;
+      },
+    );
+    request.followRedirects = false;
+    request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+    final token = tokenStore.token;
+    if (token != null)
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+    return request;
   }
 
   Future<HttpClientRequest> _open(

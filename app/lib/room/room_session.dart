@@ -159,12 +159,19 @@ class RoomSession extends ChangeNotifier {
   }
 
   final Map<String, LocationFix> _positions = {};
-  Map<String, LocationFix> get positions => Map.unmodifiable(_positions);
+  Map<String, LocationFix>? _positionsView;
+  Map<String, LocationFix> get positions =>
+      _positionsView ??= Map.unmodifiable(_positions);
   String? _leaderHandle;
   String? get leaderHandle => _leaderHandle;
   final Map<String, List<LocationFix>> _trails = {};
-  List<LocationFix> trailOf(String? handle) =>
-      List.unmodifiable(_trails[handle] ?? const <LocationFix>[]);
+  final Map<String, List<LocationFix>> _trailViews = {};
+  List<LocationFix> trailOf(String? handle) {
+    final trail = _trails[handle];
+    if (handle == null || trail == null) return const <LocationFix>[];
+    return _trailViews[handle] ??= List.unmodifiable(trail);
+  }
+
   final Map<String, Map<String, int>> _lastTrailSeq = {};
   String? _followTarget;
   String? get followTarget => _followTarget;
@@ -428,9 +435,8 @@ class RoomSession extends ChangeNotifier {
       case LocationStopped():
         if (event.revision < _serverRevision) return;
         if (event.revision > _serverRevision) _serverRevision = event.revision;
-        var changed = _positions.remove(event.handle) != null;
-        changed = _trails.remove(event.handle) != null || changed;
-        _lastTrailSeq.remove(event.handle);
+        var changed = _removePosition(event.handle);
+        changed = _removeTrail(event.handle) || changed;
         if (followIntent == event.handle) {
           _endFollow(
             FollowResponse(
@@ -508,13 +514,12 @@ class RoomSession extends ChangeNotifier {
           await store.updateAvatar(event.avatar);
       case MemberLeft():
         if (event.revision > _serverRevision) _serverRevision = event.revision;
-        _positions.remove(event.handle);
+        _removePosition(event.handle);
         _cancelStarts(handle: event.handle);
         _followRequests.removeWhere(
           (_, request) => request.requester == event.handle,
         );
-        _trails.remove(event.handle);
-        _lastTrailSeq.remove(event.handle);
+        _removeTrail(event.handle);
         if (followIntent == event.handle) {
           _endFollow(
             FollowResponse(
@@ -608,17 +613,41 @@ class RoomSession extends ChangeNotifier {
     _notify();
   }
 
+  void _putPosition(LocationFix fix) {
+    if (_positions[fix.handle] == fix) return;
+    _positions[fix.handle] = fix;
+    _positionsView = null;
+  }
+
+  bool _removePosition(String? handle) {
+    if (_positions.remove(handle) == null) return false;
+    _positionsView = null;
+    return true;
+  }
+
+  void _clearPositions() {
+    if (_positions.isEmpty) return;
+    _positions.clear();
+    _positionsView = null;
+  }
+
   void _setLocationSnapshot(Hello event) {
     _setLeader(event.leader ?? state.room?.leader);
     if (event.revision < _serverRevision) return;
-    _positions.clear();
+    final positions = <String, LocationFix>{};
     for (final fix in event.positions) {
-      final previous = _positions[fix.handle];
+      final previous = positions[fix.handle];
       if (previous == null ||
           fix.stream != previous.stream ||
           fix.seq > previous.seq) {
-        _positions[fix.handle] = fix;
+        positions[fix.handle] = fix;
       }
+    }
+    for (final handle in _positions.keys.toList()) {
+      if (!positions.containsKey(handle)) _removePosition(handle);
+    }
+    for (final fix in positions.values) {
+      _putPosition(fix);
     }
     // 진행 중 POST가 아직 ID/revision을 돌려주지 않았다면 사용자 의도를 보존한다.
     if (!_followPostInFlight && _followStops.isEmpty) {
@@ -688,14 +717,45 @@ class RoomSession extends ChangeNotifier {
   }
 
   void _setTrails(Map<String, List<LocationFix>> trails) {
-    _trails.clear();
-    _lastTrailSeq.clear();
-    for (final entry in trails.entries) {
-      _trails[entry.key] = [];
-      for (final fix in entry.value) {
-        if (fix.handle == entry.key) _appendTrail(fix);
-      }
+    if (trails.isEmpty) {
+      _clearTrails();
+      return;
     }
+    for (final handle in _trails.keys.toList()) {
+      if (!trails.containsKey(handle)) _removeTrail(handle);
+    }
+    for (final entry in trails.entries) {
+      _replaceTrail(entry.key, entry.value);
+    }
+  }
+
+  void _replaceTrail(String handle, List<LocationFix> fixes) {
+    final trail = <LocationFix>[];
+    final sequences = <String, int>{};
+    for (final fix in fixes) {
+      if (fix.handle != handle || fix.seq <= (sequences[fix.stream] ?? -1))
+        continue;
+      sequences[fix.stream] = fix.seq;
+      trail.add(fix);
+    }
+    if (trail.length > 7200) trail.removeRange(0, trail.length - 7200);
+    _lastTrailSeq[handle] = sequences;
+    if (listEquals(_trails[handle], trail)) return;
+    _trails[handle] = trail;
+    _trailViews.remove(handle);
+  }
+
+  bool _removeTrail(String handle) {
+    _lastTrailSeq.remove(handle);
+    if (_trails.remove(handle) == null) return false;
+    _trailViews.remove(handle);
+    return true;
+  }
+
+  void _clearTrails() {
+    _trails.clear();
+    _trailViews.clear();
+    _lastTrailSeq.clear();
   }
 
   bool _appendTrail(LocationFix fix) {
@@ -706,6 +766,7 @@ class RoomSession extends ChangeNotifier {
     sequences[fix.stream] = fix.seq;
     trail.add(fix);
     if (trail.length > 7200) trail.removeRange(0, trail.length - 7200);
+    _trailViews.remove(fix.handle);
     return true;
   }
 
@@ -715,7 +776,7 @@ class RoomSession extends ChangeNotifier {
         fix.stream == previous.stream &&
         fix.seq <= previous.seq)
       return false;
-    _positions[fix.handle] = fix;
+    _putPosition(fix);
     _appendTrail(fix);
     return true;
   }
@@ -943,7 +1004,7 @@ class RoomSession extends ChangeNotifier {
     }
     if (wasSharing && !locationShare.sharing || rejectFollow) {
       if (!locationShare.sharing) {
-        _positions.remove(store.handle);
+        _removePosition(store.handle);
         _cancelStarts();
       }
       if (rejectFollow) {
@@ -985,10 +1046,9 @@ class RoomSession extends ChangeNotifier {
     _earlyFollowResponses.clear();
     _requestsRefreshing.clear();
     _respondingRequests.clear();
-    _positions.clear();
+    _clearPositions();
     _leaderHandle = null;
-    _trails.clear();
-    _lastTrailSeq.clear();
+    _clearTrails();
     _followTarget = null;
     _followRequestSent = false;
     ++_followRevision;

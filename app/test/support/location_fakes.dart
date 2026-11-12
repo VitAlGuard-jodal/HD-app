@@ -154,6 +154,8 @@ class _Request implements HttpClientRequest {
   @override
   Future<HttpClientResponse> close() => http.respond(call);
   @override
+  void abort([Object? exception, StackTrace? stackTrace]) {}
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 

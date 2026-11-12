@@ -67,6 +67,8 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
   bool _ready = false, _paused = false, _followQueued = false;
   int _pointers = 0;
   bool? _headingAligned;
+  List<LocationFix>? _trailSource;
+  List<LatLng> _trailPoints = const [];
   MapTiles get _tiles => widget.tiles ?? mapTiles;
   LocationFix? get _self => widget.positions[widget.selfHandle]?.fix;
   LocationFix? get _target => widget.positions[widget.targetHandle]?.fix;
@@ -168,6 +170,10 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
 
   @override
   Widget build(BuildContext context) {
+    if (!identical(_trailSource, widget.trail)) {
+      _trailSource = widget.trail;
+      _trailPoints = widget.trail.map(_point).toList(growable: false);
+    }
     final initial =
         _self ?? _target ?? widget.positions.values.firstOrNull?.fix;
     return ClipRect(
@@ -211,7 +217,7 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
                   polylines: [
                     if (widget.trail.length >= 2)
                       Polyline(
-                        points: widget.trail.map(_point).toList(),
+                        points: _trailPoints,
                         color: UnavoColors.gold,
                         strokeWidth: 6,
                         strokeCap: StrokeCap.round,

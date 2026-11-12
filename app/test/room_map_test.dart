@@ -127,6 +127,49 @@ void main() {
     controller.dispose();
   }, timeout: const Timeout(Duration(seconds: 30)));
 
+  testWidgets('같은 궤적 스냅샷이면 Polyline 점 목록을 다시 만들지 않는다', (tester) async {
+    final controller = RoomMapController();
+    final trail = List<LocationFix>.unmodifiable(
+      List.generate(
+        7200,
+        (seq) => _fix('alice', 37.5, 127 + seq / 1000000, seq: seq),
+      ),
+    );
+    List<LatLng> points() => tester
+        .widget<PolylineLayer>(find.byType(PolylineLayer))
+        .polylines
+        .single
+        .points;
+    await _pumpMap(tester, controller, trail: trail);
+    final original = points();
+    expect(original, hasLength(7200));
+    for (var i = 0; i < 4; i++) {
+      await _pumpMap(
+        tester,
+        controller,
+        trail: trail,
+        brightness: i.isEven ? Brightness.dark : Brightness.light,
+        follow: i.isEven,
+      );
+      expect(points(), same(original));
+    }
+
+    final next = _fix('alice', 37.5, 127.0072, seq: 7200);
+    await _pumpMap(
+      tester,
+      controller,
+      trail: List<LocationFix>.unmodifiable([...trail, next]),
+      leader: next,
+    );
+    expect(points(), isNot(same(original)));
+    expect(points(), hasLength(7201));
+    expect(points().last, LatLng(next.lat, next.lng));
+    expect(original, hasLength(7200));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   testWidgets('키 없는 지도는 GPS 점·상대 기본 마스코트·상대 이름·궤적·출처를 표시한다', (tester) async {
     final controller = RoomMapController();
     final trail = [_fix('alice', 37.5, 127.0002), _leader];

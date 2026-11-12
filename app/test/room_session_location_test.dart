@@ -36,6 +36,93 @@ LocationFix _fix(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('위치·궤적이 바뀌지 않으면 positions·trailOf 는 같은 스냅샷 객체를 돌려준다', () {
+    fakeAsync((clock) {
+      for (final removal in ['location-stopped', 'member-left']) {
+        final f = _Fixture.create(clock);
+        final trail = List.generate(7200, (seq) => _fix('alice', seq));
+        f.open(positions: [trail.last]);
+        f.startSharing();
+        _finish(clock, f.session.startFollowing('alice'));
+        f.event(TrailUpdated('alice', trail, revision: 1));
+        final positions = f.session.positions;
+        final snapshot = f.session.trailOf('alice');
+        expect(snapshot, hasLength(7200));
+        expect(f.session.positions, same(positions));
+        expect(f.session.trailOf('alice'), same(snapshot));
+        expect(f.session.trailOf(null), same(const <LocationFix>[]));
+        expect(f.session.trailOf('missing'), same(const <LocationFix>[]));
+        expect(() => positions.clear(), throwsUnsupportedError);
+        expect(() => snapshot.add(trail.last), throwsUnsupportedError);
+
+        var notifications = 0;
+        f.session.addListener(() => notifications++);
+        for (var i = 0; i < 20; i++) {
+          f.media.remoteSpeaking!('alice', i.isEven);
+          expect(f.session.positions, same(positions));
+          expect(f.session.trailOf('alice'), same(snapshot));
+        }
+        expect(notifications, 20);
+        f.event(LocationUpdated(_fix('alice', 7199)));
+        f.event(LocationUpdated(_fix('alice', 7198)));
+        expect(notifications, 20);
+        expect(f.session.positions, same(positions));
+        expect(f.session.trailOf('alice'), same(snapshot));
+
+        f.event(
+          TrailUpdated(
+            'alice',
+            List.generate(7200, (seq) => _fix('alice', seq)),
+            revision: 1,
+          ),
+        );
+        expect(f.session.positions, same(positions));
+        expect(f.session.trailOf('alice'), same(snapshot));
+        f.event(
+          Hello(
+            'bob',
+            f.api.members,
+            'alice',
+            [_fix('alice', 7199)],
+            {'alice': List.generate(7200, (seq) => _fix('alice', seq))},
+            'alice',
+            const [],
+            1,
+            null,
+            'alice-request',
+          ),
+        );
+        expect(f.session.positions, same(positions));
+        expect(f.session.trailOf('alice'), same(snapshot));
+
+        final next = _fix('alice', 7200);
+        f.event(LocationUpdated(next));
+        expect(f.session.positions, isNot(same(positions)));
+        expect(f.session.trailOf('alice'), isNot(same(snapshot)));
+        expect(f.session.positions['alice'], next);
+        expect(f.session.trailOf('alice'), hasLength(7200));
+        expect(f.session.trailOf('alice').first.seq, 1);
+        expect(f.session.trailOf('alice').last, next);
+        expect(positions['alice'], trail.last);
+        expect(snapshot.first.seq, 0);
+        expect(snapshot.last, trail.last);
+
+        if (removal == 'location-stopped') {
+          f.event(const LocationStopped('alice', revision: 1));
+        } else {
+          f.api.members = const [Member('bob', '보비', '2')];
+          f.event(const MemberLeft('alice', revision: 1));
+        }
+        expect(f.session.positions.containsKey('alice'), isFalse);
+        expect(f.session.trailOf('alice'), same(const <LocationFix>[]));
+        final emptyPositions = f.session.positions;
+        f.event(const LocationStopped('alice', revision: 1));
+        expect(f.session.positions, same(emptyPositions));
+        f.dispose();
+      }
+    });
+  }, timeout: _timeout);
+
   test('멤버가 퇴장해도 종료 알림은 마지막 스냅샷의 표시 이름을 조회한다', () {
     fakeAsync((clock) {
       final f = _Fixture.create(clock);
@@ -994,7 +1081,12 @@ class _Api extends ApiClient {
   }
 
   int leaves = 0;
-  Future<void> close() => events.close();
+  @override
+  Future<void> close() {
+    super.close();
+    return events.close();
+  }
+
   @override
   Future<RoomDetails> getRoom(String code) async {
     await roomGate;
