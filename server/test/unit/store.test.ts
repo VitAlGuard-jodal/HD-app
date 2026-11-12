@@ -7,9 +7,9 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { openDb } from "../../src/db.ts";
 import {
-  addContact, createRoom, createUser, deleteContact, findRoomByCode, findRoomMembership,
-  findUserByHandle, isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicUser,
-  initializeSchema, updateDisplayName,
+  addContact, createRoom, createUser, deleteContact, findCurrentRoom, findRoomByCode, findRoomMembership,
+  findUserByHandle, hasOtherValidTokens, isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicUser,
+  initializeSchema, revokeTokenHash, saveToken, updateDisplayName,
 } from "../../src/store.ts";
 
 function fixture(t: TestContext) {
@@ -45,6 +45,65 @@ test("옛 users 스키마에 동의 열 5개를 추가하고 반복 초기화는
   assert.deepEqual(db.prepare("PRAGMA table_info(users)").all(), columns);
   assert.deepEqual(db.prepare("PRAGMA schema_version").get(), schemaVersion);
   assert.deepEqual(db.prepare("SELECT * FROM users").all(), before);
+});
+
+for (const tied of [false, true]) {
+  test(`중복 활성 멤버십 초기화는 ${tied ? "동률의 큰 room id" : "가장 최근 joined_at"}만 남기고 반복 실행은 무변경이다`, (t) => {
+    const now = "2026-11-12T00:00:00.000Z";
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse(now) });
+    const { db, alice, bob } = fixture(t);
+    // 부분 UNIQUE가 없던 기존 DB의 중복 참여 데이터를 재현한다.
+    db.exec("DROP INDEX room_members_active_user");
+    const first = createRoom(db, { code: "ABC234", name: "첫 방", createdBy: alice.id }, "2026-01-02T00:00:00.000Z")!;
+    const second = createRoom(db, { code: "DEF567", name: "둘째 방", createdBy: alice.id },
+      tied ? first.createdAt : "2026-01-01T00:00:00.000Z")!;
+    joinRoom(db, first.id, bob.id, "2026-01-03T00:00:00.000Z");
+    leaveRoom(db, first.id, bob.id, "2026-01-04T00:00:00.000Z");
+    joinRoom(db, second.id, bob.id, "2026-01-05T00:00:00.000Z");
+    const expected = findCurrentRoom(db, alice.id)!;
+    assert.equal(expected.id, tied ? second.id : first.id);
+    const before = db.prepare("SELECT * FROM room_members ORDER BY user_id, room_id").all();
+
+    initializeSchema(db);
+
+    assert.deepEqual(findCurrentRoom(db, alice.id), expected);
+    assert.deepEqual(db.prepare("SELECT * FROM room_members ORDER BY user_id, room_id").all().map((row) => ({ ...row })), before.map((row) => ({
+      ...row, left_at: row.user_id === alice.id && row.room_id !== expected.id ? now : row.left_at,
+    })));
+    assert.deepEqual(db.prepare("SELECT user_id, COUNT(*) AS count FROM room_members WHERE left_at IS NULL GROUP BY user_id ORDER BY user_id")
+      .all().map((row) => ({ ...row })), [{ user_id: alice.id, count: 1 }, { user_id: bob.id, count: 1 }]);
+    const index = db.prepare("PRAGMA index_list(room_members)").all().find((row) => row.name === "room_members_active_user");
+    assert.ok(index);
+    assert.equal(index.unique, 1);
+    assert.equal(index.partial, 1);
+    const rows = db.prepare("SELECT * FROM room_members ORDER BY user_id, room_id").all();
+    const changes = db.prepare("SELECT total_changes() AS count").get();
+    const schemaVersion = db.prepare("PRAGMA schema_version").get();
+    initializeSchema(db);
+    assert.deepEqual(db.prepare("SELECT * FROM room_members ORDER BY user_id, room_id").all(), rows);
+    assert.deepEqual(db.prepare("SELECT total_changes() AS count").get(), changes);
+    assert.deepEqual(db.prepare("PRAGMA schema_version").get(), schemaVersion);
+    assert.throws(() => joinRoom(db, expected.id === first.id ? second.id : first.id, alice.id), /UNIQUE/);
+  });
+}
+
+test("다른 유효 토큰은 같은 계정의 미폐기·미만료 토큰만 세며 현재 토큰을 제외한다", (t) => {
+  const { db, alice, bob } = fixture(t);
+  const now = "2026-11-12T00:00:00.000Z";
+  const future = "2026-12-12T00:00:00.000Z";
+  saveToken(db, "current", alice.id, future);
+  saveToken(db, "other-user", bob.id, future);
+  saveToken(db, "expired", alice.id, "2026-11-11T00:00:00.000Z");
+  saveToken(db, "expires-now", alice.id, now);
+  saveToken(db, "revoked", alice.id, future);
+  revokeTokenHash(db, "revoked");
+  assert.equal(hasOtherValidTokens(db, alice.id, "current", now), false);
+  saveToken(db, "other-device", alice.id, future);
+  assert.equal(hasOtherValidTokens(db, alice.id, "current", now), true);
+  revokeTokenHash(db, "current");
+  assert.equal(hasOtherValidTokens(db, alice.id, "current", now), true);
+  revokeTokenHash(db, "other-device");
+  assert.equal(hasOtherValidTokens(db, alice.id, "current", now), false);
 });
 
 test("사용자를 저장하고 공개 정보에서 내부 식별자와 해시를 숨긴다", (t) => {
@@ -164,6 +223,22 @@ test("방별 참여 기록과 없는 기록은 구분된다", (t) => {
   assert.equal(isRoomMember(db, second.id, alice.id), false);
   assert.equal(findRoomMembership(db, first.id, bob.id), undefined);
   assert.equal(leaveRoom(db, first.id, bob.id), false);
+});
+
+test("활성 멤버십 UNIQUE는 다른 방 생성·입장을 막고 퇴장 뒤 재입장은 허용한다", (t) => {
+  const { db, alice, bob } = fixture(t);
+  const first = createRoom(db, { code: "ABC234", name: "첫 방", createdBy: alice.id })!;
+  const second = createRoom(db, { code: "DEF567", name: "둘째 방", createdBy: bob.id })!;
+  assert.throws(() => createRoom(db, { code: "XYZ234", name: "중복 방", createdBy: alice.id }), /UNIQUE/);
+  assert.equal(findRoomByCode(db, "XYZ234"), undefined);
+  assert.throws(() => joinRoom(db, second.id, alice.id), /UNIQUE/);
+  assert.equal(joinRoom(db, first.id, alice.id), false);
+  assert.equal(leaveRoom(db, first.id, alice.id), true);
+  assert.equal(joinRoom(db, second.id, alice.id), true);
+  assert.throws(() => joinRoom(db, first.id, alice.id), /UNIQUE/);
+  assert.equal(leaveRoom(db, second.id, alice.id), true);
+  assert.equal(joinRoom(db, first.id, alice.id), true);
+  assert.deepEqual(findRoomMembership(db, first.id, alice.id), { joinedAt: first.createdAt, leftAt: null });
 });
 
 test("파일 DB는 부모 폴더를 만들고 다시 열어도 데이터를 유지한다", () => {

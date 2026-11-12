@@ -6,7 +6,7 @@ import { Writable } from "node:stream";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { createApp } from "../../src/app.ts";
-import { issueToken } from "../../src/auth.ts";
+import { issueToken, revokeToken } from "../../src/auth.ts";
 import { openDb } from "../../src/db.ts";
 import { LOCATION_TRAIL_LIMIT, LOCATION_DISCONNECT_GRACE_MS, LOCATION_STALE_MS, RoomLocationStore } from "../../src/locations.ts";
 import { RoomEventHub } from "../../src/rooms.ts";
@@ -239,6 +239,90 @@ test("M7 SSE가 끊겨도 위치 수신이 계속되면 반복 유예 뒤 공유
   assert.equal(bob.events().some((e) => e.name === "location-stopped"), false);
 });
 
+test("다른 토큰 SSE가 남은 로그아웃은 공유·팔로워 관계·궤적을 변경하지 않는다", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
+  const { api, send, hub, locations, db, users, tokens } = fixture(t);
+  const original = send("GET", "/v1/rooms/ABC234/events", "alice");
+  const originalToken = tokens.get("alice")!;
+  const otherToken = issueToken(db, users[0].id);
+  tokens.set("alice", otherToken);
+  const survivor = send("GET", "/v1/rooms/ABC234/events", "alice");
+  const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
+  await api("POST", "/location", "alice", sample);
+  const before = locations.snapshot("ABC234");
+  const revision = locations.revision("ABC234");
+  tokens.set("alice", originalToken);
+  const response = send("POST", "/v1/auth/logout", "alice");
+  await new Promise<void>((resolve) => response.once("finish", resolve));
+  assert.equal(response.statusCode, 204);
+  assert.equal(original.writableEnded, true);
+  assert.equal(survivor.writableEnded, false);
+  assert.equal(hub.subscriberCount("ABC234", "alice"), 1);
+  assert.equal(locations.disconnectedAt("ABC234", "alice"), undefined);
+  assert.equal(locations.targetOf("ABC234", "bob"), "alice");
+  assert.deepEqual(locations.snapshot("ABC234"), before);
+  assert.equal(locations.revision("ABC234"), revision);
+  tokens.set("alice", otherToken);
+  t.mock.timers.tick(LOCATION_DISCONNECT_GRACE_MS);
+  assert.equal((await api("POST", "/location", "alice", { ...sample, seq: 1 })).status, 202);
+  assert.equal(locations.snapshot("ABC234").trails.alice.length, 2);
+  assert.equal(bob.events().some((event) => event.name === "follow-response" || event.name === "location-stopped"), false);
+});
+
+for (const hadSse of [false, true]) {
+  test(`다른 유효 토큰만 남은 로그아웃은 ${hadSse ? "마지막 SSE를 닫고" : "SSE 없이도"} 위치 POST를 보존하다 stale로 정리한다`, async (t) => {
+    t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
+    const { api, send, hub, locations, db, room, users, tokens } = fixture(t);
+    const otherToken = issueToken(db, users[0].id);
+    const original = hadSse ? send("GET", "/v1/rooms/ABC234/events", "alice") : undefined;
+    const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
+    const requestId = locations.relationOf(room.code, "bob")!.requestId;
+    await api("POST", "/location", "alice", sample);
+    const response = send("POST", "/v1/auth/logout", "alice");
+    await new Promise<void>((resolve) => response.once("finish", resolve));
+    assert.equal(response.statusCode, 204);
+    if (original) assert.equal(original.writableEnded, true);
+    assert.equal(hub.subscriberCount(room.code, "alice"), 0);
+    assert.equal(locations.disconnectedAt(room.code, "alice"), Date.now());
+    tokens.set("alice", otherToken);
+    for (let seq = 1; seq <= 4; seq++) {
+      t.mock.timers.tick(LOCATION_DISCONNECT_GRACE_MS - 1000);
+      assert.equal((await api("POST", "/location", "alice", { ...sample, seq })).status, 202);
+      t.mock.timers.tick(1000);
+      assert.equal(locations.targetOf(room.code, "bob"), "alice");
+      assert.equal(locations.position(room.code, "alice")?.seq, seq);
+      assert.equal(locations.snapshot(room.code).trails.alice.length, seq + 1);
+    }
+    assert.equal(bob.events().some((event) => event.name === "location-stopped" || event.name === "follow-response"), false);
+    t.mock.timers.tick(LOCATION_STALE_MS);
+    assert.equal(locations.targetOf(room.code, "bob"), null);
+    assert.deepEqual(locations.snapshot(room.code), { positions: [], trails: {} });
+    assert.equal(locations.disconnectedAt(room.code, "alice"), undefined);
+    assert.equal(isRoomMember(db, room.id, users[0].id), true);
+    assert.deepEqual(bob.events().filter((event) => event.name === "follow-response").map((event) => event.data), [{
+      requestId, requester: "bob", target: "alice", accepted: false, revision: locations.revision(room.code), reason: "stale",
+    }]);
+    t.mock.timers.tick(LOCATION_STALE_MS);
+    assert.deepEqual(bob.events().filter((event) => event.name === "location-stopped").map((event) => event.data.reason), ["stale"]);
+  });
+}
+
+test("다른 유효 토큰이 있어도 위치 표본이 없는 로그아웃은 30초 유예 뒤 관계를 정리한다", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
+  const { send, locations, db, room, users } = fixture(t);
+  issueToken(db, users[0].id);
+  const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
+  const response = send("POST", "/v1/auth/logout", "alice");
+  await new Promise<void>((resolve) => response.once("finish", resolve));
+  assert.equal(response.statusCode, 204);
+  t.mock.timers.tick(LOCATION_DISCONNECT_GRACE_MS - 1);
+  assert.equal(locations.targetOf(room.code, "bob"), "alice");
+  t.mock.timers.tick(1);
+  assert.equal(locations.targetOf(room.code, "bob"), null);
+  assert.equal(isRoomMember(db, room.id, users[0].id), true);
+  assert.deepEqual(bob.events().filter((event) => event.name === "follow-response").map((event) => event.data.reason), ["left"]);
+});
+
 test("M7 SSE와 위치가 모두 끊기면 유예가 아닌 기존 sweep이 stale로 정리한다", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
   const { api, send, locations, db, room, users } = fixture(t);
@@ -311,6 +395,49 @@ test("C3 주기 sweep은 90초 위치와 관계를 stale로 삭제한다", async
   assert.deepEqual(locations.stale(), []);
 });
 
+test("요청자 위치만 stale이면 살아 있는 SSE에 requester-stale을 한 번 보내고 관계·궤적을 삭제한다", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
+  const { api, send, hub, locations, room } = fixture(t);
+  const alice = send("GET", "/v1/rooms/ABC234/events", "alice");
+  const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
+  const requestId = locations.relationOf(room.code, "bob")!.requestId;
+  await api("POST", "/location", "alice", sample);
+  await api("POST", "/location", "bob", sample);
+  t.mock.timers.tick(LOCATION_STALE_MS - 1);
+  await api("POST", "/location", "alice", { ...sample, seq: 1 });
+  assert.equal(locations.targetOf(room.code, "bob"), "alice");
+  t.mock.timers.tick(1);
+  const revision = locations.revision(room.code);
+  assert.equal(hub.subscriberCount(room.code, "bob"), 1);
+  assert.equal(locations.relationOf(room.code, "bob"), undefined);
+  assert.equal(locations.isSharing(room.code, "bob"), false);
+  assert.equal(locations.position(room.code, "alice")?.seq, 1);
+  assert.deepEqual(locations.snapshot(room.code).trails, {});
+  assert.deepEqual(bob.events().filter((event) => event.name === "follow-response").map((event) => event.data), [{
+    requestId, requester: "bob", target: "alice", accepted: false, revision, reason: "requester-stale",
+  }]);
+  assert.deepEqual(alice.events().filter((event) => event.name === "follow-cancelled").map((event) => event.data), [{
+    requestId, requester: "bob", reason: "cancelled", revision,
+  }]);
+  assert.equal(bob.events().some((event) => event.name === "location-stopped"), false);
+  await api("GET", "/positions", "bob");
+  t.mock.timers.tick(LOCATION_DISCONNECT_GRACE_MS);
+  assert.equal(bob.events().filter((event) => event.name === "follow-response").length, 1);
+  assert.equal(alice.events().filter((event) => event.name === "follow-cancelled").length, 1);
+});
+
+test("요청자 명시적 중지는 outgoing 종료 응답의 stopped 사유를 보존한다", async (t) => {
+  const { api, send, locations, room } = fixture(t);
+  const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
+  const requestId = locations.relationOf(room.code, "bob")!.requestId;
+  assert.equal((await api("DELETE", "/location", "bob")).status, 202);
+  assert.deepEqual(bob.events().filter((event) => event.name === "follow-response").map((event) => event.data), [{
+    requestId, requester: "bob", target: "alice", accepted: false, revision: locations.revision(room.code), reason: "stopped",
+  }]);
+  await api("DELETE", "/location", "bob");
+  assert.equal(bob.events().filter((event) => event.name === "follow-response").length, 1);
+});
+
 test("C5/C6 pending hello·displayName·ID 일치·수락 전환을 검증한다", async (t) => {
   const { api, send, locations } = fixture(t, false);
   const alice = send("GET", "/v1/rooms/ABC234/events", "alice");
@@ -380,17 +507,25 @@ test("C7 follow/respond/unfollow는 handle당 합산 1초 제한이다", async (
 
 for (const action of ["leave", "stop", "logout"]) {
   test(`명시적 ${action}는 유예 없이 정리하고 반복 중지는 방송하지 않는다`, async (t) => {
-    const { api, send, locations } = fixture(t);
+    const { api, send, locations, db, users } = fixture(t);
+    const requestId = locations.relationOf("ABC234", "bob")!.requestId;
     send("GET", "/v1/rooms/ABC234/events", "alice");
     const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
     await api("POST", "/location", "alice", sample);
     if (action === "logout") {
+      issueToken(db, users[0].id, new Date("2000-01-01T00:00:00.000Z"));
+      revokeToken(db, issueToken(db, users[0].id));
       const response = send("POST", "/v1/auth/logout", "alice");
       await new Promise<void>((resolve) => response.once("finish", resolve));
+      assert.equal(response.statusCode, 204);
     } else await api(action === "leave" ? "POST" : "DELETE", action === "leave" ? "/leave" : "/location");
     assert.equal(locations.targetOf("ABC234", "bob"), null);
     assert.deepEqual(locations.snapshot("ABC234"), { positions: [], trails: {} });
     assert.equal(locations.disconnectedAt("ABC234", "alice"), undefined);
+    assert.deepEqual(bob.events().filter((event) => event.name === "follow-response").map((event) => event.data), [{
+      requestId, requester: "bob", target: "alice", accepted: false,
+      revision: locations.revision("ABC234"), reason: action === "leave" ? "left" : "stopped",
+    }]);
     if (action === "stop") {
       const count = bob.events().length;
       await api("DELETE", "/location");
@@ -416,8 +551,10 @@ test("생성·조회·me의 leader는 같은 handle이다", async (t) => {
   const { api, send } = fixture(t);
   assert.equal((await api("GET", "")).body.room.leader, "alice");
   for (const [method, path, body] of [["GET", "/v1/me", undefined], ["POST", "/v1/rooms", {}]] as const) {
+    if (method === "POST") assert.equal((await api("POST", "/leave", "alice")).status, 204);
     const response = send(method, path, "alice", body);
     await new Promise<void>((resolve) => response.once("finish", resolve));
+    assert.equal(response.statusCode, method === "POST" ? 201 : 200);
     assert.equal(JSON.parse(Buffer.concat(response.chunks).toString()).room.leader, "alice");
   }
 });

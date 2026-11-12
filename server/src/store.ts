@@ -104,6 +104,27 @@ export function initializeSchema(db: DatabaseSync): void {
       db.exec(`ALTER TABLE users ADD COLUMN ${name} TEXT`);
     }
   }
+  // 기존 중복 참여는 findCurrentRoom의 선택 기준으로 한 번 정리한 뒤 DB에서도 단일 활성 방을 보장한다.
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'room_members_active_user'").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare(`
+        WITH ranked AS (
+          SELECT rowid AS member_rowid,
+                 ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY joined_at DESC, room_id DESC) AS rank
+          FROM room_members WHERE left_at IS NULL
+        )
+        UPDATE room_members SET left_at = ?
+        WHERE rowid IN (SELECT member_rowid FROM ranked WHERE rank > 1)
+      `).run(new Date().toISOString());
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS room_members_active_user
+        ON room_members(user_id) WHERE left_at IS NULL`);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
 }
 
 export function publicUser(user: PublicUser): PublicUser {
@@ -237,6 +258,14 @@ export function findTokenUser(
 
 export function revokeTokenHash(db: DatabaseSync, tokenHash: string): void {
   db.prepare("UPDATE tokens SET revoked = 1 WHERE token_hash = ?").run(tokenHash);
+}
+
+export function hasOtherValidTokens(db: DatabaseSync, userId: number, excludedTokenHash: string, now: string): boolean {
+  return Boolean(db.prepare(`
+    SELECT 1 FROM tokens
+    WHERE user_id = ? AND revoked = 0 AND expires_at > ? AND token_hash != ?
+    LIMIT 1
+  `).get(userId, now, excludedTokenHash));
 }
 
 export function listContacts(db: DatabaseSync, ownerId: number): PublicUser[] {

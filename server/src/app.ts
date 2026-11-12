@@ -9,7 +9,7 @@ import { openEventStream } from "./sse.ts";
 import { issueIceServers } from "./turn.ts";
 import {
   addContact, createRoom, createUser, deleteContact, deleteEmptyRoom, findCurrentRoom, findRoomByCode, findUserByHandle,
-  findRoomMembership, isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicRoomDetails, publicUser,
+  findRoomMembership, hasOtherValidTokens, isRoomMember, joinRoom, leaveRoom, listContacts, listRoomMembers, publicRoom, publicRoomDetails, publicUser,
   readUserConsent, updateDisplayName, updateUserConsent, userRoomCodes,
 } from "./store.ts";
 import type { StoredRoom, StoredUser } from "./store.ts";
@@ -193,7 +193,11 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
     const { outgoing, incoming } = locations.removeFollows(code, handle);
     const removed = locations.remove(code, handle);
     const revision = locations.revision(code);
-    if (outgoing) cancelRequest(code, outgoing);
+    if (outgoing) {
+      hub.followResponse(code, outgoing.requestId, handle, outgoing.target, false, revision,
+        reason === "stale" ? "requester-stale" : reason);
+      cancelRequest(code, outgoing);
+    }
     for (const request of incoming) {
       hub.followResponse(code, request.requestId, request.requester, handle, false, revision, reason);
       cancelRequest(code, request);
@@ -300,8 +304,18 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
     if (method === "POST" && path === "/v1/auth/logout") {
       await readJson(request, true);
       revokeToken(db, token);
-      hub.disconnectToken(tokenHash(token));
-      for (const code of locations.codesFor(user.handle)) removeLocation(code, user.handle, "stopped");
+      const hash = tokenHash(token);
+      hub.disconnectToken(hash);
+      const hasOtherTokens = hasOtherValidTokens(db, user.id, hash, new Date().toISOString());
+      for (const code of locations.codesFor(user.handle)) {
+        if (hub.subscriberCount(code, user.handle) > 0) continue;
+        if (hasOtherTokens) {
+          locations.disconnected(code, user.handle);
+          scheduleDisconnect(code, user.handle);
+        } else {
+          removeLocation(code, user.handle, "stopped");
+        }
+      }
       json(response, 204);
       return;
     }
@@ -441,6 +455,9 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
           throw new HttpError(404, "USER_NOT_FOUND", "초대할 사용자를 찾을 수 없습니다.");
         }
       }
+      if (findCurrentRoom(db, user.id)) {
+        throw new HttpError(409, "ROOM_ACTIVE", "이미 참여 중인 방이 있습니다. 나간 뒤 다시 시도해 주세요.");
+      }
       for (let attempt = 0; attempt < 10; attempt += 1) {
         const room = createRoom(db, {
           code: generateRoomCode(),
@@ -472,6 +489,10 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       }
       if (method === "POST" && action === "join") {
         await readJson(request, true);
+        const currentRoom = findCurrentRoom(db, user.id);
+        if (currentRoom && currentRoom.id !== room.id) {
+          throw new HttpError(409, "ROOM_ACTIVE", "이미 참여 중인 방이 있습니다. 나간 뒤 다시 시도해 주세요.");
+        }
         if (joinRoom(db, room.id, user.id)) {
           hub.broadcast(code, "member-joined", { handle: user.handle, revision: locations.changed(code) });
         }

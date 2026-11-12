@@ -209,7 +209,7 @@ test("잘못된 업로드는 파일·버전·방송을 변경하지 않으며 �
   assert.deepEqual(events, []);
 });
 
-test("첫 joined_at 순번은 동률·퇴장·재입장에도 유지되며 모든 공개 경로와 SSE에 아바타를 담는다", timeout, async (t) => {
+test("첫 joined_at 순번·공개 아바타를 보존하고 현재 활성 방에만 아바타 변경을 방송한다", timeout, async (t) => {
   const { db, hub, alice, bob, request, hello } = fixture(t);
   const first = createRoom(db, { code: "ABC234", name: "첫 방", createdBy: bob.id }, "2026-01-01")!;
   joinRoom(db, first.id, alice.id, "2026-01-01");
@@ -220,17 +220,24 @@ test("첫 joined_at 순번은 동률·퇴장·재입장에도 유지되며 모�
   assert.deepEqual(listRoomMembers(db, first.id).map((member) => member.order), [1, 2]);
   joinRoom(db, first.id, bob.id, "2026-12-01");
   assert.equal(listRoomMembers(db, first.id)[0].joinedAt, "2026-01-01");
-  const second = createRoom(db, { code: "DEF567", name: "둘째 방", createdBy: alice.id })!;
+  const fourth = createUser(db, { handle: "fourth", displayName: "네 번째", passwordHash: "unused" })!;
+  const second = createRoom(db, { code: "DEF567", name: "나간 방", createdBy: fourth.id })!;
+  leaveRoom(db, first.id, alice.id);
+  joinRoom(db, second.id, alice.id);
+  leaveRoom(db, second.id, alice.id);
+  joinRoom(db, first.id, alice.id);
+  leaveRoom(db, first.id, third.id);
   const absent = createRoom(db, { code: "XYZ234", name: "다른 방", createdBy: third.id })!;
   const events: { code: string; name: string; data: unknown }[] = [];
   for (const room of [first, second, absent]) {
-    hub.subscribe(room.code, third.handle, "test", (name, data) => { events.push({ code: room.code, name, data }); return true; }, () => {});
+    hub.subscribe(room.code, room.createdBy, "test", (name, data) => { events.push({ code: room.code, name, data }); return true; }, () => {});
   }
   addContact(db, alice.id, bob.id);
+  addContact(db, alice.id, third.id);
   const updated = await request("PUT", "/v1/me/avatar", { kind: "mascot-05" });
   const avatar = { kind: "mascot-05", version: 1 };
   assert.deepEqual(updated.body.user.avatar, avatar);
-  assert.deepEqual(events, [first, second].map((room) => ({ code: room.code, name: "member-updated", data: { handle: "alice", avatar } })));
+  assert.deepEqual(events, [{ code: first.code, name: "member-updated", data: { handle: "alice", avatar } }]);
   const detail = (await request("GET", `/v1/rooms/${first.code}`)).body;
   assert.deepEqual(detail.members.find((member: { handle: string }) => member.handle === "alice").avatar, avatar);
   const snapshot = hello(first.code);
@@ -239,13 +246,17 @@ test("첫 joined_at 순번은 동률·퇴장·재입장에도 유지되며 모�
   assert.deepEqual(snapshot.members, detail.members);
   const me = (await request("GET", "/v1/me")).body;
   assert.deepEqual(me.user.avatar, avatar);
-  assert.equal(me.user.order, 0);
+  assert.equal(me.user.order, 1);
+  assert.equal(me.room.code, first.code);
   assert.equal(me.room.members[0].order, 0);
   // 연락처의 order는 조회자의 현재 방 기준이며 함께 참여하지 않으면 null이다.
   const contacts = (await request("GET", "/v1/contacts")).body.contacts;
-  assert.deepEqual(contacts[0].avatar, { kind: null, version: 0 });
-  assert.equal(contacts[0].order, null);
+  assert.deepEqual(contacts.find((contact: { handle: string }) => contact.handle === "bob").avatar, { kind: null, version: 0 });
+  assert.equal(contacts.find((contact: { handle: string }) => contact.handle === "bob").order, 0);
+  assert.equal(contacts.find((contact: { handle: string }) => contact.handle === "aaa").order, null);
   await request("DELETE", "/v1/me/avatar");
+  assert.equal(events.length, 2);
+  assert.equal(events.at(-1)?.code, first.code);
   assert.deepEqual(events.at(-1)?.data, { handle: "alice", avatar: { kind: null, version: 2 } });
 });
 

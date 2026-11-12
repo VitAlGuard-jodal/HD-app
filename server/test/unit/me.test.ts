@@ -8,7 +8,7 @@ import type { TestContext } from "node:test";
 import { createApp } from "../../src/app.ts";
 import { issueToken } from "../../src/auth.ts";
 import { openDb } from "../../src/db.ts";
-import { createRoom, createUser, joinRoom, leaveRoom, publicRoomDetails } from "../../src/store.ts";
+import { createRoom, createUser, findRoomMembership, joinRoom, leaveRoom, publicRoomDetails } from "../../src/store.ts";
 
 // 실제 라우터·인증·SQLite를 사용하되 TCP listen 없이 JSON 응답을 수집한다.
 class JsonResponse extends Writable {
@@ -91,19 +91,23 @@ test("me 라우터: 참여 전·나간 뒤 room은 null, 참여 중에는 기존
   assert.deepEqual(await get("/v1/me"), { status: 200, body: { user, room: null, consent } });
 });
 
-test("me 라우터: joined_at이 가장 최근인 활성 방을 고르고 동률도 결정적으로 처리한다", async (t) => {
+test("me 라우터: 활성 방 하나만 복원하고 과거 joined_at을 보존한 재입장도 현재 방을 반환한다", async (t) => {
   const { db, alice, bob, get } = fixture(t);
+  const charlie = createUser(db, { handle: "charlie", displayName: "찰리", passwordHash: "unused" })!;
   const first = createRoom(db, { code: "ABC234", name: "첫 방", createdBy: alice.id })!;
-  const second = createRoom(db, { code: "DEF567", name: "둘째 방", createdBy: alice.id })!;
+  const second = createRoom(db, { code: "DEF567", name: "둘째 방", createdBy: charlie.id })!;
   joinRoom(db, second.id, bob.id, "2026-01-01T00:00:00.000Z");
+  assert.equal((await get("/v1/me")).body.room.code, second.code);
+  assert.throws(() => joinRoom(db, first.id, bob.id), /UNIQUE/);
+  leaveRoom(db, second.id, bob.id);
+  assert.equal((await get("/v1/me")).body.room, null);
   joinRoom(db, first.id, bob.id, "2026-01-02T00:00:00.000Z");
   assert.equal((await get("/v1/me")).body.room.code, first.code);
   leaveRoom(db, first.id, bob.id);
+  assert.equal((await get("/v1/me")).body.room, null);
+  joinRoom(db, second.id, bob.id, "2026-01-03T00:00:00.000Z");
+  assert.deepEqual(findRoomMembership(db, second.id, bob.id), { joinedAt: "2026-01-01T00:00:00.000Z", leftAt: null });
   assert.equal((await get("/v1/me")).body.room.code, second.code);
-  joinRoom(db, first.id, bob.id, "2026-01-01T00:00:00.000Z");
-  // 재입장은 첫 joined_at을 보존하므로 최초 입장이 더 최근인 first를 고른다.
-  assert.equal((await get("/v1/me")).body.room.code, first.code);
-  leaveRoom(db, first.id, bob.id);
   leaveRoom(db, second.id, bob.id);
   assert.equal((await get("/v1/me")).body.room, null);
 });
