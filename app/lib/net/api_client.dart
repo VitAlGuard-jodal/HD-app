@@ -10,6 +10,11 @@ import '../core/server_address.dart';
 import 'models.dart';
 import 'sse_parser.dart';
 
+class _AvatarPhotoEntry {
+  late final Future<Uint8List> pending;
+  ({DateTime at, Object error, StackTrace stack})? failure;
+}
+
 class ApiClient {
   ApiClient({
     required this.tokenStore,
@@ -17,13 +22,16 @@ class ApiClient {
     this.retryDelay = const Duration(milliseconds: 400),
     Duration? sseSilenceTimeout,
     HttpClient Function()? clientFactory,
+    DateTime Function()? avatarNow,
   }) : _sseSilenceTimeout = sseSilenceTimeout ?? ApiClient.sseSilenceTimeout,
+       _avatarNow = avatarNow ?? DateTime.now,
        _clientFactory = clientFactory ?? HttpClient.new;
   final TokenStore tokenStore;
   final bool allowPrivateCleartext;
   final Duration retryDelay;
   final Duration _sseSilenceTimeout;
   final HttpClient Function() _clientFactory;
+  final DateTime Function() _avatarNow;
   HttpClient? _shared;
   HttpClient get _client =>
       _shared ??= (_clientFactory()..connectionTimeout = _timeout);
@@ -44,7 +52,7 @@ class ApiClient {
   // 서버 ping 15초 + 여유 5초
   static const sseSilenceTimeout = Duration(seconds: 20);
 
-  final _avatarPhotos = <(String, String?, String, int), Future<Uint8List>>{};
+  final _avatarPhotos = <(String, String?, String, int), _AvatarPhotoEntry>{};
 
   Future<User> updateAvatar(String kind, {Uint8List? png}) async =>
       User.fromJson(
@@ -59,23 +67,32 @@ class ApiClient {
     (await _response('DELETE', '/v1/me/avatar'))['user'] as JsonMap,
   );
 
-  // 인증 세션·서버·버전까지 분리한 메모리 캐시. 실패한 요청은 재시도할 수 있다.
+  // 인증 세션·서버·버전까지 분리한다. 실패도 같은 키에서는 30초간 재사용한다.
   Future<Uint8List> avatarPhoto(String handle, int version) {
     final key = (tokenStore.baseUrl, tokenStore.token, handle, version);
     final cached = _avatarPhotos[key];
-    if (cached != null) return cached;
+    if (cached != null) {
+      final failure = cached.failure;
+      if (failure == null) return cached.pending;
+      if (_avatarNow().difference(failure.at) < const Duration(seconds: 30)) {
+        return Future<Uint8List>.error(failure.error, failure.stack);
+      }
+    }
     _avatarPhotos.removeWhere(
       (old, _) => old.$1 != key.$1 || old.$2 != key.$2 || old.$3 == handle,
     );
     if (_avatarPhotos.length >= 64)
       _avatarPhotos.remove(_avatarPhotos.keys.first);
-    late final Future<Uint8List> pending;
-    pending = _readAvatar(handle, version).catchError((Object error) {
-      if (identical(_avatarPhotos[key], pending)) _avatarPhotos.remove(key);
-      throw error;
+    final entry = _AvatarPhotoEntry();
+    entry.pending = _readAvatar(handle, version).catchError((
+      Object error,
+      StackTrace stack,
+    ) {
+      entry.failure = (at: _avatarNow(), error: error, stack: stack);
+      Error.throwWithStackTrace(error, stack);
     });
-    _avatarPhotos[key] = pending;
-    return pending;
+    _avatarPhotos[key] = entry;
+    return entry.pending;
   }
 
   Future<Uint8List> _readAvatar(String handle, int version) async {

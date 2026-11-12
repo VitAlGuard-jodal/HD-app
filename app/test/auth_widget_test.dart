@@ -7,6 +7,7 @@ import 'package:unavo/auth/handle_rules.dart';
 import 'package:unavo/auth/session_store.dart';
 import 'package:unavo/core/device_mode.dart';
 import 'package:unavo/net/api_client.dart';
+import 'package:unavo/net/models.dart';
 import 'package:unavo/screens/phone/auth.dart';
 import 'package:unavo/ui/appearance.dart';
 import 'package:unavo/ui/theme.dart';
@@ -17,6 +18,62 @@ import 'support/consent_fakes.dart';
 import 'support/icon_bundle.dart';
 
 void main() {
+  testWidgets('서버 설정은 검증된 정규화 주소를 콜백에 전달하고 저장·화면 전환을 위임한다', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = SessionStore(await SharedPreferences.getInstance());
+    final appearance = AppearanceController();
+    final api = ApiClient(tokenStore: store);
+    final original = store.baseUrl;
+    final saved = <String>[];
+    var failSave = false;
+    try {
+      await tester.pumpWidget(
+        UnavoAppearance(
+          controller: appearance,
+          child: MaterialApp(
+            builder: testIconBuilder,
+            theme: unavoTheme(Brightness.dark),
+            home: AuthScreen(
+              api: api,
+              store: store,
+              mode: DeviceMode.phone,
+              serverSettingsOnly: true,
+              onSaveServer: (url) async {
+                saved.add(url);
+                if (failSave)
+                  throw const ApiException(503, 'unavailable', '연결 실패');
+              },
+            ),
+          ),
+        ),
+      );
+      await pumpConsentUi(tester);
+      final field = find.byType(TextField);
+      final save = find.byKey(const ValueKey('server-settings-save'));
+      await tester.enterText(field, 'ftp://example.invalid');
+      await tester.tap(save);
+      await pumpConsentUi(tester);
+      expect(saved, isEmpty);
+      await tester.enterText(field, ' https://new.example.invalid/// ');
+      await tester.tap(save);
+      await pumpConsentUi(tester);
+      expect(saved, ['https://new.example.invalid']);
+      expect(store.baseUrl, original);
+      expect(find.byType(AuthScreen), findsOneWidget);
+      failSave = true;
+      await tester.tap(save);
+      await pumpConsentUi(tester);
+      expect(find.text('연결 실패'), findsOneWidget);
+      expect(store.baseUrl, original);
+      expect(tester.takeException(), isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      api.close();
+      store.dispose();
+      appearance.dispose();
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   testWidgets('가입은 만 14세 이상 확인 전 제출을 막고 확인 뒤 over14 true를 전송한다', (
     tester,
   ) async {

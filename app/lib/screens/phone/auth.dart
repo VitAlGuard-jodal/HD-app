@@ -23,11 +23,13 @@ class AuthScreen extends StatefulWidget {
     required this.store,
     required this.mode,
     this.serverSettingsOnly = false,
+    this.onSaveServer,
   });
   final ApiClient api;
   final SessionStore store;
   final DeviceMode mode;
   final bool serverSettingsOnly;
+  final Future<void> Function(String normalizedUrl)? onSaveServer;
   @override
   State<AuthScreen> createState() => _AuthScreenState();
 }
@@ -92,8 +94,18 @@ class _AuthScreenState extends State<AuthScreen> {
     });
     try {
       if (widget.serverSettingsOnly) {
-        await _saveServer();
-        if (mounted) Navigator.of(context).pop();
+        final onSaveServer = widget.onSaveServer;
+        if (onSaveServer != null) {
+          await onSaveServer(
+            ServerAddress.normalize(
+              _server.text,
+              allowPrivateCleartext: kDebugMode,
+            ),
+          );
+        } else {
+          await _saveServer();
+          if (mounted) Navigator.of(context).pop();
+        }
         return;
       }
       if (_signup && !_over14) {

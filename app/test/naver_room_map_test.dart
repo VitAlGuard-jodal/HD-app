@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -24,6 +27,58 @@ LocationFix _fix(String handle, double lat, double lng, {double? heading}) =>
     );
 
 void main() {
+  test('실패 마커는 30초 동안 캡처 한 번을 재사용하고 다음 sync에서 성공 아이콘으로 바뀐다', () {
+    fakeAsync((clock) {
+      final cache = RoomMarkerIconCache(
+        now: () => DateTime.utc(2026).add(clock.elapsed),
+      );
+      final key = roomMarkerCacheKey(
+        position: RoomMapPosition(
+          _fix('alice', 37, 127),
+          displayName: '앨리스',
+          avatar: const Avatar(kind: 'photo', version: 1),
+        ),
+        self: false,
+        brightness: Brightness.dark,
+        car: false,
+      );
+      const fallback = NOverlayImage.fromAssetImage('fallback.png');
+      const resolved = NOverlayImage.fromAssetImage('resolved.png');
+      var captures = 0;
+      var failed = true;
+      NOverlayImage? sync() {
+        NOverlayImage? result;
+        unawaited(
+          cache
+              .load(key, () async {
+                captures++;
+                return (icon: failed ? fallback : resolved, failed: failed);
+              })
+              .then((icon) {
+                result = icon;
+              }),
+        );
+        clock.flushMicrotasks();
+        return result;
+      }
+
+      expect(sync(), same(fallback));
+      failed = false;
+      for (var i = 0; i < 5; i++) expect(sync(), same(fallback));
+      clock.elapse(const Duration(seconds: 29));
+      expect(sync(), same(fallback));
+      expect(captures, 1);
+      clock.elapse(const Duration(seconds: 1));
+      expect(captures, 1, reason: '시간 경과만으로 캡처하지 않는다');
+      expect(sync(), same(resolved));
+      expect(captures, 2);
+      clock.elapse(const Duration(seconds: 30));
+      expect(sync(), same(resolved));
+      expect(captures, 2);
+      cache.clear();
+    });
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   test('SDK 마커는 내 GPS 불투명·최상위, 상대 0.55와 폰36/차량48을 사용한다', () {
     for (final car in [false, true]) {
       final self = roomNaverMarker(

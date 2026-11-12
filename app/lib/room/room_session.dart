@@ -131,6 +131,7 @@ class RoomSession extends ChangeNotifier {
     final changedMembers = !identical(_state.members, value.members);
     _state = value;
     if (changedRoom) {
+      ++_membersGeneration;
       _displayNames.clear();
       _clearLocations();
     }
@@ -181,9 +182,17 @@ class RoomSession extends ChangeNotifier {
   String? get followRequestId => _followRequestId;
   int _serverRevision = 0;
   int get followServerRevision => _serverRevision;
+  int _connectionId = 0;
+  ({int connectionId, int revision})? _myFollowRevision;
+  final _answeredRequestIds = <(int, String)>{};
+  ({int connectionId, Hello event, Map<String, List<LocationFix>> trails})?
+  _deferredHelloFollow;
+  String? get _deferredFollowIntent =>
+      _deferredHelloFollow?.event.pendingFollow ??
+      _deferredHelloFollow?.event.followTarget;
   bool _followPostInFlight = false;
   final Set<Object> _followStops = {};
-  final List<FollowResponse> _earlyFollowResponses = [];
+  final _earlyFollowResponses = <({int connectionId, FollowResponse event})>[];
   final Map<Object, _FollowStart> _locationStarts = {};
 
   Object beginLocationStart(String target, {String? requestId}) {
@@ -312,6 +321,16 @@ class RoomSession extends ChangeNotifier {
   Future<void>? _stopFuture;
   int _generation = 0;
   int _callGeneration = 0;
+  int _refreshSeq = 0, _completedRefreshSeq = 0, _membersGeneration = 0;
+
+  void _beginConnection() {
+    ++_connectionId;
+    _serverRevision = 0;
+    _myFollowRevision = null;
+    _answeredRequestIds.clear();
+    _deferredHelloFollow = null;
+    _earlyFollowResponses.clear();
+  }
 
   void _setLocalSpeaking(bool speaking) {
     final value =
@@ -345,6 +364,7 @@ class RoomSession extends ChangeNotifier {
     if (!_current(generation)) return;
     // Wait for hello.members before restoring the media session.
     _eventQueue = Future<void>.value();
+    _beginConnection();
     _subscription = api
         .subscribeEvents(code)
         .listen(
@@ -413,18 +433,30 @@ class RoomSession extends ChangeNotifier {
         if (_followRequests.remove(event.requestId) != null) _notify();
         return;
       case FollowResponse():
-        if (_followPostInFlight) {
-          if (event.target == _pendingFollow &&
+        if (_followPostInFlight || _followStops.isNotEmpty) {
+          if ((event.target == _pendingFollow ||
+                  event.target == _deferredFollowIntent) &&
               (event.requester.isEmpty || event.requester == store.handle)) {
-            _earlyFollowResponses.add(event);
+            _earlyFollowResponses.add((
+              connectionId: _connectionId,
+              event: event,
+            ));
           }
           return;
         }
         _applyFollowResponse(event);
         return;
       case TrailUpdated():
-        if (event.handle != followIntent || event.revision < _serverRevision)
+        if ((event.handle != followIntent &&
+                event.handle != _deferredFollowIntent) ||
+            event.revision < _serverRevision)
           return;
+        _serverRevision = event.revision;
+        if (event.handle == _deferredFollowIntent) {
+          _deferredHelloFollow!.trails
+            ..clear()
+            ..[event.handle] = List.of(event.points);
+        }
         _setTrails({event.handle: event.points});
         _notify();
         return;
@@ -435,6 +467,7 @@ class RoomSession extends ChangeNotifier {
       case LocationStopped():
         if (event.revision < _serverRevision) return;
         if (event.revision > _serverRevision) _serverRevision = event.revision;
+        _stopDeferredFollow(event.handle);
         var changed = _removePosition(event.handle);
         changed = _removeTrail(event.handle) || changed;
         if (followIntent == event.handle) {
@@ -460,6 +493,7 @@ class RoomSession extends ChangeNotifier {
           error: '${event.message} (${event.retryInMillis ~/ 1000}초 후)',
         );
       case Reconnected():
+        _beginConnection();
         try {
           await api.joinRoom(code);
           if (!_current(generation)) return;
@@ -497,6 +531,7 @@ class RoomSession extends ChangeNotifier {
         }
         _maybeAutoJoin();
       case MemberJoined():
+        ++_membersGeneration;
         if (event.revision > _serverRevision) _serverRevision = event.revision;
         await _refresh(code, generation);
       case MemberUpdated():
@@ -513,7 +548,9 @@ class RoomSession extends ChangeNotifier {
         if (event.handle == store.handle)
           await store.updateAvatar(event.avatar);
       case MemberLeft():
+        ++_membersGeneration;
         if (event.revision > _serverRevision) _serverRevision = event.revision;
+        _stopDeferredFollow(event.handle);
         _removePosition(event.handle);
         _cancelStarts(handle: event.handle);
         _followRequests.removeWhere(
@@ -543,16 +580,34 @@ class RoomSession extends ChangeNotifier {
   }
 
   Future<void> _refresh(String code, int generation) async {
+    final seq = ++_refreshSeq;
+    final membersGeneration = _membersGeneration;
+    int? applyingGeneration;
+    bool current() =>
+        _current(generation) &&
+        state.code == code &&
+        seq > _completedRefreshSeq &&
+        membersGeneration == _membersGeneration;
     try {
       final details = await api.getRoom(code);
-      if (_current(generation) && state.code == code) {
+      if (current()) {
+        _completedRefreshSeq = seq;
         state = state.copyWith(room: details.room, error: null);
         _setLeader(details.room.leader);
+        applyingGeneration = _membersGeneration + 1;
         await _setMembers(details.members);
         _notify();
       }
     } catch (error) {
-      if (!_current(generation)) return;
+      if (applyingGeneration == null) {
+        if (!current()) return;
+      } else if (!_current(generation) ||
+          state.code != code ||
+          seq != _completedRefreshSeq ||
+          applyingGeneration != _membersGeneration) {
+        return;
+      }
+      _completedRefreshSeq = seq;
       if (_isAccessError(error)) {
         await _forgetInaccessibleRoom(error as ApiException);
       } else {
@@ -562,6 +617,7 @@ class RoomSession extends ChangeNotifier {
   }
 
   Future<void> _setMembers(List<Member> members) async {
+    final membersGeneration = ++_membersGeneration;
     // 늦은 HTTP/hello 응답이 이미 받은 새 프로필 버전을 덮지 않는다.
     final previous = {
       for (final member in state.members) member.handle: member.avatar,
@@ -582,10 +638,12 @@ class RoomSession extends ChangeNotifier {
     for (final member in members) {
       if (member.handle == store.handle && member.avatar != store.avatar) {
         await store.updateAvatar(member.avatar);
+        if (membersGeneration != _membersGeneration) return;
       }
     }
     _speaking.removeWhere((handle) => !members.any((m) => m.handle == handle));
     await mediaEngine.setMembers(members.map((m) => m.handle).toList());
+    if (membersGeneration != _membersGeneration) return;
     if (_mediaJoined &&
         !MeshCoordinator.canJoin(
           store.handle ?? '',
@@ -594,8 +652,10 @@ class RoomSession extends ChangeNotifier {
       _mediaJoined = false;
       _setLocalSpeaking(false);
       await mediaEngine.leave();
+      if (membersGeneration != _membersGeneration) return;
       mediaError = meshCapacityReason;
     }
+    ++_membersGeneration;
   }
 
   void _setLeader(String? handle) => _leaderHandle = handle;
@@ -634,6 +694,7 @@ class RoomSession extends ChangeNotifier {
   void _setLocationSnapshot(Hello event) {
     _setLeader(event.leader ?? state.room?.leader);
     if (event.revision < _serverRevision) return;
+    _serverRevision = event.revision;
     final positions = <String, LocationFix>{};
     for (final fix in event.positions) {
       final previous = positions[fix.handle];
@@ -649,31 +710,28 @@ class RoomSession extends ChangeNotifier {
     for (final fix in positions.values) {
       _putPosition(fix);
     }
-    // 진행 중 POST가 아직 ID/revision을 돌려주지 않았다면 사용자 의도를 보존한다.
-    if (!_followPostInFlight && _followStops.isEmpty) {
-      final previousIntent = followIntent;
-      _followTarget = locationShare.sharing ? event.followTarget : null;
-      _pendingFollow = locationShare.sharing ? event.pendingFollow : null;
-      _followRequestId = locationShare.sharing ? event.followRequestId : null;
-      _followRequestSent = followIntent != null;
-      if (previousIntent != followIntent) {
-        ++_followRevision;
-        _followMotionRevision = null;
-      }
-      _setTrails(locationShare.sharing ? event.trails : const {});
-      _serverRevision = event.revision;
-      for (final entry in _locationStarts.entries.toList()) {
-        final start = entry.value;
-        if (start.incoming || start.requestId == null) continue;
-        if (start.requestId != _followRequestId)
-          cancelLocationStart(entry.key);
-        else if (_followTarget != null)
-          finishLocationStart(entry.key);
+    // HTTP 완료 기록은 내 follow 필드만 보호하며 SSE 순번을 올리지 않는다.
+    if (_helloFollowIsCurrent(event)) {
+      if (_followPostInFlight || _followStops.isNotEmpty) {
+        _deferredHelloFollow = (
+          connectionId: _connectionId,
+          event: event,
+          trails: {
+            for (final entry in event.trails.entries)
+              entry.key: List.of(entry.value),
+          },
+        );
+      } else {
+        _setHelloFollow(event);
       }
     }
-    final incomingIds = event.followRequests
-        .map((request) => request.requestId)
-        .toSet();
+    final incoming = event.followRequests
+        .where(
+          (request) =>
+              !_answeredRequestIds.contains((_connectionId, request.requestId)),
+        )
+        .toList();
+    final incomingIds = incoming.map((request) => request.requestId).toSet();
     for (final request in event.followRequests) {
       _rememberDisplayName(request.requester, request.displayName);
     }
@@ -684,10 +742,94 @@ class RoomSession extends ChangeNotifier {
     _followRequests
       ..clear()
       ..addEntries(
-        event.followRequests.map(
-          (request) => MapEntry(request.requestId, request),
-        ),
+        incoming.map((request) => MapEntry(request.requestId, request)),
       );
+  }
+
+  bool _helloFollowIsCurrent(Hello event) {
+    final completed = _myFollowRevision;
+    return completed == null ||
+        completed.connectionId != _connectionId ||
+        event.revision >= completed.revision;
+  }
+
+  void _recordMyFollowRevision(int connectionId, int revision) {
+    if (connectionId != _connectionId) return;
+    final previous = _myFollowRevision;
+    if (previous == null ||
+        previous.connectionId != connectionId ||
+        revision > previous.revision) {
+      _myFollowRevision = (connectionId: connectionId, revision: revision);
+    }
+  }
+
+  void _setHelloFollow(Hello event, {Map<String, List<LocationFix>>? trails}) {
+    final previousIntent = followIntent;
+    _followTarget = locationShare.sharing ? event.followTarget : null;
+    _pendingFollow = locationShare.sharing ? event.pendingFollow : null;
+    _followRequestId = locationShare.sharing ? event.followRequestId : null;
+    _followRequestSent = followIntent != null;
+    if (previousIntent != followIntent) {
+      ++_followRevision;
+      _followMotionRevision = null;
+    }
+    _setTrails(locationShare.sharing ? trails ?? event.trails : const {});
+    for (final entry in _locationStarts.entries.toList()) {
+      final start = entry.value;
+      if (start.incoming || start.requestId == null) continue;
+      if (start.requestId != _followRequestId)
+        cancelLocationStart(entry.key);
+      else if (_followTarget != null)
+        finishLocationStart(entry.key);
+    }
+  }
+
+  void _applyDeferredHelloFollow() {
+    if (_followPostInFlight || _followStops.isNotEmpty) return;
+    final deferred = _deferredHelloFollow;
+    _deferredHelloFollow = null;
+    if (_disposed ||
+        state.isLeaving ||
+        deferred == null ||
+        deferred.connectionId != _connectionId ||
+        !_helloFollowIsCurrent(deferred.event))
+      return;
+    // 수신 당시 SSE 순번 검사를 통과한 follow 필드만 재생한다. 그 뒤의 위치나
+    // 수신 요청은 이를 무효화하지 않는다. 대상 종료는 보류 필드를 비우고,
+    // 사용자의 새 대상 선택은 보류 스냅샷을 폐기한다.
+    _setHelloFollow(deferred.event, trails: deferred.trails);
+  }
+
+  void _stopDeferredFollow(String handle) {
+    final deferred = _deferredHelloFollow;
+    if (deferred == null || _deferredFollowIntent != handle) return;
+    final event = deferred.event;
+    // 보류 스냅샷의 대상 종료만 반영한다. 다른 대상으로 진행 중인 POST의
+    // 사용자 의도까지 종료하지 않으며 HTTP 비교에는 원래 hello 순번을 쓴다.
+    _deferredHelloFollow = (
+      connectionId: deferred.connectionId,
+      event: Hello(
+        event.self,
+        event.members,
+        event.leader,
+        event.positions,
+        const {},
+        null,
+        event.followRequests,
+        event.revision,
+      ),
+      trails: {},
+    );
+  }
+
+  void _applyEarlyFollowResponses() {
+    if (_followPostInFlight || _followStops.isNotEmpty) return;
+    final early = List.of(_earlyFollowResponses);
+    _earlyFollowResponses.clear();
+    for (final response in early) {
+      if (response.connectionId == _connectionId)
+        _applyFollowResponse(response.event);
+    }
   }
 
   void _endFollow(FollowResponse event) {
@@ -696,7 +838,11 @@ class RoomSession extends ChangeNotifier {
     _followRequestId = null;
     _followRequestSent = false;
     _followPostInFlight = false;
-    _earlyFollowResponses.clear();
+    _earlyFollowResponses.removeWhere(
+      (response) =>
+          response.connectionId != _connectionId ||
+          response.event.target != _deferredFollowIntent,
+    );
     _setTrails(const {});
     ++_followRevision;
     _followNotices.add(event);
@@ -705,6 +851,7 @@ class RoomSession extends ChangeNotifier {
   void _applyFollowResponse(FollowResponse event) {
     if (event.requestId != _followRequestId || event.target != followIntent)
       return;
+    _deferredHelloFollow = null;
     if (event.revision > _serverRevision) _serverRevision = event.revision;
     _cancelStarts(requestId: event.requestId, accepted: event.accepted);
     if (event.accepted) {
@@ -778,6 +925,11 @@ class RoomSession extends ChangeNotifier {
       return false;
     _putPosition(fix);
     _appendTrail(fix);
+    final deferredTrail = _deferredHelloFollow?.trails[fix.handle];
+    if (deferredTrail != null) {
+      deferredTrail.add(fix);
+      if (deferredTrail.length > 7200) deferredTrail.removeAt(0);
+    }
     return true;
   }
 
@@ -822,18 +974,28 @@ class RoomSession extends ChangeNotifier {
 
   Future<void> _queueStopFollowing(String code) {
     final token = Object();
+    final connectionId = _connectionId;
     _followStops.add(token);
-    return _queueFollowOperation(() => _stopServerFollowing(code)).whenComplete(
-      () {
-        _followStops.remove(token);
-      },
-    );
+    return _queueFollowOperation(() async {
+      if (connectionId == _connectionId) await _stopServerFollowing(code);
+    }).whenComplete(() {
+      _followStops.remove(token);
+      _applyDeferredHelloFollow();
+      _applyEarlyFollowResponses();
+      _notify();
+    });
   }
 
   Future<void> _stopServerFollowing(String code) async {
-    final revision = await _followApi(() => api.stopFollowing(code));
-    if (state.code == code && revision > _serverRevision)
-      _serverRevision = revision;
+    final connectionId = _connectionId;
+    try {
+      final revision = await _followApi(() => api.stopFollowing(code));
+      if (state.code == code && connectionId == _connectionId)
+        _recordMyFollowRevision(connectionId, revision);
+    } catch (_) {
+      if (connectionId != _connectionId) return;
+      rethrow;
+    }
   }
 
   Future<void> startFollowing(String target) async {
@@ -847,6 +1009,7 @@ class RoomSession extends ChangeNotifier {
         finishLocationStart(entry.key);
     }
     final code = state.code!;
+    final connectionId = _connectionId;
     final revision = ++_followRevision;
     _followMotionRevision =
         _carMode && locationShare.motionState == LocationMotionState.unknown
@@ -856,20 +1019,23 @@ class RoomSession extends ChangeNotifier {
     _pendingFollow = target;
     _followRequestId = null;
     _followPostInFlight = true;
+    _deferredHelloFollow = null;
     _earlyFollowResponses.clear();
     _setTrails(const {});
     _notify();
     try {
       await _queueFollowOperation(() async {
         if (_disposed ||
+            connectionId != _connectionId ||
             revision != _followRevision ||
             state.code != code ||
             !locationShare.sharing)
           return;
         _followRequestSent = true;
         final result = await _followApi(() => api.follow(code, target));
-        if (state.code == code && result.revision > _serverRevision)
-          _serverRevision = result.revision;
+        if (connectionId != _connectionId) return;
+        if (state.code == code)
+          _recordMyFollowRevision(connectionId, result.revision);
         if (_disposed ||
             state.code != code ||
             state.isLeaving ||
@@ -892,11 +1058,10 @@ class RoomSession extends ChangeNotifier {
         _followPostInFlight = false;
         _followTarget = result.accepted ? target : null;
         _pendingFollow = result.accepted ? null : target;
-        final early = List<FollowResponse>.of(_earlyFollowResponses);
-        _earlyFollowResponses.clear();
-        for (final event in early) _applyFollowResponse(event);
+        _applyEarlyFollowResponses();
       });
     } catch (_) {
+      if (connectionId != _connectionId) return;
       if (revision == _followRevision && state.code == code) {
         _followTarget = null;
         _pendingFollow = null;
@@ -906,6 +1071,8 @@ class RoomSession extends ChangeNotifier {
       rethrow;
     } finally {
       if (revision == _followRevision) _followPostInFlight = false;
+      _applyDeferredHelloFollow();
+      _applyEarlyFollowResponses();
       _notify();
     }
   }
@@ -913,6 +1080,7 @@ class RoomSession extends ChangeNotifier {
   Future<void> stopFollowing() async {
     final code = state.code;
     if (code == null || followIntent == null) return;
+    _deferredHelloFollow = null;
     final requestSent = _followRequestSent;
     final requestId = _followRequestId;
     _followTarget = null;
@@ -934,35 +1102,55 @@ class RoomSession extends ChangeNotifier {
     required bool accepted,
   }) async {
     final code = state.code;
+    final connectionId = _connectionId;
     if (code == null ||
         state.isLeaving ||
         !_followRequests.containsKey(requestId))
       return;
     if (accepted && !locationShare.sharing) return;
+    var answered = false;
     try {
-      final revision = await _queueFollowResponse(code, requestId, accepted);
-      if (state.code == code && revision > _serverRevision)
-        _serverRevision = revision;
+      final revision = await _queueFollowResponse(
+        code,
+        requestId,
+        accepted,
+        connectionId,
+      );
+      if (state.code != code ||
+          connectionId != _connectionId ||
+          revision == null)
+        return;
+      answered = true;
+      _recordMyFollowRevision(connectionId, revision);
       if (accepted) _cancelStarts(requestId: requestId, accepted: true);
-    } on ApiException catch (error) {
-      if (error.code != 'FOLLOW_EXPIRED') rethrow;
+    } catch (error) {
+      if (connectionId != _connectionId || state.code != code) return;
+      if (error is! ApiException || error.code != 'FOLLOW_EXPIRED') rethrow;
+      answered = true;
       _cancelStarts(requestId: requestId);
     } finally {
       _respondingRequests.remove(requestId);
-      if (state.code == code) _followRequests.remove(requestId);
+      if (state.code == code && connectionId == _connectionId) {
+        if (answered) _answeredRequestIds.add((connectionId, requestId));
+        _followRequests.remove(requestId);
+      }
+      _applyDeferredHelloFollow();
+      _applyEarlyFollowResponses();
       _notify();
     }
   }
 
-  Future<int> _queueFollowResponse(
+  Future<int?> _queueFollowResponse(
     String code,
     String requestId,
     bool accepted,
+    int connectionId,
   ) async {
-    var revision = _serverRevision;
+    int? revision;
     await _queueFollowOperation(() async {
       // 권한·이전 요청 대기 중 취소된 ID는 서버에 보내지 않는다.
       if (state.code != code ||
+          connectionId != _connectionId ||
           state.isLeaving ||
           !_followRequests.containsKey(requestId))
         return;
@@ -1003,6 +1191,7 @@ class RoomSession extends ChangeNotifier {
       _updateLocation(fix);
     }
     if (wasSharing && !locationShare.sharing || rejectFollow) {
+      _deferredHelloFollow = null;
       if (!locationShare.sharing) {
         _removePosition(store.handle);
         _cancelStarts();
@@ -1040,6 +1229,9 @@ class RoomSession extends ChangeNotifier {
   void _clearLocations() {
     _followStops.clear();
     _serverRevision = 0;
+    _myFollowRevision = null;
+    _answeredRequestIds.clear();
+    _deferredHelloFollow = null;
     _pendingFollow = null;
     _followRequestId = null;
     _followPostInFlight = false;

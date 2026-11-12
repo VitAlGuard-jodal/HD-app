@@ -214,6 +214,7 @@ class _RoomScreenState extends State<RoomScreen> {
                   'left' => '$name 님이 연결을 종료하여 따라가기가 끝났습니다',
                   'stopped' => '$name 님이 위치 공유를 중지했습니다',
                   'stale' => '$name 님의 위치 수신이 끊겨 따라가기가 끝났습니다',
+                  'requester-stale' => '내 위치 수신이 끊겨 따라가기가 끝났습니다',
                   _ => '$name 님이 위치 공유에 동의하지 않았습니다',
                 },
               );

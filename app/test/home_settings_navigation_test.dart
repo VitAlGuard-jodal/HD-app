@@ -368,62 +368,158 @@ void main() {
       }
     }, timeout: _timeout);
 
-    testWidgets('${car ? '차량' : '폰'} 서버 설정은 기존 인증 화면의 주소 편집만 사용한다', (
-      tester,
-    ) async {
-      final services = await _mountApp(tester, car: car);
-      try {
-        final call = services.calls.state;
-        await _tapKey(tester, 'open-settings');
-        final server = find.descendant(
-          of: find.byKey(const ValueKey('settings-server')),
-          matching: find.byType(PanelButton),
-        );
-        await tester.ensureVisible(server);
-        await tester.tap(server);
-        await _pumpNavigation(tester);
-        expect(
-          tester.widget<AuthScreen>(find.byType(AuthScreen)).serverSettingsOnly,
-          isTrue,
-        );
-        // 차량은 보조 패널의 친구 아이디 입력칸이 함께 보이므로 인증 화면 안으로 좁힌다.
-        final serverField = find.descendant(
-          of: find.byType(AuthScreen),
-          matching: find.byType(TextField),
-        );
-        expect(serverField, findsOneWidget);
-        expect(
-          tester.widget<TextField>(serverField).controller!.text,
-          services.store.baseUrl,
-        );
-        if (car) {
-          expect(
-            find.descendant(
-              of: find.byKey(const ValueKey('car-primary')),
-              matching: find.byType(AuthScreen),
-            ),
-            findsOneWidget,
+    testWidgets(
+      '${car ? '차량' : '폰'} 서버 설정은 같은 출처의 방·통화를 유지하고 다른 출처는 옛 서버 로그아웃 뒤 로그인 화면으로 간다',
+      (tester) async {
+        final services = await _mountApp(tester, car: car);
+        try {
+          final call = services.calls.state;
+          services.api.httpLogout = true;
+          services.api.http.requests.clear();
+          services.api.http.jsonResponse = (_) => <String, Object?>{};
+          await _tapKey(tester, 'open-settings');
+          final server = find.descendant(
+            of: find.byKey(const ValueKey('settings-server')),
+            matching: find.byType(PanelButton),
           );
-          expect(_secondary, findsOneWidget);
+          await tester.ensureVisible(server);
+          await tester.tap(server);
+          await _pumpNavigation(tester);
+          expect(
+            tester
+                .widget<AuthScreen>(find.byType(AuthScreen))
+                .serverSettingsOnly,
+            isTrue,
+          );
+          // 차량은 보조 패널의 친구 아이디 입력칸이 함께 보이므로 인증 화면 안으로 좁힌다.
+          final serverField = find.descendant(
+            of: find.byType(AuthScreen),
+            matching: find.byType(TextField),
+          );
+          expect(serverField, findsOneWidget);
+          expect(
+            tester.widget<TextField>(serverField).controller!.text,
+            services.store.baseUrl,
+          );
+          if (car) {
+            expect(
+              find.descendant(
+                of: find.byKey(const ValueKey('car-primary')),
+                matching: find.byType(AuthScreen),
+              ),
+              findsOneWidget,
+            );
+            expect(_secondary, findsOneWidget);
+          }
+          await tester.enterText(serverField, 'ftp://example.invalid');
+          await _tapKey(tester, 'server-settings-save');
+          expect(find.byType(AuthScreen), findsOneWidget);
+          expect(services.store.baseUrl, 'https://example.invalid');
+          await tester.enterText(serverField, 'https://example.invalid:443/');
+          await _tapKey(tester, 'server-settings-save');
+          expect(find.byType(SettingsScreen), findsOneWidget);
+          expect(services.store.baseUrl, 'https://example.invalid:443');
+          expect(find.text(services.store.baseUrl), findsOneWidget);
+          expect(services.api.logouts, 0);
+          expect(services.api.logins, 0);
+          expect(services.api.signups, 0);
+          expect(services.rooms.state.code, 'ABC123');
+          expect(services.calls.state, same(call));
+          await tester.ensureVisible(server);
+          await tester.tap(server);
+          await _pumpNavigation(tester);
+          await tester.enterText(serverField, 'https://new.example.invalid/');
+          await _tapKey(tester, 'server-settings-save');
+          expect(services.api.logouts, 1);
+          final logout = services.api.http.requests
+              .where((request) => request.uri.path.endsWith('/v1/auth/logout'))
+              .map(
+                (request) => (
+                  method: request.method,
+                  uri: request.uri,
+                  sentHeaders: request.sentHeaders,
+                ),
+              )
+              .single;
+          expect(logout.method, 'POST');
+          expect(logout.uri.origin, 'https://example.invalid');
+          expect(logout.sentHeaders['authorization'], 'Bearer test');
+          expect(services.store.baseUrl, 'https://new.example.invalid');
+          expect(services.store.session, isNull);
+          expect(services.rooms.state.code, isNull);
+          expect(services.calls.state.isActive, isFalse);
+          expect(find.byType(SettingsScreen), findsNothing);
+          expect(
+            tester
+                .widget<AuthScreen>(find.byType(AuthScreen))
+                .serverSettingsOnly,
+            isFalse,
+          );
+          await completeConsentFuture(
+            tester,
+            services.api.avatarPhoto('alice', 1),
+          );
+          final nextRequests = services.api.http.requests
+              .where((request) => request.uri.host == 'new.example.invalid')
+              .toList();
+          expect(nextRequests, isNotEmpty);
+          expect(
+            nextRequests.every(
+              (request) => !request.sentHeaders.containsKey('authorization'),
+            ),
+            isTrue,
+          );
+          expect(tester.takeException(), isNull);
+        } finally {
+          await _finish(tester, services);
         }
-        await tester.enterText(serverField, 'ftp://example.invalid');
-        await _tapKey(tester, 'server-settings-save');
-        expect(find.byType(AuthScreen), findsOneWidget);
-        expect(services.store.baseUrl, 'https://example.invalid');
-        await tester.enterText(serverField, 'https://new.example.invalid/');
-        await _tapKey(tester, 'server-settings-save');
-        expect(find.byType(SettingsScreen), findsOneWidget);
-        expect(services.store.baseUrl, 'https://new.example.invalid');
-        expect(find.text(services.store.baseUrl), findsOneWidget);
-        expect(services.api.logins, 0);
-        expect(services.api.signups, 0);
-        expect(services.rooms.state.code, 'ABC123');
-        expect(services.calls.state, same(call));
-        expect(tester.takeException(), isNull);
-      } finally {
-        await _finish(tester, services);
-      }
-    }, timeout: _timeout);
+      },
+      timeout: _timeout,
+    );
+
+    testWidgets(
+      '${car ? '차량' : '폰'} 다른 출처 저장 중 로그아웃 실패는 주소·세션·방을 유지하고 오류를 표시한다',
+      (tester) async {
+        final services = await _mountApp(tester, car: car);
+        try {
+          final session = services.store.session;
+          final call = services.calls.state;
+          services.api.logoutFails = true;
+          await _tapKey(tester, 'open-settings');
+          final server = find.descendant(
+            of: find.byKey(const ValueKey('settings-server')),
+            matching: find.byType(PanelButton),
+          );
+          await tester.ensureVisible(server);
+          await tester.tap(server);
+          await _pumpNavigation(tester);
+          await tester.enterText(
+            find.descendant(
+              of: find.byType(AuthScreen),
+              matching: find.byType(TextField),
+            ),
+            'https://new.example.invalid',
+          );
+          await _tapKey(tester, 'server-settings-save');
+          expect(services.api.logouts, 1);
+          expect(services.store.baseUrl, 'https://example.invalid');
+          expect(services.store.session, same(session));
+          expect(services.rooms.state.code, 'ABC123');
+          expect(services.calls.state, same(call));
+          expect(
+            tester
+                .widget<AuthScreen>(find.byType(AuthScreen))
+                .serverSettingsOnly,
+            isTrue,
+          );
+          expect(find.text('연결 실패'), findsOneWidget);
+          expect(tester.takeException(), isNull);
+        } finally {
+          await _finish(tester, services);
+        }
+      },
+      timeout: _timeout,
+    );
 
     testWidgets('${car ? '차량' : '폰'} 설정 로그아웃은 기존 오류·세션 정리 경로를 쓴다', (
       tester,

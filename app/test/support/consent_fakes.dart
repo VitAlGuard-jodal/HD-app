@@ -230,6 +230,7 @@ class ConsentTestApi extends ApiClient {
   int logins = 0, signups = 0, meReads = 0, logouts = 0;
   int stops = 0, sends = 0;
   bool logoutFails = false, stopFails = false;
+  bool httpLogout = false;
   final follows = <String>[];
   final followResponses = <(String, bool)>[];
   int unfollows = 0;
@@ -291,6 +292,7 @@ class ConsentTestApi extends ApiClient {
   Future<void> logout() async {
     logouts++;
     if (logoutFails) throw const ApiException(503, 'unavailable', '연결 실패');
+    if (httpLogout) await super.logout();
   }
 
   @override

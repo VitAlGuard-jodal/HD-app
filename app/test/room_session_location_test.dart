@@ -36,6 +36,453 @@ LocationFix _fix(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test(
+    '서버 재시작: revision 5000 세션이 재접속해 revision 3 hello 를 받으면 스냅샷·followRequests 를 적용한다',
+    () {
+      fakeAsync((clock) {
+        final f = _Fixture.create(clock);
+        f.open();
+        f.event(LocationUpdated(_fix('alice', 100), revision: 5000));
+        f.event(const Reconnected());
+        expect(f.session.followServerRevision, 0);
+        f.api.members = const [Member('bob', '보비', '2')];
+        final fix = _fix('alice', 0, stream: '1111111111111111');
+        f.event(
+          Hello(
+            'bob',
+            f.api.members,
+            'bob',
+            [fix],
+            const {},
+            null,
+            const [
+              FollowRequest('alice', requestId: 'after-restart', revision: 3),
+            ],
+            3,
+          ),
+        );
+        expect(f.session.followServerRevision, 3);
+        expect(f.session.positions, {'alice': fix});
+        expect(f.session.leaderHandle, 'bob');
+        expect(f.session.state.members.map((m) => m.handle), ['bob']);
+        expect(f.session.followRequests.keys, ['after-restart']);
+        f.dispose();
+      });
+    },
+    timeout: _timeout,
+  );
+
+  test('이전 연결의 보류 수락 응답은 재접속 뒤 완료된 POST 에 적용되지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      f.startSharing();
+      final gate = Completer<void>();
+      f.api.followGate = gate.future;
+      f.api.followResult = const FollowResult('old-request', 5000, false);
+      final pending = f.session.startFollowing('alice');
+      clock.flushMicrotasks();
+      f.event(
+        const FollowResponse(
+          'alice',
+          true,
+          requestId: 'old-request',
+          revision: 5001,
+        ),
+      );
+      f.event(const Reconnected());
+      final fix = _fix('alice', 0);
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          [fix],
+          {
+            'alice': [fix],
+          },
+          null,
+          const [],
+          3,
+          'alice',
+          'new-request',
+        ),
+      );
+      expect(
+        f.session.followRequestId,
+        isNull,
+        reason: 'POST 중에는 hello의 follow 필드만 보류한다',
+      );
+      expect(f.session.positions['alice'], fix);
+      final next = _fix('alice', 1);
+      f.event(LocationUpdated(next, revision: 4));
+      f.event(
+        const FollowRequest('alice', requestId: 'new-incoming', revision: 5),
+      );
+      gate.complete();
+      _finish(clock, pending);
+      expect(f.session.followTarget, isNull);
+      expect(f.session.pendingFollow, 'alice');
+      expect(f.session.followRequestId, 'new-request');
+      expect(f.session.trailOf('alice'), [fix, next]);
+      expect(f.session.positions['alice'], next);
+      expect(f.session.followRequests.keys, ['new-incoming']);
+      expect(f.session.followServerRevision, 5);
+      f.event(
+        const FollowResponse(
+          'alice',
+          true,
+          requestId: 'new-request',
+          revision: 6,
+        ),
+      );
+      expect(f.session.followTarget, 'alice');
+      f.dispose();
+    });
+  }, timeout: _timeout);
+
+  test('이전 연결 DELETE 완료는 새 hello follow와 낮은 revision을 덮지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      f.startSharing();
+      _finish(clock, f.session.startFollowing('alice'));
+      final gate = Completer<void>();
+      f.api.stopGate = gate.future;
+      f.api.revision = 5000;
+      final stopping = f.session.stopFollowing();
+      clock.flushMicrotasks();
+      f.event(const Reconnected());
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          const [],
+          const {},
+          'alice',
+          const [],
+          3,
+          null,
+          'new-request',
+        ),
+      );
+      expect(f.session.followTarget, isNull);
+      gate.complete();
+      _finish(clock, stopping);
+      expect(f.session.followTarget, 'alice');
+      expect(f.session.followRequestId, 'new-request');
+      expect(f.session.followServerRevision, 3);
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          const [],
+          const {},
+          null,
+          const [],
+          4,
+        ),
+      );
+      expect(
+        f.session.followIntent,
+        isNull,
+        reason: '이전 연결의 HTTP revision이 새 hello를 막으면 안 된다',
+      );
+      f.dispose();
+    });
+  }, timeout: _timeout);
+
+  test('이전 연결 respond 완료는 새 연결의 수신 요청을 제거하거나 응답 완료로 기록하지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      const request = FollowRequest('alice', requestId: 'same-id', revision: 1);
+      f.event(request);
+      final gate = Completer<void>();
+      f.api.responseGate = gate.future;
+      f.api.revision = 5000;
+      final responding = f.session.respondToFollow('same-id', accepted: false);
+      clock.flushMicrotasks();
+      f.event(const Reconnected());
+      final hello = Hello(
+        'bob',
+        f.api.members,
+        'alice',
+        const [],
+        const {},
+        null,
+        const [request],
+        3,
+      );
+      f.event(hello);
+      gate.complete();
+      _finish(clock, responding);
+      expect(f.session.followRequests.keys, ['same-id']);
+      f.event(hello);
+      expect(f.session.followRequests.keys, ['same-id']);
+      expect(f.session.followServerRevision, 3);
+      f.dispose();
+    });
+  }, timeout: _timeout);
+
+  test('보류 hello의 이전 대상이 중지되어도 새 대상 POST 의도는 유지한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.api.members = [...f.api.members, const Member('charlie', '찰리', '3')];
+      f.open();
+      f.startSharing();
+      _finish(clock, f.session.startFollowing('alice'));
+      final gate = Completer<void>();
+      f.api.followGate = gate.future;
+      f.api.followResult = const FollowResult('charlie-new', 5, true);
+      final pending = f.session.startFollowing('charlie');
+      clock.flushMicrotasks();
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          const [],
+          const {},
+          'alice',
+          const [],
+          2,
+          null,
+          'alice-request',
+        ),
+      );
+      f.event(const LocationStopped('alice', revision: 3));
+      expect(f.session.pendingFollow, 'charlie');
+      gate.complete();
+      _finish(clock, pending);
+      expect(f.session.followTarget, 'charlie');
+      expect(f.session.followRequestId, 'charlie-new');
+      expect(f.session.followServerRevision, 3);
+      f.dispose();
+    });
+  }, timeout: _timeout);
+
+  for (final stopped in ['alice', 'charlie']) {
+    test('재접속 보류 hello는 $stopped 종료를 반영한 뒤 이전 POST 완료에서 복원한다', () {
+      fakeAsync((clock) {
+        final f = _Fixture.create(clock);
+        f.api.members = [...f.api.members, const Member('charlie', '찰리', '3')];
+        f.open();
+        f.startSharing();
+        final gate = Completer<void>();
+        f.api.followGate = gate.future;
+        f.api.followResult = const FollowResult('old-request', 5000, true);
+        final pending = f.session.startFollowing('alice');
+        clock.flushMicrotasks();
+        f.event(const Reconnected());
+        f.event(
+          Hello(
+            'bob',
+            f.api.members,
+            'alice',
+            const [],
+            const {},
+            null,
+            const [],
+            3,
+            'charlie',
+            'charlie-new',
+          ),
+        );
+        f.event(
+          const FollowResponse(
+            'charlie',
+            true,
+            requestId: 'charlie-new',
+            revision: 4,
+          ),
+        );
+        f.event(LocationStopped(stopped, revision: 5));
+        gate.complete();
+        _finish(clock, pending);
+        expect(f.session.followTarget, stopped == 'alice' ? 'charlie' : null);
+        expect(f.session.pendingFollow, isNull);
+        expect(
+          f.session.followRequestId,
+          stopped == 'alice' ? 'charlie-new' : null,
+        );
+        expect(f.session.followServerRevision, 5);
+        f.dispose();
+      });
+    }, timeout: _timeout);
+  }
+
+  test('requester-stale 종료 응답은 현재 requestId일 때만 따라가기를 끝낸다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      f.startSharing();
+      _finish(clock, f.session.startFollowing('alice'));
+      f.event(
+        const FollowResponse(
+          'alice',
+          false,
+          requestId: 'old-request',
+          reason: 'requester-stale',
+          revision: 2,
+        ),
+      );
+      expect(f.session.followTarget, 'alice');
+      expect(f.session.hasFollowNotice, isFalse);
+      f.event(
+        const FollowResponse(
+          'alice',
+          false,
+          requestId: 'alice-request',
+          reason: 'requester-stale',
+          revision: 3,
+        ),
+      );
+      expect(f.session.followIntent, isNull);
+      expect(f.session.takeFollowNotice()?.reason, 'requester-stale');
+      f.dispose();
+    });
+  }, timeout: _timeout);
+
+  test(
+    'HTTP 응답 revision 뒤 낮은 revision 의 정상 FollowRequest·LocationStopped 를 적용한다',
+    () {
+      fakeAsync((clock) {
+        final f = _Fixture.create(clock);
+        f.open(positions: [_fix('alice', 0)]);
+        f.startSharing();
+        f.api.followResult = const FollowResult('alice-request', 20, true);
+        _finish(clock, f.session.startFollowing('alice'));
+        expect(f.session.followServerRevision, 0);
+        f.event(
+          const FollowRequest('alice', requestId: 'incoming', revision: 2),
+        );
+        expect(f.session.followRequests.keys, ['incoming']);
+        f.event(const LocationStopped('alice', revision: 3));
+        expect(f.session.positions.containsKey('alice'), isFalse);
+        expect(f.session.followIntent, isNull);
+        expect(f.session.followServerRevision, 3);
+        f.dispose();
+      });
+    },
+    timeout: _timeout,
+  );
+
+  test('DELETE 완료 뒤 지연된 같은 연결 hello 가 follow 를 되살리지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      f.startSharing();
+      _finish(clock, f.session.startFollowing('alice'));
+      _finish(clock, f.session.stopFollowing());
+      final fix = _fix('alice', 3);
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          [fix],
+          {
+            'alice': [fix],
+          },
+          'alice',
+          const [FollowRequest('alice', requestId: 'incoming', revision: 1)],
+          1,
+          null,
+          'alice-request',
+        ),
+      );
+      expect(f.session.followIntent, isNull);
+      expect(f.session.followRequestId, isNull);
+      expect(f.session.trailOf('alice'), isEmpty);
+      expect(f.session.positions['alice'], fix);
+      expect(f.session.followRequests.keys, ['incoming']);
+      expect(f.session.followServerRevision, 1);
+      f.dispose();
+    });
+  }, timeout: _timeout);
+
+  test('응답 완료한 수신 요청 id 는 늦은 hello 에 있어도 다시 뜨지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      const request = FollowRequest(
+        'alice',
+        requestId: 'answered',
+        revision: 1,
+      );
+      f.event(request);
+      f.api.revision = 10;
+      _finish(clock, f.session.respondToFollow('answered', accepted: false));
+      final fix = _fix('alice', 1);
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          [fix],
+          const {},
+          null,
+          const [
+            request,
+            FollowRequest('alice', requestId: 'other', revision: 2),
+          ],
+          2,
+        ),
+      );
+      expect(f.session.followRequests.keys, ['other']);
+      expect(f.session.positions['alice'], fix);
+      expect(f.session.followServerRevision, 2);
+      f.event(const Reconnected());
+      f.event(
+        Hello('bob', f.api.members, 'alice', const [], const {}, null, const [
+          request,
+        ], 1),
+      );
+      expect(f.session.followRequests.keys, [
+        'answered',
+      ], reason: '응답 완료 기록은 연결을 넘지 않는다');
+      f.dispose();
+    });
+  }, timeout: _timeout);
+
+  for (final fails in [false, true]) {
+    test(
+      '지연된 멤버 조회 A 는 퇴장 이벤트·조회 B 뒤에 완료돼도 퇴장자를 명단·미디어에 되살리지 않는다 (실패 $fails)',
+      () {
+        fakeAsync((clock) {
+          final f = _Fixture.create(clock);
+          f.open();
+          final old = RoomDetails(const Room('ABC123', '옛 방'), f.api.members);
+          final gate = Completer<RoomDetails>();
+          f.api.roomRead = () => gate.future;
+          f.event(
+            const FollowRequest('charlie', requestId: 'refresh-a', revision: 1),
+          );
+          f.api.roomRead = null;
+          f.api.members = const [Member('bob', '보비', '2')];
+          f.event(const MemberLeft('alice', revision: 2));
+          final mediaCalls = f.media.memberUpdates.length;
+          if (fails) {
+            gate.completeError(const ApiException(403, 'forbidden', '옛 조회 오류'));
+          } else {
+            gate.complete(old);
+          }
+          clock.flushMicrotasks();
+          expect(f.session.state.code, 'ABC123');
+          expect(f.session.state.error, isNull);
+          expect(f.session.state.members.map((m) => m.handle), ['bob']);
+          expect(f.media.memberUpdates, hasLength(mediaCalls));
+          expect(f.media.memberUpdates.last, ['bob']);
+          f.dispose();
+        });
+      },
+      timeout: _timeout,
+    );
+  }
+
   test('위치·궤적이 바뀌지 않으면 positions·trailOf 는 같은 스냅샷 객체를 돌려준다', () {
     fakeAsync((clock) {
       for (final removal in ['location-stopped', 'member-left']) {
@@ -1059,6 +1506,7 @@ class _Api extends ApiClient {
   ];
   final follows = <String>[];
   Future<void>? followGate;
+  Future<void>? stopGate, responseGate;
   int unfollows = 0;
   @override
   Future<FollowResult> follow(String code, String target) async {
@@ -1072,12 +1520,29 @@ class _Api extends ApiClient {
   bool accepted = true;
   FollowResult? followResult;
   Future<void>? roomGate;
+  Future<RoomDetails> Function()? roomRead;
   bool roomFails = false;
+
+  @override
+  Future<Room> joinRoom(String code) async => Room(code, null);
+
+  @override
+  Future<int> respondFollow(
+    String code,
+    String requestId, {
+    required bool accepted,
+  }) async {
+    final result = ++revision;
+    await responseGate;
+    return result;
+  }
 
   @override
   Future<int> stopFollowing(String code) async {
     unfollows++;
-    return ++revision;
+    final result = ++revision;
+    await stopGate;
+    return result;
   }
 
   int leaves = 0;
@@ -1089,6 +1554,7 @@ class _Api extends ApiClient {
 
   @override
   Future<RoomDetails> getRoom(String code) async {
+    if (roomRead != null) return roomRead!();
     await roomGate;
     if (roomFails) throw const ApiException(503, 'unavailable', '조회 실패');
     return RoomDetails(Room(code, null, leader: 'alice'), members);
@@ -1115,6 +1581,12 @@ class _Calls extends CallService {
 
 class _Media extends NoopMediaEngine {
   int leaves = 0;
+  final memberUpdates = <List<String>>[];
+  @override
+  Future<void> setMembers(List<String> members) async {
+    memberUpdates.add(List.of(members));
+  }
+
   @override
   Future<void> leave() async {
     leaves++;

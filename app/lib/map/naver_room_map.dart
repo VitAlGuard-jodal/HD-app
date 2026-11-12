@@ -84,6 +84,49 @@ RoomMarkerKey roomMarkerCacheKey({
   rainbowColor(position.order),
 );
 
+/// 캡처와 분리하여 SDK 없이도 실패 아이콘의 재시도 간격을 검사한다.
+class RoomMarkerIconCache {
+  RoomMarkerIconCache({DateTime Function()? now}) : _now = now ?? DateTime.now;
+  final DateTime Function() _now;
+  final _icons = <RoomMarkerKey, NOverlayImage>{};
+  final _failedIcons = <RoomMarkerKey, ({NOverlayImage icon, DateTime at})>{};
+
+  Future<NOverlayImage?> load(
+    RoomMarkerKey key,
+    Future<({NOverlayImage icon, bool failed})?> Function() capture,
+  ) async {
+    final icon = _icons[key];
+    if (icon != null) return icon;
+    final failure = _failedIcons[key];
+    if (failure != null &&
+        _now().difference(failure.at) < const Duration(seconds: 30)) {
+      return failure.icon;
+    }
+    _failedIcons.remove(key);
+    final result = await capture();
+    if (result == null) return null;
+    if (result.failed) {
+      _failedIcons[key] = (icon: result.icon, at: _now());
+    } else {
+      _icons[key] = result.icon;
+      _failedIcons.remove(key);
+    }
+    return result.icon;
+  }
+
+  bool hasResolved(RoomMarkerKey key) => _icons.containsKey(key);
+
+  void removeWhere(bool Function(RoomMarkerKey) test) {
+    _icons.removeWhere((key, _) => test(key));
+    _failedIcons.removeWhere((key, _) => test(key));
+  }
+
+  void clear() {
+    _icons.clear();
+    _failedIcons.clear();
+  }
+}
+
 class NaverRoomMap extends StatefulWidget {
   const NaverRoomMap({
     super.key,
@@ -120,7 +163,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   late final NCameraPosition _initialCamera;
   final _markers = <String, NMarker>{};
   final _markerKeys = <String, RoomMarkerKey>{};
-  final _icons = <RoomMarkerKey, NOverlayImage>{};
+  final _icons = RoomMarkerIconCache();
   final _assetImages = <String, ui.Image>{};
   NPathOverlay? _path;
   List<LocationFix> _pathPoints = const [];
@@ -263,9 +306,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   Future<NOverlayImage?> _markerIcon(
     RoomMarkerKey key,
     RoomMapPosition position,
-  ) async {
-    final cached = _icons[key];
-    if (cached != null) return cached;
+  ) => _icons.load(key, () async {
     final style = RoomMarkerStyle(self: key.$3, car: key.$6);
     final avatar = key.$3 ? null : await _markerAvatar(position);
     final failed = !key.$3 && avatar == null;
@@ -297,10 +338,8 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       ),
     );
     if (!mounted) return null;
-    // 실패한 사진의 임시 차 아이콘을 영구 캐시하지 않는다.
-    if (!failed) _icons[key] = icon;
-    return icon;
-  }
+    return (icon: icon, failed: failed);
+  });
 
   Future<ui.Image?> _markerAvatar(RoomMapPosition position) async {
     final avatar = position.avatar;
@@ -359,7 +398,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       _markers.remove(handle);
       _markerKeys.remove(handle);
     }
-    _icons.removeWhere((key, _) {
+    _icons.removeWhere((key) {
       final current = widget.positions[key.$1];
       return current == null || _keyFor(key.$1, current) != key;
     });
@@ -411,9 +450,9 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
           marker.setGlobalZIndex(style.globalZIndex);
         }
       }
-      if (_icons.containsKey(key)) {
+      if (_icons.hasResolved(key)) {
         _markerKeys[entry.key] = key;
-        _icons.removeWhere((old, _) => old.$1 == entry.key && old != key);
+        _icons.removeWhere((old) => old.$1 == entry.key && old != key);
       } else {
         _markerKeys.remove(entry.key);
       }

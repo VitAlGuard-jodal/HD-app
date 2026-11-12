@@ -74,6 +74,8 @@ class AppServices {
   }
 
   Future<void> logout() async {
+    // 서버 주소 변경도 이 순서를 따른다. 실패 시 주소·세션을 유지하고,
+    // 성공 시 기존 주소·토큰으로 방과 공유를 정리한 뒤 세션을 비운다.
     await api.logout();
     await rooms.forget();
     await store.clear();

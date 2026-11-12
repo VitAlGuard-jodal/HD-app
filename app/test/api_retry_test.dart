@@ -2,12 +2,96 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:unavo/auth/session_store.dart';
 import 'package:unavo/net/api_client.dart';
 import 'package:unavo/net/models.dart';
 
+import 'support/avatar_fakes.dart';
+
 void main() {
+  test('사진 404는 같은 오류를 30초 캐시하고 만료 후 한 번만 재요청한다', () async {
+    // 페이크 응답 본문은 fakeAsync 가 돌리지 못하므로 실제 await 와 주입한 시각으로 검사한다.
+    final http = AvatarTestHttp()..status = 404;
+    var now = DateTime.utc(2026);
+    final api = ApiClient(
+      tokenStore: AvatarTestTokenStore(),
+      clientFactory: http.createClient,
+      avatarNow: () => now,
+    );
+    addTearDown(api.close);
+    final errors = <Object>[];
+    Future<void> read() async {
+      try {
+        await api.avatarPhoto('alice', 1);
+        fail('404 응답이 성공하면 안 된다');
+      } on ApiException catch (error) {
+        errors.add(error);
+      }
+    }
+
+    await read();
+    expect(http.requests, hasLength(1));
+    expect(
+      errors.single,
+      isA<ApiException>().having((error) => error.status, 'status', 404),
+    );
+    for (var i = 0; i < 5; i++) {
+      await read();
+    }
+    now = now.add(const Duration(seconds: 29));
+    await read();
+    expect(http.requests, hasLength(1));
+    expect(errors.every((error) => identical(error, errors.first)), isTrue);
+    now = now.add(const Duration(seconds: 1));
+    await read();
+    expect(http.requests, hasLength(2));
+    expect(errors.last, isNot(same(errors.first)));
+  });
+
+  test('사진 실패 캐시는 서버·토큰·버전 변경과 64개 상한을 지킨다', () {
+    fakeAsync((clock) {
+      final store = AvatarTestTokenStore();
+      final http = AvatarTestHttp()..status = 404;
+      final api = ApiClient(
+        tokenStore: store,
+        clientFactory: http.createClient,
+        avatarNow: () => DateTime.utc(2026).add(clock.elapsed),
+      );
+      void read(String handle, int version) {
+        unawaited(
+          api
+              .avatarPhoto(handle, version)
+              .then<void>(
+                (_) => fail('404 응답이 성공하면 안 된다'),
+                onError: (Object _) {},
+              ),
+        );
+        clock.flushMicrotasks();
+      }
+
+      read('alice', 1);
+      read('alice', 2);
+      store.token = 'new-token';
+      read('alice', 2);
+      store.baseUrl = 'https://new.example.invalid';
+      read('alice', 2);
+      expect(http.requests, hasLength(4));
+      for (var i = 0; i < 64; i++) read('member$i', 1);
+      final count = http.requests.length;
+      read('member63', 1);
+      expect(http.requests, hasLength(count));
+      read('alice', 2);
+      expect(
+        http.requests,
+        hasLength(count + 1),
+        reason: '65번째 키는 가장 오래된 실패 항목을 밀어낸다',
+      );
+      api.close();
+    });
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   test('me는 사용자·방·동의를 읽고 consent가 없는 옛 서버와 호환된다', () async {
     const user = {'handle': 'alice', 'displayName': 'Alice'};
     for (final body in <JsonMap>[

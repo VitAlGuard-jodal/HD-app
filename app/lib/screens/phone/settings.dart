@@ -64,6 +64,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _saveServer(String normalizedUrl) async {
+    final services = widget.services;
+    final store = services.store;
+    final previous = Uri.parse(store.baseUrl);
+    final next = Uri.parse(normalizedUrl);
+    final sameOrigin =
+        previous.scheme == next.scheme &&
+        previous.host == next.host &&
+        previous.port == next.port;
+    if (!sameOrigin && store.session != null) {
+      // 로그아웃·공유·방 정리는 기존 서버 주소와 세션으로 끝낸다.
+      await services.logout();
+      await store.setBaseUrl(normalizedUrl);
+      return; // main.dart가 로그인 화면으로 바꾸므로 route를 추가로 pop하지 않는다.
+    }
+    await store.setBaseUrl(normalizedUrl);
+    if (mounted) Navigator.of(context).pop();
+  }
+
   @override
   Widget build(BuildContext context) => ControlScale(
     car: widget.car,
@@ -155,6 +174,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                     ? DeviceMode.car
                                     : DeviceMode.phone,
                                 serverSettingsOnly: true,
+                                onSaveServer: _saveServer,
                               ),
                             ),
                     ),
