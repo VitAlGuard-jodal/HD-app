@@ -80,9 +80,13 @@ SSE 이벤트(`event:` 이름 / `data:` JSON): `hello{self}`, `member-joined{han
 
 Dart는 인증·서버 주소·HTTP/SSE·방 세션·미디어 엔진 인터페이스 및 화면 상태를 소유한다. 상태 관리는 ChangeNotifier, 화면 이동은 기본 Navigator다. HTTP/SSE는 dart:io HttpClient, 영속 저장은 shared_preferences, SVG 아이콘은 flutter_svg를 사용한다. 일반 요청·아바타 다운로드는 `ApiClient` 수명의 HttpClient 하나를 재사용하고 타임아웃은 해당 요청만 abort하거나 본문 구독을 취소하며, SSE는 구독 시도마다 별도 클라이언트를 쓰고 `AppServices.dispose/logout`은 `api.close()`로 공유 클라이언트를 정리한다.
 
+`AppServices.dispose()`는 동기 시그니처를 유지하되 `RoomSession.shutdown()`이 위치 POST→DELETE와 진행 중 follow 정리·SSE 구독 취소를 완료한 뒤 `whenComplete`에서 공유 클라이언트를 한 번 닫으며, 로그아웃 후 다음 요청에서 새 클라이언트를 만드는 규칙은 유지한다.
+
 **화면 구성(M8a).** 통화·방은 앱 수준의 `AppServices.rooms`·`calls`가 소유하며 화면 수명과 분리된다. `RoomScreen.onHome`은 폰에서는 방 route와 그 아래 설정 route를 루트까지 pop하고 홈 탭을 로비로 돌리며, 차량에서는 `_carRoomVisible=false`로 바꾼다. 방 나가기·통화 종료는 호출하지 않는다. 로비의 참여 중인 방 카드와 통화 중 상태 칩을 유지하고 카드에서 기존 `_openRoom`으로 복귀한다. 폰은 새 방 route를 push하고 차량은 `_carRoomVisible=true`로 전환한다.
 
 폰 로비 우상단과 차량 보조 패널 우상단의 `settings` 톱니바퀴가 공용 `SettingsScreen`을 연다. 위에서부터 프로필(`ProfileScreen`), 통화 음량(`RoomSession.setCallVolume`·기존 저장/미디어 경로), 마이크(`MicScreen`), 서버 주소, 약관·동의 문서, 지도 출처(`MapCreditsScreen`), 로그아웃을 둔다. 서버 주소는 현재 `store.baseUrl`을 표시하고 `AuthScreen(serverSettingsOnly: true)`의 기존 서버 필드·주소 검증·저장 경로로 연결한다. 이 경로에서는 로그인/가입을 제출하지 않는다. 정규화 주소의 scheme·host·port가 같으면 저장 후 설정으로 돌아가고, 출처가 다르며 로그인 중이면 기존 주소로 `services.logout()`(통화·공유·방 정리 포함)을 완료한 뒤 새 주소를 저장하여 로그인 화면으로 전환하며, 로그아웃 실패 시 주소·세션을 유지하고 오류를 표시한다. 약관은 `legal_consent.dart`의 `LegalDocumentsScreen`에서 같은 번들 Markdown 렌더러로 읽으며 동의 값을 변경하지 않는다. 로그아웃은 로비에 있던 `services.logout()`과 오류 처리를 그대로 이동한다. 로비에는 프로필·로그아웃·지도 출처 버튼을 두지 않는다. 모든 조작 버튼은 아이콘이고 `ControlScale`로 폰/차량 크기를 맞춘다.
+
+로비의 `restoreSession()`은 `/v1/me`의 401 이외 실패를 2·5·15초 뒤 최대 세 번 재시도하며 매 요청 전 현재 세션·서버·화면 수명과 미참여 상태를 확인하고, 앱 `resumed` 때 로그인 상태에서 복귀 카드와 참여 방이 모두 없으면 진행 중 복원과 중복되지 않게 다시 시도한다.
 
 차량 `CarDashboard`는 주 패널 안에 중첩 `Navigator`를 둔다. 루트 page는 `RoomsScreen`이며 방 또는 설정 page를 그 위에 둔다. 설정에서 여는 프로필·마이크·서버·약관·지도 출처 route도 이 내비게이터에 push한다. 방에서 톱니바퀴를 누르면 방 표시를 내리고 설정을 열며, 프로필 → 뒤로 → 설정 → 뒤로 → 로비 순서로 돌아간다. 중첩 내비게이터의 시스템 뒤로 가기는 `NavigatorPopHandler`로 전달한다. 보조 패널의 마이크 레벨·친구/마이크 선택 상태·플로팅 바는 화면 전환 중에도 같은 위젯 상태로 유지한다.
 
@@ -180,6 +184,8 @@ Android는 공유 스트림에만 `ForegroundNotificationConfig`를 전달한다
 
 **공유 중지·삭제 재시도.** stop은 로컬 GPS·보류 타이머·과거 위치 오류를 즉시 지운다. 삭제 작업은 `(code,handle,generation)`으로 보존하고 진행 중 위치 POST 뒤에 DELETE를 보낸다. 실패 시 1·2·4·8·16·32·60초(이후 최대 60초) 간격으로 재시도한다. 같은 방을 떠나거나 인증/멤버/방이 없어진 401·403·404이면 재시도를 중단한다. 새 공유는 이미 전송된 이전 DELETE 완료를 기다린 뒤 오래된 작업과 타이머를 폐기하므로 이전 세대 삭제가 새 공유 뒤에 실행되지 않는다. 삭제 대기는 `deletionPending`/`deletionStatus`의 “위치 삭제 대기 중”으로 표시하며 `LocationShare.error`와 분리한다. 방 변경도 과거 오류를 지운다.
 
+퇴장 시도는 `canStart`로 새 공유만 차단하고 실제 `roomCode`는 유지하므로 DELETE와 leave가 모두 실패하면 삭제 재시도가 남으며, leave 성공으로 방 코드가 비워지거나 DELETE가 401·403·404를 반환하면 작업을 정리한다.
+
 `leave()`/`forget()`은 `mediaEngine.leave()`와 `callService.stop()`을 먼저 호출하고 UI를 통화 종료 상태로 전환한다. 위치 POST→DELETE 완료는 그 뒤 기다리므로 위치 네트워크 지연이 마이크·오디오 종료를 늦추지 않는다. 같은 프로세스의 SSE 복귀는 hello의 수락 대상·pending 대상·수신 요청·revision으로 복원한다. 진행 중 follow POST와 오래된 hello, 먼저 도착한 SSE 응답의 순서 조정은 §15를 따른다.
 
 **정차 규칙(M5a-c).** `LocationShare.motionState`는 `unknown`·`moving`·`stationary`의 3상태다. 최근 3초 관찰 창의 표본 중 speed ≥ 0.5m/s 또는 창의 첫 표본에서 3m 이상 이동한 표본이 있으면 즉시 moving이다. 이동 조건 없이 3초 관찰을 마치면 stationary이며, 속도가 없는 표본은 이동 거리로 판단한다. 표본 없음·초기 관찰 중·표본 단절 3초 이상·위치 스트림 오류·공유 중지는 unknown이다. 차량은 moving일 때만 동의 모달 진입과 따라가기 시작을 막고 “정차 후 설정할 수 있습니다”를 표시한다. unknown과 stationary는 허용하므로 위치 공유 전에도 동의 모달을 열 수 있다.
@@ -191,6 +197,8 @@ Android는 공유 스트림에만 `ForegroundNotificationConfig`를 전달한다
 M10은 가입 화면에서 만 14세 이상 확인을 받으며 가입 본문 `over14: true`를 서버가 검사하고 계정 생성과 함께 `users.age_confirmed_at`에 ISO 시각을 저장한다. 동의는 로컬 저장 성공 뒤 `PUT /v1/me/consent`로 서버의 `privacy_version`·`privacy_consented_at`·`location_version`·`location_consented_at`에도 보관한다. `GET /v1/me`의 `consent`는 각 항목의 `{version, at}` 또는 null을 반환한다. 앱은 전송을 기다리지 않고 진행하며 실패는 debugPrint 한 줄로 처리한다(best-effort, PUT 자동 재시도 없음). 세션 복원 시 현재 로컬 동의가 있고 서버 버전이 다르거나 없으면 해당 항목만 묶어 한 번 동기화하며, 로컬 미동의 항목은 전송하지 않는다. 기존 DB의 다섯 열은 NULL 허용 ALTER로 추가하고 반복 초기화는 저장값을 변경하지 않는다.
 
 위치 항목을 체크하지 않았어도 §15의 따라가기·요청 수락 모달에서 기능별 동의를 받으면 그때 위치 항목의 동의 여부·버전을 저장한다. 저장 성공 후에만 권한 요청으로 진행한다. 선택 동의의 저장은 자동 공유 허가가 아니며 매 새 기능 시작의 모달과 취소 토큰 규칙을 유지한다. `app/assets/legal/location.md`의 “동의하지 않을 권리” 문단은 변경하지 않는다.
+
+참여자 `_refresh`가 현재 조회·멤버 세대의 적용까지 성공하면 SSE 연결 상태(`isConnected=true`)에서만 `state.error`를 지우며, SSE 미연결 중에는 재접속 안내를 유지한다.
 
 ## 13. 지도 화면(M2·M3·M5a)
 
@@ -317,7 +325,7 @@ hello는 `{self,members,leader,positions,trails,revision,followTarget,pendingFol
 
 **저장·프로토콜.** 계정의 `avatar_kind`는 null, `mascot-01`~`mascot-05`, `photo` 중 하나이고 `avatar_version`은 0에서 시작한다. 기존 SQLite에는 두 열을 추가해 null/0으로 초기화하며 반복 초기화는 기존 선택을 보존한다. 성공한 PUT/DELETE마다 version이 1 증가한다. 공개 사용자와 방 멤버에는 `avatar: {kind, version}`을 포함하며 비밀번호·내부 ID·사진 바이트는 포함하지 않는다.
 
-사진은 기본 `server/data/avatars/<handle>.png`에 저장한다. `HDAPP_DB`로 DB 경로를 바꾸면 그 DB의 부모 데이터 폴더 아래 `avatars/`를 사용하며 디렉터리는 첫 업로드 때 만든다. PNG 시그니처, 첫 IHDR 길이·256×256 크기, 청크 경계·IDAT/IEND와 최대 300×1024바이트를 검사한다. base64는 표준 패딩까지 엄격히 검사한다. 마스코트 선택·삭제 시 사진 파일을 지우며 교체 시 이전 사진 이력은 남기지 않는다. 파일 변경·SQLite 변경은 동기 작업으로 처리하고 저장 실패 시 이전 바이트를 복원한다. 앱은 사진 원본·EXIF를 올리지 않고 재인코딩한 PNG만 보낸다.
+사진은 기본 `server/data/avatars/<handle>-<avatar_version>.png`에 저장한다(리뷰 2차 G8b, 2026-11-12). `HDAPP_DB`로 DB 경로를 바꾸면 그 DB의 부모 데이터 폴더 아래 `avatars/`를 사용하며 디렉터리는 첫 업로드 때 만든다. 검사는 PNG 시그니처, 256×256 IHDR(8비트·RGB(2) 또는 RGBA(6)·압축 0·필터 방식 0·비인터레이스), 모든 청크의 CRC(`zlib.crc32`), 이어 붙인 IDAT 를 출력 상한(`height×(1+width×채널)`)을 둔 `inflateSync`로 풀어 정확한 길이와 모든 행의 필터 바이트 0~4, 최대 300×1024바이트까지이며 base64는 표준 패딩까지 엄격히 검사한다. 저장 순서는 새 버전 파일 쓰기·close → SQLite 트랜잭션으로 version 증가·COMMIT → 이전 버전 파일 삭제이고, COMMIT 전 실패는 ROLLBACK 하고 새 파일만 지워 이전 사진을 그대로 둔다. GET은 DB의 현재 version 파일만 읽으며 미커밋·고아 파일은 제공하지 않고 기동 시 정리도 하지 않는다. 옛 `<handle>.png`는 현재 version GET에서 한 번 새 이름으로 옮긴다. 마스코트 선택·삭제도 COMMIT 뒤에 사진 파일을 지우며 이전 사진 이력은 남기지 않는다. 앱은 사진 원본·EXIF를 올리지 않고 재인코딩한 PNG만 보낸다.
 
 | 메서드·경로 | 본문·응답 | 규칙 |
 |---|---|---|

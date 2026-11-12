@@ -384,7 +384,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       if (!found || found.avatar.kind !== "photo" || version !== String(found.avatar.version)) {
         throw new HttpError(404, "AVATAR_NOT_FOUND", "프로필 사진을 찾을 수 없습니다.");
       }
-      const png = readAvatar(avatarsDir, handle);
+      const png = readAvatar(avatarsDir, handle, found.avatar.version);
       if (!png) throw new HttpError(404, "AVATAR_NOT_FOUND", "프로필 사진을 찾을 수 없습니다.");
       response.setHeader("content-type", "image/png");
       response.setHeader("cache-control", "private, max-age=31536000, immutable");

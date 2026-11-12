@@ -22,7 +22,26 @@ Future<void> restoreSession({
   bool current() =>
       isCurrent() && token == store.token && baseUrl == store.baseUrl;
   try {
-    final me = await api.me();
+    const retryDelays = [
+      Duration(seconds: 2),
+      Duration(seconds: 5),
+      Duration(seconds: 15),
+    ];
+    late MeResult me;
+    for (var attempt = 0; ; attempt++) {
+      if (!current() || rooms.state.code != null) return;
+      try {
+        me = await api.me();
+        break;
+      } catch (error) {
+        if (error is ApiException && error.status == 401) rethrow;
+        if (!current() ||
+            rooms.state.code != null ||
+            attempt == retryDelays.length)
+          return;
+        await Future<void>.delayed(retryDelays[attempt]);
+      }
+    }
     if (!current()) return;
     final privacyVersion =
         hasPrivacyConsent(store.preferences) &&

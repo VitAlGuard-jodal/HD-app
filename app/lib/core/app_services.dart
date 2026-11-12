@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../audio/mic_router.dart';
@@ -83,13 +85,17 @@ class AppServices {
   }
 
   void dispose() {
+    if (_disposed) return;
     _disposed = true;
     mapAuthError.dispose();
     driving.dispose();
-    rooms.dispose();
+    unawaited(
+      rooms.shutdown().whenComplete(api.close).catchError((Object error) {
+        debugPrint('앱 종료 정리 실패: ${error.runtimeType}');
+      }),
+    );
     calls.dispose();
     mic.dispose();
     store.dispose();
-    api.close();
   }
 }

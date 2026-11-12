@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -12,6 +13,8 @@ import 'package:unavo/call/call_service.dart';
 import 'package:unavo/call/call_state.dart';
 import 'package:unavo/call/media_engine.dart';
 import 'package:unavo/core/app_services.dart';
+import 'package:unavo/core/device_mode.dart';
+import 'package:unavo/main.dart';
 import 'package:unavo/map/map_provider.dart';
 import 'package:unavo/net/api_client.dart';
 import 'package:unavo/net/models.dart';
@@ -27,6 +30,198 @@ import 'support/icon_bundle.dart';
 import 'support/consent_fakes.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('세션 복원 /v1/me가 한 번 타임아웃 뒤 2초 재시도에 성공하면 복귀 방을 설정한다', () {
+    fakeAsync((clock) {
+      final services = _retryServices(clock);
+      services.api.meFailures = 1;
+      final restoring = restoreSession(
+        api: services.api,
+        store: services.store,
+        rooms: services.rooms,
+        isCurrent: () => true,
+      );
+      clock.flushMicrotasks();
+      expect(services.api.meReads, 1);
+      expect(services.rooms.restorableRoom, isNull);
+      clock.elapse(const Duration(milliseconds: 1999));
+      expect(services.api.meReads, 1);
+      clock.elapse(const Duration(milliseconds: 1));
+      _finishMicrotasks(clock, restoring);
+      expect(services.api.meReads, 2);
+      expect(services.rooms.restorableRoom?.code, 'ABC123');
+      expect(services.store.token, 'test');
+      _disposeRetryServices(clock, services);
+    });
+  });
+
+  test('세션 복원 401은 재시도 없이 방과 저장된 인증을 지운다', () {
+    fakeAsync((clock) {
+      final services = _retryServices(clock);
+      services.api.meFailures = 1;
+      services.api.meError = const ApiException(401, 'unauthorized', '만료');
+      services.rooms.setRestorableRoom(const Room('ABC123', '이전 방'));
+      _finishMicrotasks(
+        clock,
+        restoreSession(
+          api: services.api,
+          store: services.store,
+          rooms: services.rooms,
+          isCurrent: () => true,
+        ),
+      );
+      clock.elapse(const Duration(minutes: 1));
+      expect(services.api.meReads, 1);
+      expect(services.store.token, isNull);
+      expect(services.rooms.restorableRoom, isNull);
+      _disposeRetryServices(clock, services);
+    });
+  });
+
+  test('세션 복원 최초 요청과 2·5·15초 재시도 세 번이 모두 실패하면 조용히 끝난다', () {
+    fakeAsync((clock) {
+      final services = _retryServices(clock);
+      services.api.meFailures = 4;
+      var complete = false;
+      final restoring = restoreSession(
+        api: services.api,
+        store: services.store,
+        rooms: services.rooms,
+        isCurrent: () => true,
+      ).then((_) => complete = true);
+      clock.flushMicrotasks();
+      expect(services.api.meReads, 1);
+      for (final seconds in [2, 5, 15]) {
+        expect(complete, isFalse);
+        final reads = services.api.meReads;
+        clock.elapse(Duration(seconds: seconds - 1));
+        expect(services.api.meReads, reads);
+        clock.elapse(const Duration(seconds: 1));
+        clock.flushMicrotasks();
+        expect(services.api.meReads, reads + 1);
+      }
+      _finishMicrotasks(clock, restoring);
+      expect(complete, isTrue);
+      expect(services.store.token, 'test');
+      expect(services.rooms.restorableRoom, isNull);
+      clock.elapse(const Duration(minutes: 1));
+      expect(services.api.meReads, 4);
+      _disposeRetryServices(clock, services);
+    });
+  });
+
+  for (final change in ['unmount', 'token', 'server', 'room']) {
+    test('세션 복원 재시도는 $change 변경 뒤 다음 요청을 보내지 않는다', () {
+      fakeAsync((clock) {
+        final services = _retryServices(clock);
+        services.api.meFailures = 4;
+        var current = true;
+        final restoring = restoreSession(
+          api: services.api,
+          store: services.store,
+          rooms: services.rooms,
+          isCurrent: () => current,
+        );
+        clock.flushMicrotasks();
+        expect(services.api.meReads, 1);
+        switch (change) {
+          case 'unmount':
+            current = false;
+          case 'token':
+            _finishMicrotasks(clock, services.store.clear());
+          case 'server':
+            _finishMicrotasks(
+              clock,
+              services.store.setBaseUrl('https://new.example.invalid'),
+            );
+          case 'room':
+            services.rooms.state = const RoomState(code: 'NEW123');
+        }
+        clock.elapse(const Duration(seconds: 2));
+        _finishMicrotasks(clock, restoring);
+        expect(services.api.meReads, 1);
+        expect(services.rooms.restorableRoom, isNull);
+        _disposeRetryServices(clock, services);
+      });
+    });
+  }
+
+  testWidgets('resumed는 빈 로비의 복원을 재개하고 진행 중·복귀 카드·참여 방·로그아웃은 제외한다', (
+    tester,
+  ) async {
+    final f = await _Fixture.create(tester);
+    final services = f.services;
+    final initial = Completer<void>();
+    services.api.meGate = initial.future;
+    services.api.meResult = const MeResult(User('alice', 'Alice'), null);
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    void resume() {
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    }
+
+    try {
+      await tester.pumpWidget(
+        DefaultAssetBundle(
+          bundle: TestIconBundle(),
+          child: UnavoApp(services: services, mode: DeviceMode.phone),
+        ),
+      );
+      expect(services.api.meReads, 1);
+      resume();
+      await tester.pump();
+      expect(services.api.meReads, 1, reason: '최초 복원 진행 중에는 중복하지 않는다');
+      initial.complete();
+      for (var turn = 0; turn < 8; turn++) {
+        await tester.pump();
+        await tester.runAsync(() async {});
+      }
+      expect(services.rooms.restorableRoom, isNull);
+      final retry = Completer<void>();
+      services.api.meGate = retry.future;
+      services.api.meResult = const MeResult(
+        User('alice', 'Alice'),
+        Room('ABC123', '이전 방'),
+      );
+      resume();
+      await tester.pump();
+      expect(services.api.meReads, 2);
+      resume();
+      await tester.pump();
+      expect(services.api.meReads, 2);
+      retry.complete();
+      for (var turn = 0; turn < 8; turn++) {
+        await tester.pump();
+        await tester.runAsync(() async {});
+      }
+      expect(services.rooms.restorableRoom?.code, 'ABC123');
+      resume();
+      await tester.pump();
+      expect(services.api.meReads, 2);
+      services.rooms.setRestorableRoom(null);
+      services.rooms.state = const RoomState(code: 'ABC123');
+      resume();
+      await tester.pump();
+      expect(services.api.meReads, 2);
+      services.rooms.state = const RoomState();
+      await _complete(tester, services.store.clear(), '로그아웃');
+      resume();
+      await tester.pump();
+      expect(services.api.meReads, 2);
+      expect(tester.takeException(), isNull);
+    } finally {
+      // UnavoApp이 services를 소유하므로 중복 dispose하지 않는다.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await _complete(tester, services.rooms.shutdown(), '앱 종료');
+      await _complete(tester, services.api.close(), 'SSE 정리');
+      f.appearance.dispose();
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   for (final serverVersion in <String?>[null, '2', '3']) {
     testWidgets(
       '세션 복원은 로컬 동의 3·서버 ${serverVersion ?? "동의 없음"}일 때 PUT ${serverVersion == "3" ? 0 : 1}회로 동기화한다',
@@ -218,6 +413,34 @@ void main() {
       );
     }
   }
+}
+
+T _finishMicrotasks<T>(FakeAsync clock, Future<T> future) {
+  var complete = false;
+  late T result;
+  unawaited(
+    future.then((value) {
+      result = value;
+      complete = true;
+    }),
+  );
+  clock.flushMicrotasks();
+  expect(complete, isTrue, reason: '메모리 fake는 microtask로 완료되어야 한다');
+  return result;
+}
+
+_Services _retryServices(FakeAsync clock) {
+  SharedPreferences.setMockInitialValues({'token': 'test', 'handle': 'alice'});
+  return _Services(
+    SessionStore(_finishMicrotasks(clock, SharedPreferences.getInstance())),
+  );
+}
+
+void _disposeRetryServices(FakeAsync clock, _Services services) {
+  services.dispose();
+  _finishMicrotasks(clock, services.rooms.shutdown());
+  _finishMicrotasks(clock, services.api.close());
+  expect(clock.pendingTimers, isEmpty);
 }
 
 // 모든 Future는 아래 메모리 fake에서 완료된다. 최대 8회 반복과 마지막
@@ -424,10 +647,22 @@ class _Api extends ApiClient {
 
   final members = const [Member('alice', 'Alice', '1')];
   int meReads = 0, roomReads = 0, subscriptions = 0;
+  int meFailures = 0;
+  Object meError = TimeoutException('서버 응답 없음');
+  Future<void>? meGate;
+  MeResult meResult = const MeResult(
+    User('alice', 'Alice'),
+    Room('ABC123', '이전 방'),
+  );
   @override
   Future<MeResult> me() async {
     meReads++;
-    return const MeResult(User('alice', 'Alice'), Room('ABC123', '이전 방'));
+    await meGate;
+    if (meFailures > 0) {
+      meFailures--;
+      throw meError;
+    }
+    return meResult;
   }
 
   @override

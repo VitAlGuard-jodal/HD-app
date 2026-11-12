@@ -74,17 +74,19 @@ class UnavoApp extends StatefulWidget {
   State<UnavoApp> createState() => _UnavoAppState();
 }
 
-class _UnavoAppState extends State<UnavoApp> {
+class _UnavoAppState extends State<UnavoApp> with WidgetsBindingObserver {
   final _appearance = AppearanceController();
   final _navigator = GlobalKey<NavigatorState>();
   final _phoneTabs = GlobalKey<_PhoneTabsState>();
   bool _cover = true;
   bool _roomVisible = false;
   bool _carRoomVisible = false;
+  bool _restoring = false;
   late bool _legalAccepted;
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _legalAccepted = hasPrivacyConsent(widget.services.store.preferences);
     _carRoomVisible = widget.services.rooms.state.code != null;
     widget.services.store.addListener(_sessionChanged);
@@ -92,12 +94,32 @@ class _UnavoAppState extends State<UnavoApp> {
     unawaited(_restore());
   }
 
-  Future<void> _restore() => restoreSession(
-    api: widget.services.api,
-    store: widget.services.store,
-    rooms: widget.services.rooms,
-    isCurrent: () => mounted,
-  );
+  Future<void> _restore() async {
+    if (_restoring) return;
+    _restoring = true;
+    try {
+      await restoreSession(
+        api: widget.services.api,
+        store: widget.services.store,
+        rooms: widget.services.rooms,
+        isCurrent: () => mounted,
+      );
+    } finally {
+      _restoring = false;
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final services = widget.services;
+    if (state == AppLifecycleState.resumed &&
+        mounted &&
+        services.store.session != null &&
+        services.rooms.restorableRoom == null &&
+        services.rooms.state.code == null) {
+      unawaited(_restore());
+    }
+  }
 
   void _sessionChanged() {
     if (!mounted) return;
@@ -165,6 +187,7 @@ class _UnavoAppState extends State<UnavoApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.services.store.removeListener(_sessionChanged);
     widget.services.calls.onOpenRoom = null;
     _appearance.dispose();

@@ -533,7 +533,12 @@ class ApiClient {
     try {
       data = jsonDecode(event.data) as JsonMap;
     } catch (_) {
-      if (event.name != 'location') rethrow;
+      if (event.name != 'location') {
+        debugPrint(
+          'SSE 파싱 실패: event=${event.name}, length=${event.data.length}',
+        );
+        rethrow;
+      }
       logInvalidLocation();
       return null;
     }

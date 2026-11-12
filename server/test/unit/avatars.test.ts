@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { IncomingMessage } from "node:http";
 import type { ServerResponse } from "node:http";
 import { Socket } from "node:net";
@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Writable } from "node:stream";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
-import { deflateSync } from "node:zlib";
+import { crc32, deflateSync } from "node:zlib";
 import { createApp } from "../../src/app.ts";
 import { avatarDirectory, avatarPng, MAX_AVATAR_BYTES } from "../../src/avatars.ts";
 import { issueToken } from "../../src/auth.ts";
@@ -24,26 +24,77 @@ function chunk(type: string, data: Buffer): Buffer {
   bytes.writeUInt32BE(data.length);
   bytes.write(type, 4, "ascii");
   data.copy(bytes, 8);
-  let crc = 0xffffffff;
-  for (const byte of bytes.subarray(4, bytes.length - 4)) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
-  }
-  bytes.writeUInt32BE((crc ^ 0xffffffff) >>> 0, bytes.length - 4);
+  bytes.writeUInt32BE(crc32(bytes.subarray(4, bytes.length - 4)), bytes.length - 4);
   return bytes;
 }
 
-function png(width = 256, height = 256, padding = 0): Buffer {
+function png({
+  width = 256, height = 256, padding = 0, bitDepth = 8, colorType = 6,
+  compression = 0, filterMethod = 0, interlace = 0, pixels, compressed, splitIdat = false,
+}: {
+  width?: number; height?: number; padding?: number; bitDepth?: number; colorType?: number;
+  compression?: number; filterMethod?: number; interlace?: number;
+  pixels?: Buffer; compressed?: Buffer; splitIdat?: boolean;
+} = {}): Buffer {
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width);
   header.writeUInt32BE(height, 4);
-  header[8] = 8;
-  header[9] = 6;
+  header[8] = bitDepth;
+  header[9] = colorType;
+  header[10] = compression;
+  header[11] = filterMethod;
+  header[12] = interlace;
+  const data = compressed ?? deflateSync(pixels ?? Buffer.alloc((width * (colorType === 2 ? 3 : 4) + 1) * height));
+  const middle = Math.floor(data.length / 2);
   return Buffer.concat([
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header),
-    chunk("IDAT", deflateSync(Buffer.alloc((width * 4 + 1) * height))),
+    ...(splitIdat ? [chunk("IDAT", data.subarray(0, middle)), chunk("IDAT", data.subarray(middle))] : [chunk("IDAT", data)]),
     ...(padding ? [chunk("tEXt", Buffer.alloc(padding, 65))] : []), chunk("IEND", Buffer.alloc(0)),
   ]);
+}
+
+function invalidPngs(): [string, Buffer][] {
+  const fake = png({ compressed: Buffer.from("not-zlib") });
+  for (let offset = 8; offset < fake.length;) {
+    const end = offset + 12 + fake.readUInt32BE(offset);
+    fake.writeUInt32BE(0, end - 4);
+    offset = end;
+  }
+  assert.equal(fake.length, 65);
+  const cases: [string, Buffer][] = [
+    ["CRC가 모두 0인 65바이트 가짜", fake],
+    ["CRC는 맞지만 zlib이 아닌 IDAT", png({ compressed: Buffer.from("not-zlib") })],
+    ["빈 IDAT", png({ compressed: Buffer.alloc(0) })],
+    ["잘린 zlib 스트림", png({ compressed: deflateSync(Buffer.alloc(262400)).subarray(0, -1) })],
+    ["비트 깊이 16", png({ bitDepth: 16 })],
+    ["그레이스케일", png({ colorType: 0 })],
+    ["팔레트 색상", png({ colorType: 3 })],
+    ["알파 그레이스케일", png({ colorType: 4 })],
+    ["압축 방식 1", png({ compression: 1 })],
+    ["필터 방식 1", png({ filterMethod: 1 })],
+    ["인터레이스 1", png({ interlace: 1 })],
+  ];
+  const valid = png({ padding: 1 });
+  for (let offset = 8; offset < valid.length;) {
+    const end = offset + 12 + valid.readUInt32BE(offset);
+    const broken = Buffer.from(valid);
+    broken[end - 1] ^= 1;
+    cases.push([`${valid.toString("ascii", offset + 4, offset + 8)} CRC 한 개 오류`, broken]);
+    offset = end;
+  }
+  for (const colorType of [2, 6]) {
+    const rowLength = 1 + 256 * (colorType === 2 ? 3 : 4);
+    const expected = 256 * rowLength;
+    for (const row of [0, 255]) {
+      const pixels = Buffer.alloc(expected);
+      pixels[row * rowLength] = 5;
+      cases.push([`색상 ${colorType}의 ${row + 1}번째 행 필터 5`, png({ colorType, pixels })]);
+    }
+    for (const difference of [-1, 1]) {
+      cases.push([`색상 ${colorType}의 해제 길이 ${difference}`, png({ colorType, pixels: Buffer.alloc(expected + difference) })]);
+    }
+  }
+  return cases;
 }
 
 class ResponseSink extends Writable {
@@ -132,12 +183,12 @@ test("기존 계정 스키마에 아바타 기본값을 마이그레이션하며
 
 test("사진은 300KB 이하 PNG 시그니처·IHDR 256×256·완결된 청크만 허용한다", timeout, () => {
   const valid = png();
-  const atLimit = png(256, 256, MAX_AVATAR_BYTES - valid.length - 12);
+  const atLimit = png({ padding: MAX_AVATAR_BYTES - valid.length - 12 });
   assert.equal(atLimit.length, MAX_AVATAR_BYTES);
   assert.deepEqual(avatarPng(atLimit.toString("base64")), atLimit);
-  for (const bytes of [png(255, 256), png(256, 257), valid.subarray(0, 32),
+  for (const bytes of [png({ width: 255 }), png({ height: 257 }), valid.subarray(0, 32),
     Buffer.from("not png"), Buffer.concat([valid, Buffer.from([0])]),
-    png(256, 256, MAX_AVATAR_BYTES - valid.length - 11)]) {
+    png({ padding: MAX_AVATAR_BYTES - valid.length - 11 })]) {
     assert.equal(avatarPng(bytes.toString("base64")), undefined);
   }
   const badSignature = Buffer.from(valid);
@@ -150,24 +201,157 @@ test("사진은 300KB 이하 PNG 시그니처·IHDR 256×256·완결된 청크�
   }
 });
 
-test("PUT·교체·DELETE는 버전을 증가시키고 이전 사진 파일을 제거한다", timeout, async (t) => {
+test("사진은 deflateSync로 만든 8비트 RGB·RGBA와 분할 IDAT·행 필터 0~4를 허용한다", timeout, () => {
+  for (const colorType of [2, 6]) {
+    const plain = png({ colorType });
+    assert.deepEqual(avatarPng(plain.toString("base64")), plain);
+    const rowLength = 1 + 256 * (colorType === 2 ? 3 : 4);
+    const pixels = Buffer.alloc(256 * rowLength, 127);
+    for (let row = 0; row < 256; row++) pixels[row * rowLength] = row % 5;
+    const filtered = png({ colorType, pixels, splitIdat: true });
+    assert.deepEqual(avatarPng(filtered.toString("base64")), filtered);
+  }
+});
+
+test("손상된 PNG는 INVALID_INPUT으로 거부하고 기존 사진·버전·방송을 보존한다", timeout, async (t) => {
+  const { db, hub, alice, avatarsDir, request } = fixture(t);
+  const previous = png();
+  assert.equal((await request("PUT", "/v1/me/avatar", { kind: "photo", png: previous.toString("base64") })).status, 200);
+  const room = createRoom(db, { code: "ABC234", name: "검증", createdBy: alice.id })!;
+  const events: unknown[] = [];
+  hub.subscribe(room.code, alice.handle, "test", (_name, data) => { events.push(data); return true; }, () => {});
+  for (const [name, bytes] of invalidPngs()) {
+    await t.test(name, timeout, async () => {
+      assert.equal(avatarPng(bytes.toString("base64")), undefined);
+      const rejected = await request("PUT", "/v1/me/avatar", { kind: "photo", png: bytes.toString("base64") });
+      assert.equal(rejected.status, 400);
+      assert.deepEqual(rejected.body.error, {
+        code: "INVALID_INPUT", message: "프로필 사진은 300KB 이하의 256×256 PNG여야 합니다.",
+      });
+      assert.deepEqual(findUserByHandle(db, "alice")?.avatar, { kind: "photo", version: 1 });
+      assert.deepEqual(readdirSync(avatarsDir), ["alice-1.png"]);
+      assert.deepEqual(readFileSync(join(avatarsDir, "alice-1.png")), previous);
+      const got = await request("GET", "/v1/users/alice/avatar?v=1");
+      assert.equal(got.status, 200);
+      assert.deepEqual(got.bytes, previous);
+      assert.deepEqual(events, []);
+    });
+  }
+});
+
+test("PUT·사진 교체·마스코트·DELETE는 DB 버전 파일을 사용하고 이전 파일을 제거한다", timeout, async (t) => {
   const { db, avatarsDir, request } = fixture(t);
-  const file = join(avatarsDir, "alice.png");
   assert.equal(existsSync(avatarsDir), false);
   const uploaded = await request("PUT", "/v1/me/avatar", { kind: "photo", png: png().toString("base64") });
   assert.equal(uploaded.status, 200);
   assert.deepEqual(uploaded.body.user.avatar, { kind: "photo", version: 1 });
-  assert.equal(existsSync(file), true);
+  assert.deepEqual(readdirSync(avatarsDir), ["alice-1.png"]);
+  const next = png({ colorType: 2 });
+  const photo = await request("PUT", "/v1/me/avatar", { kind: "photo", png: next.toString("base64") });
+  assert.equal(photo.status, 200);
+  assert.deepEqual(photo.body.user.avatar, { kind: "photo", version: 2 });
+  assert.deepEqual(findUserByHandle(db, "alice")?.avatar, photo.body.user.avatar);
+  assert.deepEqual(readdirSync(avatarsDir), ["alice-2.png"]);
+  assert.deepEqual(readFileSync(join(avatarsDir, "alice-2.png")), next);
   const replaced = await request("PUT", "/v1/me/avatar", { kind: "mascot-03" });
-  assert.deepEqual(replaced.body.user.avatar, { kind: "mascot-03", version: 2 });
-  assert.equal(existsSync(file), false);
+  assert.deepEqual(replaced.body.user.avatar, { kind: "mascot-03", version: 3 });
+  assert.deepEqual(readdirSync(avatarsDir), []);
   await request("PUT", "/v1/me/avatar", { kind: "photo", png: png().toString("base64") });
-  assert.equal(existsSync(file), true);
+  assert.deepEqual(readdirSync(avatarsDir), ["alice-4.png"]);
   const deleted = await request("DELETE", "/v1/me/avatar");
   assert.equal(deleted.status, 200);
-  assert.deepEqual(deleted.body.user.avatar, { kind: null, version: 4 });
-  assert.equal(existsSync(file), false);
-  assert.deepEqual(findUserByHandle(db, "alice")?.avatar, { kind: null, version: 4 });
+  assert.deepEqual(deleted.body.user.avatar, { kind: null, version: 5 });
+  assert.deepEqual(readdirSync(avatarsDir), []);
+  assert.deepEqual(findUserByHandle(db, "alice")?.avatar, { kind: null, version: 5 });
+});
+
+test("DB COMMIT 실패 시 사진 교체·마스코트·DELETE 모두 이전 버전과 GET·방송을 보존한다", timeout, async (t) => {
+  const { db, hub, alice, avatarsDir, request } = fixture(t);
+  const previous = png();
+  const next = png({ colorType: 2 });
+  assert.equal((await request("PUT", "/v1/me/avatar", { kind: "photo", png: previous.toString("base64") })).status, 200);
+  const room = createRoom(db, { code: "ABC234", name: "실패", createdBy: alice.id })!;
+  const events: unknown[] = [];
+  hub.subscribe(room.code, alice.handle, "test", (_name, data) => { events.push(data); return true; }, () => {});
+  for (const kind of ["photo", "mascot-01", null]) {
+    const observed: { phase: string; version: number; previous: Buffer; next?: Buffer }[] = [];
+    const exec = db.exec.bind(db);
+    const mocked = t.mock.method(db, "exec", (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT") {
+        const nextPath = join(avatarsDir, "alice-2.png");
+        observed.push({
+          phase: sql, version: findUserByHandle(db, "alice")!.avatar.version,
+          previous: readFileSync(join(avatarsDir, "alice-1.png")),
+          next: existsSync(nextPath) ? readFileSync(nextPath) : undefined,
+        });
+      }
+      if (sql === "COMMIT") throw new Error("모의 COMMIT 실패");
+      return exec(sql);
+    });
+    try {
+      const failed = await request(kind === null ? "DELETE" : "PUT", "/v1/me/avatar",
+        kind === null ? undefined : { kind, ...(kind === "photo" ? { png: next.toString("base64") } : {}) });
+      assert.equal(failed.status, 500);
+      assert.equal(failed.body.error.code, "INTERNAL_ERROR");
+      assert.deepEqual(observed, [
+        { phase: "BEGIN", version: 1, previous, next: kind === "photo" ? next : undefined },
+        { phase: "COMMIT", version: 2, previous, next: kind === "photo" ? next : undefined },
+      ]);
+    } finally { mocked.mock.restore(); }
+    assert.deepEqual(findUserByHandle(db, "alice")?.avatar, { kind: "photo", version: 1 });
+    assert.deepEqual(readdirSync(avatarsDir), ["alice-1.png"]);
+    const got = await request("GET", "/v1/users/alice/avatar?v=1");
+    assert.equal(got.status, 200);
+    assert.equal(got.headers.get("cache-control"), "private, max-age=31536000, immutable");
+    assert.deepEqual(got.bytes, previous);
+    const unpublished = await request("GET", "/v1/users/alice/avatar?v=2");
+    assert.equal(unpublished.status, 404);
+    assert.equal(unpublished.headers.get("cache-control"), "no-store");
+    assert.deepEqual(events, []);
+  }
+  const retried = await request("PUT", "/v1/me/avatar", { kind: "photo", png: next.toString("base64") });
+  assert.equal(retried.status, 200);
+  assert.deepEqual(retried.body.user.avatar, { kind: "photo", version: 2 });
+  assert.deepEqual(readdirSync(avatarsDir), ["alice-2.png"]);
+  assert.equal(events.length, 1);
+});
+
+test("미커밋 고아 파일이 있어도 GET은 DB의 현재 사진만 반환하고 다음 저장은 고아 버전을 대체한다", timeout, async (t) => {
+  const { avatarsDir, request } = fixture(t);
+  const previous = png();
+  await request("PUT", "/v1/me/avatar", { kind: "photo", png: previous.toString("base64") });
+  writeFileSync(join(avatarsDir, "alice-2.png"), png({ colorType: 2 }));
+  const current = await request("GET", "/v1/users/alice/avatar?v=1");
+  assert.equal(current.status, 200);
+  assert.deepEqual(current.bytes, previous);
+  assert.equal((await request("GET", "/v1/users/alice/avatar?v=2")).status, 404);
+  const next = png({ padding: 1 });
+  const uploaded = await request("PUT", "/v1/me/avatar", { kind: "photo", png: next.toString("base64") });
+  assert.equal(uploaded.status, 200);
+  assert.deepEqual(uploaded.body.user.avatar, { kind: "photo", version: 2 });
+  assert.deepEqual(readdirSync(avatarsDir), ["alice-2.png"]);
+  assert.deepEqual((await request("GET", "/v1/users/alice/avatar?v=2")).bytes, next);
+});
+
+test("기존 handle.png는 현재 버전 GET에서 한 번 이동하고 다음 저장에서 제거한다", timeout, async (t) => {
+  const { db, avatarsDir, request } = fixture(t);
+  const previous = png();
+  mkdirSync(avatarsDir);
+  writeFileSync(join(avatarsDir, "alice.png"), previous);
+  db.exec("UPDATE users SET avatar_kind = 'photo', avatar_version = 7 WHERE handle = 'alice'");
+  assert.equal((await request("GET", "/v1/users/alice/avatar?v=6")).status, 404);
+  assert.deepEqual(readdirSync(avatarsDir), ["alice.png"]);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const got = await request("GET", "/v1/users/alice/avatar?v=7");
+    assert.equal(got.status, 200);
+    assert.deepEqual(got.bytes, previous);
+    assert.deepEqual(readdirSync(avatarsDir), ["alice-7.png"]);
+    assert.deepEqual(findUserByHandle(db, "alice")?.avatar, { kind: "photo", version: 7 });
+  }
+  const uploaded = await request("PUT", "/v1/me/avatar", { kind: "photo", png: png({ colorType: 2 }).toString("base64") });
+  assert.equal(uploaded.status, 200);
+  assert.deepEqual(uploaded.body.user.avatar, { kind: "photo", version: 8 });
+  assert.deepEqual(readdirSync(avatarsDir), ["alice-8.png"]);
 });
 
 test("조회는 인증·현재 version이 필요하고 PNG에 private immutable 헤더를 보낸다", timeout, async (t) => {
@@ -199,7 +383,7 @@ test("잘못된 업로드는 파일·버전·방송을 변경하지 않으며 �
   hub.subscribe(room.code, alice.handle, "test", (_name, data) => { events.push(data); return true; }, () => {});
   for (const body of [
     { kind: "mascot-06" }, { kind: null }, { kind: "mascot-01", png: "bad" },
-    { kind: "photo", png: "no png" }, { kind: "photo", png: png(128).toString("base64") },
+    { kind: "photo", png: "no png" }, { kind: "photo", png: png({ width: 128 }).toString("base64") },
     { kind: "photo", png: Buffer.alloc(MAX_AVATAR_BYTES + 1).toString("base64") },
   ]) assert.equal((await request("PUT", "/v1/me/avatar", body)).status, 400);
   assert.equal((await request("PUT", "/v1/me/avatar", { kind: "photo", png: "a".repeat(500_000) })).status, 413);

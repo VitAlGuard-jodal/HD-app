@@ -71,7 +71,8 @@ class RoomSession extends ChangeNotifier {
     locationShare = LocationShare(
       api: api,
       source: locationSource,
-      roomCode: () => state.isLeaving ? null : state.code,
+      roomCode: () => state.code,
+      canStart: () => !state.isLeaving,
       selfHandle: () => store.handle,
       now: locationNow,
     );
@@ -318,7 +319,7 @@ class RoomSession extends ChangeNotifier {
   Set<String> get speaking => Set.unmodifiable(_speaking);
   StreamSubscription<RoomEvent>? _subscription;
   Future<void> _eventQueue = Future<void>.value();
-  Future<void>? _stopFuture;
+  Future<void>? _stopFuture, _shutdown;
   int _generation = 0;
   int _callGeneration = 0;
   int _refreshSeq = 0, _completedRefreshSeq = 0, _membersGeneration = 0;
@@ -592,10 +593,17 @@ class RoomSession extends ChangeNotifier {
       final details = await api.getRoom(code);
       if (current()) {
         _completedRefreshSeq = seq;
-        state = state.copyWith(room: details.room, error: null);
+        state = state.copyWith(room: details.room);
         _setLeader(details.room.leader);
         applyingGeneration = _membersGeneration + 1;
         await _setMembers(details.members);
+        // 멤버 적용 중 더 새로운 조회·이벤트가 들어오면 오류도 덮지 않는다.
+        if (!_current(generation) ||
+            state.code != code ||
+            seq != _completedRefreshSeq ||
+            _membersGeneration != applyingGeneration + 1)
+          return;
+        if (state.isConnected) state = state.copyWith(error: null);
         _notify();
       }
     } catch (error) {
@@ -1103,7 +1111,8 @@ class RoomSession extends ChangeNotifier {
   }) async {
     final code = state.code;
     final connectionId = _connectionId;
-    if (code == null ||
+    if (_disposed ||
+        code == null ||
         state.isLeaving ||
         !_followRequests.containsKey(requestId))
       return;
@@ -1149,7 +1158,8 @@ class RoomSession extends ChangeNotifier {
     int? revision;
     await _queueFollowOperation(() async {
       // 권한·이전 요청 대기 중 취소된 ID는 서버에 보내지 않는다.
-      if (state.code != code ||
+      if (_disposed ||
+          state.code != code ||
           connectionId != _connectionId ||
           state.isLeaving ||
           !_followRequests.containsKey(requestId))
@@ -1637,13 +1647,15 @@ class RoomSession extends ChangeNotifier {
 
   @override
   void dispose() {
+    if (_disposed) return;
     _disposed = true;
     store.removeListener(_profileChanged);
     locationShare.removeListener(_locationChanged);
-    locationShare.dispose();
+    final stoppingLocation = locationShare.shutdown();
     ++_generation;
     ++_callGeneration;
-    unawaited(_subscription?.cancel());
+    final cancellingEvents = _subscription?.cancel();
+    _subscription = null;
     callService.removeListener(_nativeCallChanged);
     callService.onLeaveCall = null;
     callService.onToggleMute = null;
@@ -1654,8 +1666,24 @@ class RoomSession extends ChangeNotifier {
     mediaEngine.remoteSpeaking = null;
     mediaEngine.sendSignal = null;
     mediaEngine.connectionChanged = null;
+    // 구독 취소의 완료 Future 는 루트 존의 null Future 일 수 있어(fakeAsync 의
+    // microtask 플러시로 끝나지 않음) 기다리지 않는다. HTTP 를 쓰는 정리만 모은다.
+    if (cancellingEvents != null) {
+      unawaited(cancellingEvents.catchError((Object _) {}));
+    }
     unawaited(_peerSubscription.cancel());
-    unawaited(mediaEngine.dispose().catchError((Object _) {}));
+    _shutdown = Future.wait<void>([
+      stoppingLocation,
+      _followQueue,
+      _eventQueue,
+      mediaEngine.dispose().catchError((Object _) {}),
+    ]).then<void>((_) {});
     super.dispose();
+  }
+
+  // dispose의 동기 해제 뒤에도 위치 DELETE와 follow 정리는 HTTP를 쓴다.
+  Future<void> shutdown() {
+    dispose();
+    return _shutdown!;
   }
 }

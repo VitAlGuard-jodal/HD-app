@@ -160,7 +160,12 @@ void main() {
     fakeAsync((clock) {
       final f = _microtasksOnly(clock, _Fixture.create());
       f.api.meError = TimeoutException('offline');
-      _microtasksOnly(clock, f.restore());
+      final restoring = f.restore();
+      clock.flushMicrotasks();
+      // G8a: 2·5·15초 재시도 세 번이 모두 실패할 때까지 기다린다.
+      clock.elapse(const Duration(seconds: 22));
+      _microtasksOnly(clock, restoring);
+      expect(clock.pendingTimers, isEmpty);
       expect(f.store.token, 'test');
       expect(f.session.state.code, isNull);
       expect(f.session.restorableRoom, isNull);

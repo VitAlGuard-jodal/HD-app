@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,6 +8,7 @@ import 'package:unavo/audio/mic_router.dart';
 import 'package:unavo/auth/session_store.dart';
 import 'package:unavo/call/call_service.dart';
 import 'package:unavo/call/media_engine.dart';
+import 'package:unavo/core/app_services.dart';
 import 'package:unavo/core/device_mode.dart';
 import 'package:unavo/location/location_share.dart';
 import 'package:unavo/location/location_source.dart';
@@ -35,6 +37,188 @@ LocationFix _fix(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  for (final leaveFails in [true, false]) {
+    test(
+      leaveFails
+          ? '공유 중 DELETE·leave 실패로 방에 남으면 삭제 작업을 유지하고 다음 재시도에 성공한다'
+          : 'DELETE 실패 뒤 leave가 성공하면 삭제 작업과 재시도 타이머를 정리한다',
+      () {
+        fakeAsync((clock) {
+          final f = _Fixture.create(clock);
+          f.open();
+          f.startSharing();
+          f.sample();
+          f.http.deleteFails = true;
+          f.api.leaveFails = leaveFails;
+          Object? failure;
+          _finish(
+            clock,
+            f.session.leave().catchError((Object error) {
+              failure = error;
+            }),
+          );
+          expect(failure, leaveFails ? isA<ApiException>() : isNull);
+          expect(f.session.state.code, leaveFails ? 'ABC123' : isNull);
+          expect(f.session.state.isLeaving, isFalse);
+          expect(f.session.locationShare.sharing, isFalse);
+          expect(f.session.locationShare.deletionPending, leaveFails);
+          expect(f.http.deletes, hasLength(1));
+          f.http.deleteFails = false;
+          clock.elapse(const Duration(seconds: 1));
+          clock.flushMicrotasks();
+          expect(f.http.deletes, hasLength(leaveFails ? 2 : 1));
+          expect(f.session.locationShare.deletionPending, isFalse);
+          f.dispose();
+        });
+      },
+      timeout: _timeout,
+    );
+  }
+
+  test('나가기 중에는 방 식별자를 유지해도 새 위치 공유를 시작하지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      f.session.state = f.session.state.copyWith(isLeaving: true);
+      f.startSharing();
+      expect(f.session.state.code, 'ABC123');
+      expect(f.source.requests, 0);
+      expect(f.source.watches, 0);
+      expect(f.session.locationShare.sharing, isFalse);
+      f.dispose();
+    });
+  }, timeout: _timeout);
+
+  for (final connected in [true, false]) {
+    test(
+      connected
+          ? '연결된 상태에서 요청 오류 뒤 멤버 refresh가 성공하면 오류를 지운다'
+          : 'SSE 미연결 상태에서는 멤버 refresh가 성공해도 재접속 안내를 유지한다',
+      () {
+        fakeAsync((clock) {
+          final f = _Fixture.create(clock);
+          f.open();
+          f.api.roomRead = () async =>
+              throw const ApiException(0, 'timeout', '서버 응답 없음');
+          f.event(const MemberJoined('alice'));
+          expect(f.session.state.error, '서버 응답 없음');
+          if (!connected) {
+            f.event(const Disconnected('서버 응답 없음', 2000));
+          }
+          final error = f.session.state.error;
+          f.api.roomRead = null;
+          f.event(const MemberJoined('alice'));
+          expect(f.session.state.isConnected, connected);
+          expect(f.session.state.error, connected ? isNull : error);
+          f.dispose();
+        });
+      },
+      timeout: _timeout,
+    );
+  }
+
+  for (final deleteFails in [false, true]) {
+    test(
+      'AppServices.dispose는 위치 DELETE 완료 뒤 client를 한 번 닫는다 (실패 $deleteFails)',
+      () {
+        fakeAsync((clock) {
+          final http = FakeLocationHttp()..deleteFails = deleteFails;
+          final source = FakeLocationSource();
+          var clients = 0, closes = 0;
+          HttpOverrides.runZoned(
+            () {
+              SharedPreferences.setMockInitialValues({
+                'token': 'test',
+                'handle': 'bob',
+              });
+              final store = SessionStore(
+                _finish(clock, SharedPreferences.getInstance()),
+              );
+              final services = AppServices(
+                store,
+                mediaEngine: _Media(),
+                locationSource: source,
+                deviceMode: DeviceMode.phone,
+              );
+              services.rooms.state = const RoomState(code: 'ABC123');
+              _finish(
+                clock,
+                services.locationShare.start(
+                  token: Object(),
+                  stillValid: () => true,
+                ),
+              );
+              final post = Completer<void>();
+              final deletion = Completer<void>();
+              http.sendGate = post.future;
+              http.deleteGate = deletion.future;
+              source.add(
+                LocationSample(lat: 37, lng: 127, at: DateTime.utc(2026)),
+              );
+              clock.flushMicrotasks();
+              expect(http.posts, hasLength(1));
+              expect(clients, 1);
+              services.dispose();
+              clock.flushMicrotasks();
+              expect(closes, 0);
+              expect(http.deletes, isEmpty);
+              post.complete();
+              clock.flushMicrotasks();
+              expect(http.deletes, hasLength(1));
+              expect(closes, 0);
+              deletion.complete();
+              _finish(clock, services.rooms.shutdown());
+              expect(closes, 1);
+              expect(clients, 1, reason: 'DELETE도 종료 전 공유 client를 사용한다');
+              expect(services.locationShare.deletionPending, isFalse);
+              services.dispose();
+              clock.elapse(const Duration(minutes: 1));
+              expect(closes, 1);
+              expect(clients, 1);
+            },
+            createHttpClient: (_) {
+              clients++;
+              return _TrackedClient(http.client(), () => closes++);
+            },
+          );
+          _finish(clock, source.close());
+          unawaited(http.events.stream.drain<void>());
+          _finish(clock, http.close());
+          expect(clock.pendingTimers, isEmpty);
+        });
+      },
+      timeout: _timeout,
+    );
+  }
+
+  test('shutdown은 늦은 follow POST와 후속 DELETE 완료까지 기다린다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.open();
+      f.startSharing();
+      final post = Completer<void>();
+      final deletion = Completer<void>();
+      f.api.followGate = post.future;
+      f.api.stopGate = deletion.future;
+      final following = f.session.startFollowing('alice');
+      clock.flushMicrotasks();
+      var complete = false;
+      final shutdown = f.session.shutdown().then((_) => complete = true);
+      clock.flushMicrotasks();
+      expect(f.http.deletes, hasLength(1));
+      expect(complete, isFalse);
+      post.complete();
+      clock.flushMicrotasks();
+      expect(f.api.unfollows, 1);
+      expect(complete, isFalse);
+      deletion.complete();
+      _finish(clock, following);
+      _finish(clock, shutdown);
+      expect(complete, isTrue);
+      f.dispose();
+    });
+  }, timeout: _timeout);
 
   test(
     '서버 재시작: revision 5000 세션이 재접속해 revision 3 hello 를 받으면 스냅샷·followRequests 를 적용한다',
@@ -1546,6 +1730,7 @@ class _Api extends ApiClient {
   }
 
   int leaves = 0;
+  bool leaveFails = false;
   @override
   Future<void> close() {
     super.close();
@@ -1565,7 +1750,27 @@ class _Api extends ApiClient {
   @override
   Future<void> leaveRoom(String code) async {
     leaves++;
+    if (leaveFails) throw const ApiException(503, 'unavailable', '퇴장 실패');
   }
+}
+
+class _TrackedClient implements HttpClient {
+  _TrackedClient(this.delegate, this.onClose);
+  final HttpClient delegate;
+  final void Function() onClose;
+  @override
+  set connectionTimeout(Duration? value) => delegate.connectionTimeout = value;
+  @override
+  Future<HttpClientRequest> openUrl(String method, Uri url) =>
+      delegate.openUrl(method, url);
+  @override
+  void close({bool force = false}) {
+    onClose();
+    delegate.close(force: force);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _Calls extends CallService {
