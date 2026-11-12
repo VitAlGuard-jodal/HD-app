@@ -12,6 +12,7 @@ import '../../net/api_client.dart';
 import '../../net/models.dart';
 import '../../ui/avatar_images.dart';
 import '../../ui/control_scale.dart';
+import '../../ui/icons.dart';
 import '../../ui/theme.dart';
 import '../../ui/widgets/member_avatar.dart';
 import '../../ui/widgets/panel_button.dart';
@@ -43,7 +44,74 @@ class _ProfileScreenState extends State<ProfileScreen> {
     avatar: avatar,
   );
 
-  Future<void> _pickPhoto(BuildContext dialogContext) async {
+  Future<void> _showSourceDialog(BuildContext screenContext) async {
+    if (_busy) return;
+    await showUnavoChoiceDialog(
+      screenContext,
+      key: const ValueKey('profile-source-dialog'),
+      car: widget.car,
+      child: Builder(
+        builder: (dialogContext) => Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            PanelButton(
+              key: const ValueKey('profile-gallery'),
+              label: '사진첩에서 선택',
+              icon: 'plus',
+              onPressed: _busy
+                  ? null
+                  : () async {
+                      final route = ModalRoute.of(dialogContext)!;
+                      Navigator.of(dialogContext).pop();
+                      // 퇴장 애니메이션과 모달 제거가 끝난 뒤 사진첩을 연다.
+                      await route.completed;
+                      if (screenContext.mounted) {
+                        await _pickPhoto(screenContext);
+                      }
+                    },
+            ),
+            const SizedBox(height: 24),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              alignment: WrapAlignment.center,
+              children: [
+                for (final kind in Avatar.mascotKinds)
+                  Semantics(
+                    label: '기본 아바타 ${Avatar.mascotKinds.indexOf(kind) + 1}',
+                    selected: _selection.kind == kind,
+                    button: true,
+                    child: IconButton(
+                      key: ValueKey('profile-$kind'),
+                      padding: EdgeInsets.zero,
+                      onPressed: _busy
+                          ? null
+                          : () {
+                              setState(() {
+                                _selection = Avatar(kind: kind);
+                                _photo = null;
+                                _changed = true;
+                              });
+                              Navigator.of(dialogContext).pop();
+                            },
+                      icon: MemberAvatar(
+                        member: _member(Avatar(kind: kind)),
+                        diameter: widget.car ? 96 : 72,
+                        borderColor: _selection.kind == kind
+                            ? UnavoColors.gold
+                            : Colors.transparent,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickPhoto(BuildContext screenContext) async {
     if (_busy) return;
     setState(() => _busy = true);
     try {
@@ -68,8 +136,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
         _changed = true;
       });
     } catch (error) {
-      if (dialogContext.mounted)
-        await showNoticeDialog(dialogContext, message: errorMessage(error));
+      if (screenContext.mounted)
+        await showNoticeDialog(screenContext, message: errorMessage(error));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -114,56 +182,56 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       child: Column(
                         children: [
                           const SizedBox(height: 12),
-                          MemberAvatar(
-                            key: const ValueKey('profile-preview'),
-                            member: _member(_selection),
-                            diameter: widget.car ? 160 : 120,
-                            showBorder: false,
-                            defaultMascot: true,
-                            api: widget.api,
-                            preview: _photo,
-                          ),
-                          const SizedBox(height: 28),
-                          Wrap(
-                            spacing: 12,
-                            runSpacing: 12,
-                            alignment: WrapAlignment.center,
-                            children: [
-                              for (final kind in Avatar.mascotKinds)
-                                Semantics(
-                                  label:
-                                      '기본 아바타 ${Avatar.mascotKinds.indexOf(kind) + 1}',
-                                  selected: _selection.kind == kind,
-                                  button: true,
-                                  child: IconButton(
-                                    key: ValueKey('profile-$kind'),
-                                    padding: EdgeInsets.zero,
-                                    onPressed: _busy
-                                        ? null
-                                        : () => setState(() {
-                                            _selection = Avatar(kind: kind);
-                                            _photo = null;
-                                            _changed = true;
-                                          }),
-                                    icon: MemberAvatar(
-                                      member: _member(Avatar(kind: kind)),
-                                      diameter: widget.car ? 96 : 72,
-                                      borderColor: _selection.kind == kind
-                                          ? UnavoColors.gold
-                                          : Colors.transparent,
+                          Semantics(
+                            label: '프로필 사진 바꾸기',
+                            button: true,
+                            enabled: !_busy,
+                            child: IconButton(
+                              key: const ValueKey('profile-edit'),
+                              padding: EdgeInsets.zero,
+                              onPressed: _busy
+                                  ? null
+                                  : () async => _showSourceDialog(context),
+                              icon: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  MemberAvatar(
+                                    key: const ValueKey('profile-preview'),
+                                    member: _member(_selection),
+                                    diameter: widget.car ? 160 : 120,
+                                    showBorder: false,
+                                    defaultMascot: true,
+                                    api: widget.api,
+                                    preview: _photo,
+                                  ),
+                                  Container(
+                                    key: const ValueKey('profile-edit-plus'),
+                                    width: (widget.car ? 160 : 120) * .4,
+                                    height: (widget.car ? 160 : 120) * .4,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: UnavoColors.ink.withValues(
+                                        alpha: .45,
+                                      ),
+                                    ),
+                                    child: Center(
+                                      child: UnavoIcon(
+                                        'plus',
+                                        size:
+                                            (widget.car ? 160 : 120) * .4 * .55,
+                                        color: _busy
+                                            ? UnavoColors.text.withValues(
+                                                alpha: .4,
+                                              )
+                                            : Colors.white.withValues(
+                                                alpha: .9,
+                                              ),
+                                      ),
                                     ),
                                   ),
-                                ),
-                            ],
-                          ),
-                          const SizedBox(height: 24),
-                          PanelButton(
-                            key: const ValueKey('profile-gallery'),
-                            label: '사진첩에서 선택',
-                            icon: 'plus',
-                            onPressed: _busy
-                                ? null
-                                : () async => _pickPhoto(context),
+                                ],
+                              ),
+                            ),
                           ),
                         ],
                       ),

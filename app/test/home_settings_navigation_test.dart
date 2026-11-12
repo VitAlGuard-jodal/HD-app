@@ -215,6 +215,23 @@ void main() {
           tester.getSize(find.byKey(const ValueKey('profile-back'))).height,
           car ? 80 : 56,
         );
+        expect(find.byKey(const ValueKey('profile-gallery')), findsNothing);
+        expect(find.byKey(const ValueKey('profile-edit-plus')), findsOneWidget);
+        await _tapKey(tester, 'profile-edit');
+        expect(
+          find.byKey(const ValueKey('profile-source-dialog')),
+          findsOneWidget,
+        );
+        expect(find.byKey(const ValueKey('profile-gallery')), findsOneWidget);
+        expect(tester.getSize(find.byTooltip('닫기')).height, car ? 80 : 56);
+        expectPrimary(ProfileScreen);
+        await tester.tap(find.byTooltip('닫기'));
+        await _pumpNavigation(tester);
+        expect(
+          find.byKey(const ValueKey('profile-source-dialog')),
+          findsNothing,
+        );
+        expectPrimary(ProfileScreen);
         await _tapKey(tester, 'profile-back');
         expect(find.byType(SettingsScreen), findsOneWidget);
 

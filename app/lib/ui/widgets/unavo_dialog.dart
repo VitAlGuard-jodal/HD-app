@@ -74,8 +74,37 @@ Future<void> showNoticeDialog(
   );
 }
 
+Future<void> showUnavoChoiceDialog(
+  BuildContext context, {
+  Key? key,
+  required Widget child,
+  required bool car,
+}) async {
+  await showDialog<void>(
+    context: context,
+    barrierDismissible: true,
+    builder: (context) => ControlScale(
+      car: car,
+      child: _DialogCard(
+        key: key,
+        lines: const [],
+        detail: child,
+        actions: [
+          PanelButton(
+            label: '닫기',
+            icon: 'check',
+            style: PanelButtonStyle.gold,
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 class _DialogCard extends StatelessWidget {
   const _DialogCard({
+    super.key,
     this.title,
     required this.lines,
     this.detail,
