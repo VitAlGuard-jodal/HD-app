@@ -17,6 +17,7 @@ import '../../ui/theme.dart';
 import '../../ui/widgets/member_avatar.dart';
 import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/unavo_dialog.dart';
+import 'profile_source.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({
@@ -44,71 +45,92 @@ class _ProfileScreenState extends State<ProfileScreen> {
     avatar: avatar,
   );
 
-  Future<void> _showSourceDialog(BuildContext screenContext) async {
-    if (_busy) return;
-    await showUnavoChoiceDialog(
-      screenContext,
+  Future<ProfileSourceChoice?> _chooseSource() async {
+    if (_busy) return null;
+    if (!widget.car) {
+      final route = MaterialPageRoute<ProfileSourceChoice>(
+        builder: (_) => ProfileSourcePage(selectedKind: _selection.kind),
+      );
+      final choice = await Navigator.of(
+        context,
+      ).push<ProfileSourceChoice>(route);
+      await route.completed;
+      return choice;
+    }
+
+    ModalRoute<ProfileSourceChoice>? route;
+    final choice = await showUnavoChoiceDialog<ProfileSourceChoice>(
+      context,
       key: const ValueKey('profile-source-dialog'),
-      car: widget.car,
+      car: true,
+      useRootNavigator: false,
       child: Builder(
-        builder: (dialogContext) => Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            PanelButton(
-              key: const ValueKey('profile-gallery'),
-              label: '사진첩에서 선택',
-              icon: 'plus',
-              onPressed: _busy
-                  ? null
-                  : () async {
-                      final route = ModalRoute.of(dialogContext)!;
-                      Navigator.of(dialogContext).pop();
-                      // 퇴장 애니메이션과 모달 제거가 끝난 뒤 사진첩을 연다.
-                      await route.completed;
-                      if (screenContext.mounted) {
-                        await _pickPhoto(screenContext);
-                      }
-                    },
-            ),
-            const SizedBox(height: 24),
-            Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              alignment: WrapAlignment.center,
-              children: [
-                for (final kind in Avatar.mascotKinds)
-                  Semantics(
-                    label: '기본 아바타 ${Avatar.mascotKinds.indexOf(kind) + 1}',
-                    selected: _selection.kind == kind,
-                    button: true,
-                    child: IconButton(
-                      key: ValueKey('profile-$kind'),
-                      padding: EdgeInsets.zero,
-                      onPressed: _busy
-                          ? null
-                          : () {
-                              setState(() {
-                                _selection = Avatar(kind: kind);
-                                _photo = null;
-                                _changed = true;
-                              });
-                              Navigator.of(dialogContext).pop();
-                            },
-                      icon: MemberAvatar(
-                        member: _member(Avatar(kind: kind)),
-                        diameter: widget.car ? 96 : 72,
-                        borderColor: _selection.kind == kind
-                            ? UnavoColors.gold
-                            : Colors.transparent,
+        builder: (dialogContext) {
+          route = ModalRoute.of<ProfileSourceChoice>(dialogContext);
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              PanelButton(
+                key: const ValueKey('profile-gallery'),
+                label: '사진첩에서 선택',
+                icon: 'plus',
+                onPressed: () => Navigator.of(
+                  dialogContext,
+                ).pop<ProfileSourceChoice>(const ProfileSourceGallery()),
+              ),
+              const SizedBox(height: 24),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                alignment: WrapAlignment.center,
+                children: [
+                  for (final kind in Avatar.mascotKinds)
+                    Semantics(
+                      label: '기본 아바타 ${Avatar.mascotKinds.indexOf(kind) + 1}',
+                      selected: _selection.kind == kind,
+                      button: true,
+                      child: IconButton(
+                        key: ValueKey('profile-$kind'),
+                        padding: EdgeInsets.zero,
+                        onPressed: () => Navigator.of(
+                          dialogContext,
+                        ).pop<ProfileSourceChoice>(ProfileSourceMascot(kind)),
+                        icon: MemberAvatar(
+                          member: _member(Avatar(kind: kind)),
+                          diameter: 96,
+                          borderColor: _selection.kind == kind
+                              ? UnavoColors.gold
+                              : Colors.transparent,
+                        ),
                       ),
                     ),
-                  ),
-              ],
-            ),
-          ],
-        ),
+                ],
+              ),
+            ],
+          );
+        },
       ),
     );
+    // 퇴장 애니메이션과 모달 제거가 끝난 뒤 선택 결과를 처리한다.
+    await route?.completed;
+    return choice;
+  }
+
+  Future<void> _editSource(BuildContext screenContext) async {
+    final choice = await _chooseSource();
+    if (!mounted) return;
+    switch (choice) {
+      case ProfileSourceMascot(:final kind):
+        setState(() {
+          _selection = Avatar(kind: kind);
+          _photo = null;
+          _changed = true;
+        });
+      case ProfileSourceGallery():
+        if (screenContext.mounted) await _pickPhoto(screenContext);
+      case null:
+        break;
+    }
   }
 
   Future<void> _pickPhoto(BuildContext screenContext) async {
@@ -179,7 +201,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         key: const ValueKey('profile-edit'),
         padding: EdgeInsets.zero,
         iconSize: editDiameter,
-        onPressed: _busy ? null : () async => _showSourceDialog(context),
+        onPressed: _busy ? null : () async => _editSource(context),
         icon: SizedBox.square(
           dimension: editDiameter,
           child: Stack(

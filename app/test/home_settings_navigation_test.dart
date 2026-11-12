@@ -216,21 +216,77 @@ void main() {
           car ? 80 : 56,
         );
         expect(find.byKey(const ValueKey('profile-gallery')), findsNothing);
-        expect(find.byKey(const ValueKey('profile-edit-badge')), findsOneWidget);
-        await _tapKey(tester, 'profile-edit');
         expect(
-          find.byKey(const ValueKey('profile-source-dialog')),
+          find.byKey(const ValueKey('profile-edit-badge')),
           findsOneWidget,
         );
-        expect(find.byKey(const ValueKey('profile-gallery')), findsOneWidget);
-        expect(tester.getSize(find.byTooltip('닫기')).height, car ? 80 : 56);
-        expectPrimary(ProfileScreen);
-        await tester.tap(find.byTooltip('닫기'));
-        await _pumpNavigation(tester);
-        expect(
-          find.byKey(const ValueKey('profile-source-dialog')),
-          findsNothing,
+        final profileNavigator = Navigator.of(
+          tester.element(find.byType(ProfileScreen)),
         );
+        await _tapKey(tester, 'profile-edit');
+        final dialog = find.byKey(const ValueKey('profile-source-dialog'));
+        final sourcePage = find.byKey(const ValueKey('profile-source-page'));
+        expect(find.byKey(const ValueKey('profile-gallery')), findsOneWidget);
+        if (car) {
+          expect(dialog, findsOneWidget);
+          expect(sourcePage, findsNothing);
+          expect(tester.getSize(find.byTooltip('닫기')).height, 80);
+          final primaryNavigator = find.descendant(
+            of: find.byKey(const ValueKey('car-primary')),
+            matching: find.byType(Navigator),
+          );
+          expect(primaryNavigator, findsOneWidget);
+          final primaryRect = tester.getRect(primaryNavigator);
+          final dialogCard = find
+              .descendant(of: dialog, matching: find.byType(Material))
+              .first;
+          final centerX = tester.getCenter(dialogCard).dx;
+          expect(
+            centerX,
+            inInclusiveRange(primaryRect.left, primaryRect.right),
+          );
+          expect(centerX, closeTo(primaryRect.center.dx, .01));
+          // 페이지 라우트의 투명 배리어는 제외하고 모달의 색 있는 배리어만 본다.
+          final barrier = find.descendant(
+            of: primaryNavigator,
+            matching: find.byWidgetPredicate(
+              (w) => w is ModalBarrier && w.color != null,
+            ),
+          );
+          expect(barrier, findsOneWidget);
+          expect(tester.getRect(barrier), primaryRect);
+          expect(
+            tester.getSize(barrier).width,
+            lessThan(
+              tester.view.physicalSize.width / tester.view.devicePixelRatio,
+            ),
+          );
+          expect(
+            find.ancestor(of: dialog, matching: find.byType(Navigator)),
+            findsNWidgets(2),
+          );
+          expect(Navigator.of(tester.element(dialog)), same(profileNavigator));
+          expectPrimary(ProfileScreen);
+          await tester.tap(find.byTooltip('닫기'));
+          await _pumpNavigation(tester);
+        } else {
+          expect(sourcePage, findsOneWidget);
+          expect(dialog, findsNothing);
+          expect(
+            Navigator.of(tester.element(sourcePage)),
+            same(profileNavigator),
+          );
+          expect(
+            tester
+                .getSize(find.byKey(const ValueKey('profile-source-back')))
+                .height,
+            56,
+          );
+          await _tapKey(tester, 'profile-source-back');
+        }
+        expect(dialog, findsNothing);
+        expect(sourcePage, findsNothing);
+        expect(find.byType(ProfileScreen), findsOneWidget);
         expectPrimary(ProfileScreen);
         await _tapKey(tester, 'profile-back');
         expect(find.byType(SettingsScreen), findsOneWidget);
@@ -397,12 +453,28 @@ void main() {
     }, timeout: _timeout);
   }
 
-  testWidgets('차량 시스템 뒤로는 프로필·설정·로비 순으로 주 패널만 바꾼다', (tester) async {
+  testWidgets('차량 시스템 뒤로는 선택 모달·프로필·설정·로비 순으로 주 패널만 바꾼다', (tester) async {
     final services = await _mountApp(tester, car: true);
     try {
       final companion = tester.element(_secondary);
       await _tapKey(tester, 'open-settings');
       await _tapKey(tester, 'settings-profile');
+      await _tapKey(tester, 'profile-edit');
+      expect(
+        find.byKey(const ValueKey('profile-source-dialog')),
+        findsOneWidget,
+      );
+      await tester.binding.handlePopRoute();
+      await _pumpNavigation(tester);
+      expect(find.byKey(const ValueKey('profile-source-dialog')), findsNothing);
+      expect(find.byType(ProfileScreen), findsOneWidget);
+      expect(
+        tester
+            .widget<PanelButton>(find.byKey(const ValueKey('profile-save')))
+            .onPressed,
+        isNull,
+      );
+      expect(tester.element(_secondary), same(companion));
       await tester.binding.handlePopRoute();
       await _pumpNavigation(tester);
       expect(find.byType(SettingsScreen), findsOneWidget);

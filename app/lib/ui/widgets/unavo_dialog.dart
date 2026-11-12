@@ -74,15 +74,17 @@ Future<void> showNoticeDialog(
   );
 }
 
-Future<void> showUnavoChoiceDialog(
+Future<T?> showUnavoChoiceDialog<T>(
   BuildContext context, {
   Key? key,
   required Widget child,
   required bool car,
+  bool useRootNavigator = true,
 }) async {
-  await showDialog<void>(
+  return await showDialog<T>(
     context: context,
     barrierDismissible: true,
+    useRootNavigator: useRootNavigator,
     builder: (context) => ControlScale(
       car: car,
       child: _DialogCard(
