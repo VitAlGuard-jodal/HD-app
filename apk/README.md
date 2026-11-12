@@ -7,7 +7,7 @@
 | 파일 | `UnaVo_Unavo_release.apk` (134,308,544 바이트) |
 | 위치 | <https://github.com/VitAlGuard-jodal/HD-app/releases/tag/v0.1.0> |
 | SHA-256 | `af5d64b52f00c8051a60aa235a87628750986097689854ac267d304e80479a52` |
-| 앱 소스 기준 커밋 | `258035d` (이후 커밋은 문서만 바꿈) |
+| 앱 소스 기준 커밋 | `8c40757` (이후 커밋은 문서·무시 규칙만 바꿈) |
 | 빌드 | `flutter build apk --release` — release 키 서명(APK Signature Scheme v2), arm64-v8a·x86_64, 공개 테스트 서버 기본 주소 |
 | 서명 인증서 | `CN=UnaVo, OU=UnaVo, O=UnaVo, C=KR` |
 | 패키지 | `kr.modumoa.hdapp` 0.1.0 (versionCode 1), minSdk 28·targetSdk 34 |
