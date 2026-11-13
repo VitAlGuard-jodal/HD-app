@@ -117,13 +117,29 @@ class UnavoApplication : Application() {
             communicationDevices().any { routeName(it) == "headphones" } -> "headphones"
             else -> "receiver"
         }
-        val max = manager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-        val volume = manager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
+        val volume = if (isAutomotive) readCallVolume() else null
         return mapOf("route" to (route ?: "speaker"), "available" to availableOutputs(),
-            "callVolume" to if (isAutomotive && max > 0) (volume * 100.0 / max).roundToInt() else null,
+            "callVolume" to volume, "callVolumeZeroConfirmed" to (volume == 0),
             "volumeWritable" to volumeWritable, "interrupted" to micRouter.state.value.isInterrupted,
             "error" to outputError)
     }
+
+    private fun readCallVolume(): Int? = runCatching {
+        val stream = AudioManager.STREAM_VOICE_CALL
+        val min = manager.getStreamMinVolume(stream)
+        val max = manager.getStreamMaxVolume(stream)
+        val volume = manager.getStreamVolume(stream)
+        val muted = manager.isStreamMute(stream)
+        // A transient 0 below a nonzero minimum (Pleos: 1..5) is unknown,
+        // not evidence that the driver muted CALL. Do not persist it in Dart.
+        when {
+            max <= 0 || min < 0 || min > max || volume < 0 || volume > max -> null
+            muted -> 0
+            volume < min -> null
+            volume == 0 -> 0 // valid zero on a stream whose minimum is zero
+            else -> (volume * 100.0 / max).roundToInt().coerceIn(1, 100)
+        }
+    }.getOrNull()
 
     fun publishOutput() { outputState.value = getOutputRoute() }
 

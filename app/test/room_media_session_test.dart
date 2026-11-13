@@ -686,6 +686,141 @@ void main() {
     expect(f.mic.systemVolumeWrites, 0);
     await f.dispose();
   });
+
+  for (final writable in [true, false]) {
+    test('차량에 저장된 0%는 입장의 실제 시스템 값으로 회복한다 (쓰기 $writable)', () async {
+      final f = await _Fixture.create(volume: 0, automotive: true);
+      try {
+        // Entry must query again, even if a background snapshot was unknown.
+        f.mic.systemVolumeWritable = writable;
+        f.mic.onRefreshOutput = () => f.mic.systemCallVolume = 80;
+        expect(f.session.callVolume, greaterThan(0));
+        await f.open();
+        await pumpEventQueue();
+        expect(f.session.callVolume, 80);
+        expect(f.store.callVolume, 80);
+        expect(f.media.volume, .8);
+        expect(f.media.volumes, isNot(contains(0)));
+        expect(f.mic.systemVolumeWrites, 0);
+      } finally {
+        await f.dispose();
+      }
+    });
+  }
+
+  test('차량의 알 수 없는 음량은 0으로 적용하지 않고 뒤늦은 실제 값으로 회복한다', () async {
+    final f = await _Fixture.create(volume: 0, automotive: true);
+    try {
+      await f.open();
+      await pumpEventQueue();
+      expect(f.session.callVolume, greaterThan(0));
+      expect(f.media.volume, greaterThan(0));
+      f.mic.systemCallVolume = 60;
+      f.mic.changed();
+      await pumpEventQueue();
+      expect(f.session.callVolume, 60);
+      expect(f.store.callVolume, 60);
+      expect(f.media.volume, .6);
+      f.mic.systemCallVolume = null;
+      f.mic.audioInterrupted = true;
+      f.mic.changed();
+      await pumpEventQueue();
+      f.mic.audioInterrupted = false;
+      f.mic.changed();
+      await pumpEventQueue();
+      expect(f.session.callVolume, 60);
+      expect(f.store.callVolume, 60);
+      expect(f.media.volumes, isNot(contains(0)));
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  test('차량 0% 요청은 신선한 시스템 값으로 검증하고 실제 0일 때만 저장한다', () async {
+    final f = await _Fixture.create(volume: 35, automotive: true);
+    try {
+      await f.open();
+      f.mic.systemCallVolume = 0; // stale snapshot before foreground recovery
+      f.mic.onRefreshOutput = () => f.mic.systemCallVolume = 100;
+      await f.session.setCallVolume(0);
+      await pumpEventQueue();
+      expect(f.session.callVolume, 100);
+      expect(f.store.callVolume, 100);
+      expect(f.media.volumes, isNot(contains(0)));
+      f.mic.onRefreshOutput = () => f.mic.systemCallVolume = null;
+      await f.session.setCallVolume(-1);
+      expect(f.session.callVolume, 100);
+      expect(f.store.callVolume, 100);
+      f.mic.onRefreshOutput = () => f.mic.systemCallVolume = 0;
+      await f.session.setCallVolume(0);
+      expect(f.session.callVolume, 0);
+      expect(f.store.callVolume, 0);
+      expect(f.media.volume, 0);
+      f.mic.systemCallVolume = 40;
+      f.mic.changed();
+      await pumpEventQueue();
+      expect(f.session.callVolume, 40);
+      expect(f.store.callVolume, 40);
+      expect(f.media.volume, .4);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  test('다른 기기의 수신 차단 0은 음량에 저장되지 않고 다시 참여하면 복원된다', () async {
+    final f = await _Fixture.create(volume: 65, automotive: true);
+    try {
+      f.mic.systemCallVolume = 100;
+      await f.open();
+      f.api.events.add(const DeviceReplaced());
+      await pumpEventQueue();
+      expect(f.media.volume, 0);
+      expect(f.session.callVolume, 65);
+      expect(f.store.callVolume, 65);
+      await f.session.setCallVolume(0);
+      expect(f.media.volume, 0);
+      expect(f.store.callVolume, 100);
+      await f.session.takeBack();
+      f.api.events.add(Hello('alice', f.api.members));
+      await pumpEventQueue();
+      expect(f.session.deviceReplaced, isFalse);
+      expect(f.session.callVolume, 100);
+      expect(f.media.volume, 1);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  test('음량 쓰기를 기다리는 동안 도착한 시스템 회복도 마지막 0을 덮어쓴다', () async {
+    final f = await _Fixture.create(volume: 35, automotive: true);
+    final gate = Completer<void>();
+    try {
+      await f.open();
+      f.mic.onRefreshOutput = () => f.mic.systemCallVolume = 0;
+      f.media.volumeGate = gate.future;
+      final setting = f.session.setCallVolume(0);
+      await pumpEventQueue();
+      f.mic.systemCallVolume = 80;
+      f.mic.changed();
+      gate.complete();
+      await setting;
+      await pumpEventQueue();
+      expect(f.session.callVolume, 80);
+      expect(f.store.callVolume, 80);
+      expect(f.media.volume, .8);
+      f.mic.onRefreshOutput = () => f.mic.systemCallVolume = 0;
+      await f.session.setCallVolume(0);
+      await pumpEventQueue();
+      f.mic.systemCallVolume = null;
+      f.mic.changed();
+      await pumpEventQueue();
+      expect(f.session.callVolume, greaterThan(0));
+      expect(f.media.volume, greaterThan(0));
+    } finally {
+      if (!gate.isCompleted) gate.complete();
+      await f.dispose();
+    }
+  });
 }
 
 /// A timer-dependent or incomplete Future fails an assertion instead of
@@ -707,9 +842,10 @@ T _microtasksOnly<T>(FakeAsync clock, Future<T> future) {
 }
 
 class _Fixture {
-  _Fixture(this.store) {
+  _Fixture(this.store, {bool automotive = false}) {
     api = _Api(store, order);
     mic = _Mic(store, order);
+    if (automotive) mic.state = const MicState(mode: MicMode.car);
     calls = _Calls(order);
     media = _Media(order);
     session = RoomSession(
@@ -723,13 +859,17 @@ class _Fixture {
   static Future<_Fixture> create({
     String handle = 'alice',
     int volume = 100,
+    bool automotive = false,
   }) async {
     SharedPreferences.setMockInitialValues({
       'token': 'test',
       'handle': handle,
       'callVolume': volume,
     });
-    return _Fixture(SessionStore(await SharedPreferences.getInstance()));
+    return _Fixture(
+      SessionStore(await SharedPreferences.getInstance()),
+      automotive: automotive,
+    );
   }
 
   final SessionStore store;
@@ -840,6 +980,7 @@ class _Mic extends MicRouter {
   }
   final List<String> order;
   int systemVolumeWrites = 0;
+  void Function()? onRefreshOutput;
   void changed() => notifyListeners();
   @override
   Future<void> refreshPermissions() async {}
@@ -851,7 +992,11 @@ class _Mic extends MicRouter {
   }
 
   @override
-  Future<void> refreshOutputRoute() async {}
+  Future<void> refreshOutputRoute() async {
+    onRefreshOutput?.call();
+    changed();
+  }
+
   @override
   Future<void> applyOutputRoute() async {
     order.add('speaker:true');
@@ -899,6 +1044,8 @@ class _Media extends NoopMediaEngine {
   bool failJoin = false, muted = false, interrupted = false;
   int joins = 0, leaves = 0;
   double volume = 1;
+  final volumes = <double>[];
+  Future<void>? volumeGate;
   void speakLocally(bool speaking) => localSpeaking?.call(speaking);
 
   void changePeers(Map<String, MeshPeerState> states) {
@@ -947,7 +1094,9 @@ class _Media extends NoopMediaEngine {
 
   @override
   Future<void> setVolume(double value) async {
+    volumes.add(value);
     volume = value;
+    if (volumeGate != null) await volumeGate;
   }
 
   @override

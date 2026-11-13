@@ -139,6 +139,7 @@ class MicRouter extends ChangeNotifier {
     _routeSubscription = routeEvents.receiveBroadcastStream().listen(
       (dynamic event) => _readOutput(Map<Object?, Object?>.from(event as Map)),
       onError: (Object error) {
+        systemCallVolume = null;
         outputError = error is PlatformException
             ? error.message
             : error.toString();
@@ -159,7 +160,19 @@ class MicRouter extends ChangeNotifier {
     if (snapshot['available'] case final List<dynamic> routes) {
       availableOutputRoutes = routes.map(_route).toSet().toList();
     }
-    systemCallVolume = (snapshot['callVolume'] as num?)?.round().clamp(0, 100);
+    final volume = snapshot['callVolume'];
+    // Missing/invalid route snapshots and focus transitions are not a mute.
+    // Android confirms zero only from a valid stream range or an explicit mute.
+    systemCallVolume =
+        volume is num &&
+            volume.isFinite &&
+            volume >= 0 &&
+            volume <= 100 &&
+            (volume > 0 ||
+                (snapshot['callVolumeZeroConfirmed'] == true &&
+                    snapshot['interrupted'] != true))
+        ? (volume > 0 ? volume.round().clamp(1, 100) : 0)
+        : null;
     systemVolumeWritable = snapshot['volumeWritable'] as bool? ?? true;
     audioInterrupted = snapshot['interrupted'] as bool? ?? false;
     resumeFailed = snapshot['resumeFailed'] as bool? ?? false;
@@ -170,10 +183,21 @@ class MicRouter extends ChangeNotifier {
 
   Future<void> refreshOutputRoute() async {
     if (!supported) return;
-    final snapshot = await channel.invokeMapMethod<Object?, Object?>(
-      'getOutputRoute',
-    );
-    if (snapshot != null) _readOutput(snapshot);
+    try {
+      final snapshot = await channel.invokeMapMethod<Object?, Object?>(
+        'getOutputRoute',
+      );
+      if (snapshot != null) {
+        _readOutput(snapshot);
+      } else {
+        systemCallVolume = null;
+        notifyListeners();
+      }
+    } catch (_) {
+      systemCallVolume = null;
+      notifyListeners();
+      rethrow;
+    }
   }
 
   Future<void> setOutputRoute(OutputRoute route) async {

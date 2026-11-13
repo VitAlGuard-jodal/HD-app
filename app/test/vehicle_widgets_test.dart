@@ -40,6 +40,7 @@ void main() {
       final semantics = tester.ensureSemantics();
       try {
         await services.openRoom(tester);
+        services.rooms.mediaConnection = MediaConnectionState.connected;
         await tester.pumpWidget(
           UnavoAppearance(
             controller: appearance,
@@ -62,6 +63,13 @@ void main() {
         );
         final toggle = find.byKey(const ValueKey('room-ready-toggle'));
         expect(tester.widget<PanelButton>(toggle).iconOnly, isTrue);
+        final connection = find.byKey(const ValueKey('room-connection-status'));
+        expect(tester.widget<StatusChip>(connection).icon, 'wave');
+        expect(
+          tester.widget<StatusChip>(connection).icon,
+          isNot(tester.widget<PanelButton>(toggle).icon),
+        );
+        expect(find.bySemanticsLabel('음성 수신 준비됨'), findsOneWidget);
         _expectReadinessLayout(
           tester,
           car: mode == DeviceMode.car,
@@ -216,9 +224,8 @@ void main() {
         }
         door(1);
         await pumpConsentUi(tester);
-        final message =
-            '${wasReady ? '준비가 취소됐습니다. ' : ''}'
-            '내리는 중이라 차량 마이크와 위치 보내기를 멈췄습니다';
+        const exitMessage = '내리는 중이라 차량 마이크와 위치 보내기를 멈췄습니다';
+        final message = wasReady ? '준비가 취소됐습니다' : exitMessage;
         final notice = find.text(message);
         expect(notice, findsOneWidget);
         final resume = find.byKey(const ValueKey('room-exit-resume'));
@@ -300,6 +307,9 @@ void main() {
         expect(tester.takeException(), isNull);
         door(0);
         await pumpConsentUi(tester);
+        await tester.pump(const Duration(seconds: 7));
+        expect(find.text(exitMessage), findsOneWidget);
+        expect(find.text('준비가 취소됐습니다'), findsNothing);
         expect(resume, findsOneWidget);
         await tester.tap(resume);
         await pumpConsentUi(tester);
@@ -314,6 +324,130 @@ void main() {
       }
     }, timeout: const Timeout(Duration(seconds: 30)));
   }
+
+  testWidgets('준비 취소 안내는 6초 뒤 사라지고 새 안내의 수명과 하차 상태는 보존한다', (tester) async {
+    tester.view.physicalSize = const Size(1706, 1206);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final appearance = AppearanceController();
+    addTearDown(appearance.dispose);
+    final events = StreamController<Object?>.broadcast();
+    final services = await ConsentTestServices.create(
+      tester,
+      mode: DeviceMode.car,
+      vehicleEvents: events.stream,
+    );
+    void vehicle({bool parked = true, int door = 0}) => events.add({
+      'available': true,
+      'parked': parked,
+      'doors': {'ROW_1_LEFT': door},
+      'exitDoor': 'ROW_1_LEFT',
+    });
+    try {
+      await services.openRoom(tester);
+      await tester.pumpWidget(
+        UnavoAppearance(
+          controller: appearance,
+          child: MaterialApp(
+            builder: testIconBuilder,
+            theme: unavoTheme(Brightness.dark),
+            home: RoomScreen(services: services, mode: DeviceMode.car),
+          ),
+        ),
+      );
+      vehicle();
+      await pumpConsentUi(tester);
+      final toggle = find.byKey(const ValueKey('room-ready-toggle'));
+      final banner = find.byKey(const ValueKey('room-vehicle-notice'));
+      await tester.tap(toggle);
+      await pumpConsentUi(tester);
+      vehicle(parked: false);
+      await pumpConsentUi(tester);
+      expect(find.text('준비가 취소됐습니다'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+      expect(banner, findsOneWidget);
+      await tester.pump(const Duration(seconds: 1));
+      expect(banner, findsNothing);
+
+      // A newer blocked-readiness notice gets its own full lifetime.
+      vehicle();
+      await pumpConsentUi(tester);
+      await tester.tap(toggle);
+      await pumpConsentUi(tester);
+      vehicle(parked: false);
+      await pumpConsentUi(tester);
+      await tester.pump(const Duration(seconds: 4));
+      await tester.tap(toggle);
+      await pumpConsentUi(tester);
+      expect(find.text('P단에서 준비할 수 있습니다'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('P단에서 준비할 수 있습니다'), findsOneWidget);
+
+      // Exit protection starts without shortening the active notice's lifetime.
+      vehicle(door: 1);
+      await pumpConsentUi(tester);
+      final resume = find.byKey(const ValueKey('room-exit-resume'));
+      expect(find.text('P단에서 준비할 수 있습니다'), findsOneWidget);
+      expect(services.rooms.exitProtected, isTrue);
+      expect(services.rooms.muted, isTrue);
+      expect(tester.widget<PanelButton>(resume).iconOnly, isTrue);
+      expect(tester.widget<PanelButton>(resume).icon, 'player-play');
+      expect(tester.widget<PanelButton>(resume).onPressed, isNotNull);
+      vehicle();
+      await pumpConsentUi(tester);
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('P단에서 준비할 수 있습니다'), findsOneWidget);
+      expect(tester.widget<PanelButton>(resume).onPressed, isNotNull);
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('P단에서 준비할 수 있습니다'), findsNothing);
+      expect(find.text('내리는 중이라 차량 마이크와 위치 보내기를 멈췄습니다'), findsOneWidget);
+      expect(services.rooms.exitProtected, isTrue);
+      expect(services.rooms.muted, isTrue);
+
+      // Resume remains usable while a new readiness refusal is being shown.
+      vehicle(door: 1);
+      await pumpConsentUi(tester);
+      await tester.tap(toggle);
+      await pumpConsentUi(tester);
+      expect(find.text('문이 열려 있습니다'), findsOneWidget);
+      expect(tester.widget<PanelButton>(resume).onPressed, isNotNull);
+      await tester.tap(resume);
+      await pumpConsentUi(tester);
+      expect(banner, findsNothing);
+      expect(services.rooms.exitProtected, isFalse);
+      expect(services.rooms.muted, isFalse);
+
+      // Device replacement also preserves the notice until expiry and keeps
+      // its own action available throughout.
+      vehicle(parked: false);
+      await pumpConsentUi(tester);
+      await tester.tap(toggle);
+      await pumpConsentUi(tester);
+      services.api.events.add(const DeviceReplaced());
+      await pumpConsentUi(tester);
+      final takeBack = find.byKey(const ValueKey('room-take-back'));
+      expect(find.text('P단에서 준비할 수 있습니다'), findsOneWidget);
+      expect(services.rooms.deviceReplaced, isTrue);
+      expect(tester.widget<PanelButton>(takeBack).iconOnly, isTrue);
+      expect(tester.widget<PanelButton>(takeBack).onPressed, isNotNull);
+      await tester.pump(const Duration(seconds: 5));
+      expect(find.text('P단에서 준비할 수 있습니다'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('P단에서 준비할 수 있습니다'), findsNothing);
+      expect(
+        find.descendant(of: banner, matching: find.text('다른 기기에서 이어받았습니다')),
+        findsOneWidget,
+      );
+      expect(services.rooms.deviceReplaced, isTrue);
+      expect(tester.widget<PanelButton>(takeBack).onPressed, isNotNull);
+      expect(tester.takeException(), isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await services.finish(tester);
+      await events.close();
+    }
+  });
 
   testWidgets('차량 설정의 세 보호 동작은 아이콘으로 선택해 기기에 저장한다', (tester) async {
     tester.view.physicalSize = const Size(1706, 1206);

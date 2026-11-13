@@ -30,6 +30,14 @@ void main() {
         expect(f.room.selfReady, mode == DeviceMode.phone);
         if (mode == DeviceMode.car) {
           expect(f.room.vehicleNotice, '문이 열려 있습니다');
+          expect(f.room.exitProtected, isTrue);
+          expect(f.room.muted, isTrue);
+          await tester.pump(const Duration(milliseconds: 5999));
+          expect(f.room.vehicleNotice, '문이 열려 있습니다');
+          await tester.pump(const Duration(milliseconds: 1));
+          expect(f.room.vehicleNotice, '내리는 중이라 차량 마이크와 위치 보내기를 멈췄습니다');
+          expect(f.room.exitProtected, isTrue);
+          expect(f.room.muted, isTrue);
           await f.update(tester, parked: false);
           await completeConsentFuture(tester, f.room.toggleReady());
           expect(f.room.vehicleNotice, 'P단에서 준비할 수 있습니다');

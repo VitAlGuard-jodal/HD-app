@@ -10,6 +10,7 @@ import { issueToken, revokeToken, tokenHash } from "../../src/auth.ts";
 import { openDb } from "../../src/db.ts";
 import { LOCATION_TRAIL_LIMIT, LOCATION_DISCONNECT_GRACE_MS, LOCATION_STALE_MS, RoomLocationStore } from "../../src/locations.ts";
 import { RoomEventHub } from "../../src/rooms.ts";
+import { RoomReadyStore } from "../../src/ready.ts";
 import { createRoom, createUser, findRoomByCode, isRoomMember, joinRoom, leaveRoom } from "../../src/store.ts";
 
 const sample = { handle: "alice", stream: "0123456789abcdef", lat: 37.5, lng: 127, acc: 3, speed: 2, heading: 90, at: 1000, seq: 0 };
@@ -43,7 +44,8 @@ function fixture(t: TestContext, withFollow = true) {
   const db = openDb(":memory:");
   const hub = new RoomEventHub();
   const locations = new RoomLocationStore();
-  const app = createApp({ db, hub, locations });
+  const readiness = new RoomReadyStore();
+  const app = createApp({ db, hub, locations, readiness });
   const users = ["alice", "bob", "outsider"].map((handle) =>
     createUser(db, { handle, displayName: handle, passwordHash: "unused" })!);
   const tokens = new Map(users.map((user) => [user.handle, issueToken(db, user.id)]));
@@ -86,7 +88,7 @@ function fixture(t: TestContext, withFollow = true) {
     const raw = Buffer.concat(response.chunks).toString();
     return { status: response.statusCode, body: raw ? JSON.parse(raw) : undefined, response };
   }
-  return { db, hub, locations, room, users, send, api, app, tokens };
+  return { db, hub, locations, readiness, room, users, send, api, app, tokens };
 }
 
 
@@ -558,6 +560,84 @@ test("F4 비멤버 leave 403, 현재·전 멤버 반복 leave 204와 빈 방 삭
   assert.equal(hub.subscriberCount(room.code), 0);
   assert.equal(hub.hasSender(room.code, "alice"), false);
   assert.equal(hub.hasSender(room.code, "bob"), false);
+});
+
+test("D5 연결·송신 기기가 전혀 없는 계정도 join 없이 leave할 수 있다", async (t) => {
+  const { api, db, room, users, hub } = fixture(t, false);
+  hub.forgetSender(room.code, "alice");
+  hub.forgetSender(room.code, "bob");
+  assert.equal(hub.subscriberCount(room.code), 0);
+  assert.equal((await api("POST", "/leave", "outsider")).status, 403);
+  assert.equal((await api("POST", "/leave", "bob")).status, 204);
+  assert.equal(isRoomMember(db, room.id, users[1].id), false);
+  assert.equal(isRoomMember(db, room.id, users[0].id), true);
+  assert.equal((await api("POST", "/leave", "bob")).status, 204);
+  assert.equal((await api("POST", "/leave", "alice")).status, 204);
+  assert.equal(findRoomByCode(db, room.code), undefined);
+});
+
+test("D5 송신 기기가 없는 현재 멤버의 leave는 204와 모든 잔여 상태 정리를 수행한다", async (t) => {
+  const { api, db, room, users, locations, readiness, hub, send } = fixture(t);
+  send("GET", `/v1/rooms/${room.code}/events`, "alice");
+  const bob = send("GET", `/v1/rooms/${room.code}/events`, "bob");
+  await api("POST", "/location", "alice", sample);
+  await api("PUT", "/ready", "alice", { ready: true });
+  hub.forgetSender(room.code, "alice");
+  hub.queueSignal(room.code, "alice", "signal", { from: "bob", payload: "to-left" });
+  hub.queueSignal(room.code, "bob", "signal", { from: "alice", payload: "from-left" });
+  assert.equal(hub.hasSender(room.code, "alice"), false);
+  assert.equal((await api("POST", "/leave", "alice")).status, 204);
+  assert.equal(isRoomMember(db, room.id, users[0].id), false);
+  assert.equal(readiness.isReady(room.code, "alice"), false);
+  assert.deepEqual(locations.snapshot(room.code), { positions: [], trails: {} });
+  assert.equal(locations.targetOf(room.code, "bob"), null);
+  assert.equal(locations.disconnectedAt(room.code, "alice"), undefined);
+  assert.equal(hub.subscriberCount(room.code, "alice"), 0);
+  assert.equal(hub.hasSender(room.code, "alice"), false);
+  assert.equal(hub.replaySignals(room.code, "alice", () => assert.fail("recipient backlog survived")), 0);
+  assert.equal(hub.replaySignals(room.code, "bob", () => assert.fail("sender backlog survived")), 0);
+  assert.ok(bob.events().some((event) => event.name === "member-left" && event.data.handle === "alice"));
+  assert.equal((await api("POST", "/leave", "alice")).status, 204);
+  // A last member without an owner also removes the room itself.
+  hub.forgetSender(room.code, "bob");
+  assert.equal((await api("POST", "/leave", "bob")).status, 204);
+  assert.equal(findRoomByCode(db, room.code), undefined);
+  assert.equal(hub.subscriberCount(room.code), 0);
+  assert.equal(readiness.revision(room.code), 0);
+});
+
+test("D5 다른 기기가 송신자이면 leave는 409이며 현재 상태를 보존한다", async (t) => {
+  const { api, db, room, users, locations, readiness, hub, tokens } = fixture(t);
+  hub.claim(room.code, "alice", "other-device", tokenHash(tokens.get("alice")!));
+  readiness.set(room.code, "alice", true);
+  locations.accept(room.code, sample);
+  const result = await api("POST", "/leave", "alice");
+  assert.equal(result.status, 409);
+  assert.equal(result.body.error.code, "DEVICE_REPLACED");
+  assert.equal(isRoomMember(db, room.id, users[0].id), true);
+  assert.equal(readiness.isReady(room.code, "alice"), true);
+  assert.equal(locations.position(room.code, "alice")?.seq, sample.seq);
+  assert.equal(hub.isSender(room.code, "alice", "other-device"), true);
+});
+
+test("D5 leave 본문을 기다리는 동안 빈 자리를 다른 기기가 얻으면 409다", async (t) => {
+  const { app, db, room, users, hub, tokens } = fixture(t, false);
+  hub.forgetSender(room.code, "alice");
+  const request = new IncomingMessage(new Socket());
+  request.method = "POST";
+  request.url = `/v1/rooms/${room.code}/leave`;
+  request.headers = { authorization: `Bearer ${tokens.get("alice")}`, "content-type": "application/json" };
+  const response = new Response();
+  t.after(() => response.destroy());
+  app(request, response as unknown as ServerResponse);
+  hub.claim(room.code, "alice", "new-device", tokenHash(tokens.get("alice")!));
+  request.push("{}");
+  request.push(null);
+  await new Promise<void>((resolve) => response.once("finish", resolve));
+  assert.equal(response.statusCode, 409);
+  assert.equal(JSON.parse(Buffer.concat(response.chunks).toString()).error.code, "DEVICE_REPLACED");
+  assert.equal(isRoomMember(db, room.id, users[0].id), true);
+  assert.equal(hub.isSender(room.code, "alice", "new-device"), true);
 });
 
 test("생성·조회·me의 leader는 같은 handle이다", async (t) => {

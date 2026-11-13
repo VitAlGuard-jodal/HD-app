@@ -116,7 +116,7 @@ class RoomSession extends ChangeNotifier {
     };
     _lastAudioState = _audioState();
     micRouter.addListener(_audioChanged);
-    callVolume = store.callVolume;
+    _callVolume = store.callVolume;
     store.addListener(_profileChanged);
     callService.addListener(_nativeCallChanged);
     mediaEngine.localSpeaking = _setLocalSpeaking;
@@ -182,7 +182,8 @@ class RoomSession extends ChangeNotifier {
       _cancelReadyPending = _readyRequested = _readyCancelled = false;
       _wasExiting = _exitProtected = _exitStopsLocation = _resumeLocation =
           false;
-      vehicleNotice = null;
+      _exitNotice = null;
+      _clearTransientVehicleNotice();
       _vehicleVoice.clear();
       ++_membersGeneration;
       _displayNames.clear();
@@ -205,7 +206,33 @@ class RoomSession extends ChangeNotifier {
   bool _resumeLocation = false;
   bool get exitProtected => _exitProtected;
   Future<void> _exitStopping = Future<void>.value();
-  String? vehicleNotice;
+  String? _exitNotice, _transientVehicleNotice;
+  Timer? _vehicleNoticeTimer;
+  // Feedback keeps its six-second lifetime while protection and its actions
+  // remain active independently of the displayed message.
+  String? get vehicleNotice =>
+      _transientVehicleNotice ??
+      (_deviceReplaced
+          ? '다른 기기에서 이어받았습니다'
+          : _exitProtected
+          ? _exitNotice
+          : null);
+
+  void _clearTransientVehicleNotice() {
+    _vehicleNoticeTimer?.cancel();
+    _vehicleNoticeTimer = null;
+    _transientVehicleNotice = null;
+  }
+
+  void _showTransientVehicleNotice(String message) {
+    _clearTransientVehicleNotice();
+    _transientVehicleNotice = message;
+    _vehicleNoticeTimer = Timer(const Duration(seconds: 6), () {
+      _clearTransientVehicleNotice();
+      _notify();
+    });
+  }
+
   bool _readyRequested = false,
       _readyCancelled = false,
       _cancelReadyPending = false;
@@ -226,13 +253,13 @@ class RoomSession extends ChangeNotifier {
     final ready = !selfReady;
     final reason = _carMode ? vehicle.readyBlockedReason : null;
     if (ready && reason != null) {
-      vehicleNotice = reason;
+      _showTransientVehicleNotice(reason);
       _notify();
       return;
     }
     _readyRequested = ready;
     _readyCancelled = false;
-    vehicleNotice = null;
+    _clearTransientVehicleNotice();
     if (ready) _vehicleVoice.clear();
     await _writeReady(ready);
   }
@@ -304,7 +331,7 @@ class RoomSession extends ChangeNotifier {
       ],
     );
     _cancelReadyPending = true;
-    vehicleNotice = '준비가 취소됐습니다';
+    _showTransientVehicleNotice('준비가 취소됐습니다');
     _vehicleVoice.announceOnce(
       room: state.code!,
       key: 'ready-cancelled',
@@ -359,10 +386,9 @@ class RoomSession extends ChangeNotifier {
           _cancelStarts();
           _exitStopping = locationShare.stop();
         }
-        vehicleNotice = _exitStopsLocation
+        _exitNotice = _exitStopsLocation
             ? '내리는 중이라 차량 마이크와 위치 보내기를 멈췄습니다'
             : '내리는 중이라 차량 마이크를 껐습니다';
-        if (cancelledReady) vehicleNotice = '준비가 취소됐습니다. $vehicleNotice';
       }
     }
     _wasExiting = exiting;
@@ -377,7 +403,8 @@ class RoomSession extends ChangeNotifier {
       return;
     final resumeLocation = _resumeLocation;
     _exitProtected = _exitStopsLocation = _resumeLocation = false;
-    vehicleNotice = null;
+    _exitNotice = null;
+    _clearTransientVehicleNotice();
     setMuted(false);
     if (resumeLocation) {
       await locationShare.start(
@@ -412,7 +439,6 @@ class RoomSession extends ChangeNotifier {
       error: null,
       members: [for (final member in state.members) member.withReady(false, 0)],
     );
-    vehicleNotice = '다른 기기에서 이어받았습니다';
     mediaEngine.setMuted(true);
     mediaEngine.setInterrupted(true);
     final silencing = mediaEngine.setVolume(0).catchError((Object _) {});
@@ -442,7 +468,7 @@ class RoomSession extends ChangeNotifier {
       _deviceCleanup = null;
       _readyCancelled = false;
       muted = _exitProtected;
-      vehicleNotice = null;
+      _clearTransientVehicleNotice();
       _wantCall = true;
       retryAttempts = 0;
       permissionDenied = false;
@@ -584,7 +610,12 @@ class RoomSession extends ChangeNotifier {
   CallState get call => callService.state;
   bool muted = false;
   bool speakerphone = true;
-  late int callVolume;
+  late int _callVolume;
+  // Keep an unverified stored zero pending until a fresh system reading can
+  // repair it. The UI/playback must never treat an unknown car value as mute.
+  int get callVolume => _validatedCallVolume(_callVolume);
+  int _validatedCallVolume(int value) =>
+      _carMode && value == 0 ? micRouter.systemCallVolume ?? 100 : value;
   bool permissionDenied = false;
   int retryAttempts = 0;
   Timer? _retryTimer;
@@ -1751,14 +1782,17 @@ class RoomSession extends ChangeNotifier {
       }
       await micRouter.refreshOutputRoute();
       if (!current()) return;
-      if (carVolumeSlider &&
-          micRouter.isAutomotive &&
-          micRouter.systemVolumeWritable &&
-          micRouter.systemCallVolume != null) {
-        callVolume = micRouter.systemCallVolume!;
-        _lastSystemVolume = callVolume;
-        await store.setCallVolume(callVolume);
+      await _volumeQueue;
+      if (!current()) return;
+      final systemVolume = micRouter.systemCallVolume;
+      if (_carMode &&
+          systemVolume != null &&
+          (carVolumeSlider || _callVolume == 0)) {
+        _callVolume = systemVolume;
+        _lastSystemVolume = systemVolume;
+        await store.setCallVolume(systemVolume);
       }
+      if (!current()) return;
       mediaEngine.setMuted(muted);
       mediaEngine.setInterrupted(micRouter.audioInterrupted);
       await mediaEngine.setVolume(callVolume / 100);
@@ -1844,25 +1878,72 @@ class RoomSession extends ChangeNotifier {
   }
 
   Future<void> setCallVolume(int value) {
-    callVolume = value.clamp(0, 100);
-    _notify();
-    final volume = callVolume;
+    final requested = value.clamp(0, 100);
+    if (!_carMode) {
+      _callVolume = requested;
+      _notify();
+    }
     final operation = _volumeQueue.then((_) async {
       if (_disposed) return;
       _settingVolume = true;
       try {
-        await mediaEngine.setVolume(_deviceReplaced ? 0 : volume / 100);
-        if (carVolumeSlider && micRouter.isAutomotive) {
-          await micRouter.setSystemCallVolume(volume);
+        final previous = callVolume;
+        if (_carMode && (requested == 0 || carVolumeSlider)) {
+          await micRouter.refreshOutputRoute();
         }
+        if (_disposed) return;
+        if (carVolumeSlider && micRouter.isAutomotive) {
+          await micRouter.setSystemCallVolume(requested);
+        }
+        if (_disposed) return;
+        // A native write may clamp 0 to the stream minimum or be denied.
+        // Readback, not the requested number, is authoritative in that mode.
+        final volume = _carMode && (requested == 0 || carVolumeSlider)
+            ? micRouter.systemCallVolume ?? (previous > 0 ? previous : 100)
+            : requested;
+        _callVolume = volume;
         _lastSystemVolume = micRouter.systemCallVolume;
-        await store.setCallVolume(volume);
+        _notify();
+        await _applyCallVolume();
       } finally {
         _settingVolume = false;
+        // Route/focus events can arrive while the native/media write awaits.
+        // Reconcile those readings even if no further event will be emitted.
+        _syncSystemCallVolume();
       }
     });
     _volumeQueue = operation.catchError((Object _) {});
     return operation;
+  }
+
+  Future<void> _applyCallVolume() async {
+    if (_disposed) return;
+    await mediaEngine.setVolume(_deviceReplaced ? 0 : callVolume / 100);
+    if (_disposed) return;
+    // Leave an old zero pending when the system cannot be read. Playback uses
+    // a nonzero fallback; only a known value may finish that stored recovery.
+    if (!_carMode || _callVolume != 0 || micRouter.systemCallVolume != null) {
+      await store.setCallVolume(callVolume);
+    }
+  }
+
+  void _syncSystemCallVolume() {
+    if (_disposed || !_carMode || _settingVolume) return;
+    final volume = micRouter.systemCallVolume;
+    if (_callVolume != 0 &&
+        (!carVolumeSlider || volume == null || volume == _lastSystemVolume))
+      return;
+    if (volume != null) {
+      _lastSystemVolume = volume;
+      _callVolume = volume;
+    }
+    // Share the user's write queue so an older async write cannot restore 0
+    // after a system update. Unknown values never enter the preference store.
+    final operation = _volumeQueue.then((_) => _applyCallVolume());
+    _volumeQueue = operation.catchError((Object error) {
+      mediaError = exceptionMessage(error, '통화 음량을 변경하지 못했습니다.');
+      _notify();
+    });
   }
 
   // Compare values: each native meter event rebuilds MicDevice/List objects.
@@ -1909,25 +1990,7 @@ class RoomSession extends ChangeNotifier {
       mediaError = micRouter.outputError ?? '통화 오디오를 재개하지 못했습니다.';
       _scheduleRetry();
     }
-    final volume = micRouter.systemCallVolume;
-    if (carVolumeSlider &&
-        micRouter.isAutomotive &&
-        micRouter.systemVolumeWritable &&
-        !_settingVolume &&
-        volume != null &&
-        volume != _lastSystemVolume) {
-      _lastSystemVolume = volume;
-      callVolume = volume;
-      unawaited(store.setCallVolume(volume));
-      unawaited(
-        mediaEngine.setVolume(_deviceReplaced ? 0 : volume / 100).catchError((
-          Object error,
-        ) {
-          mediaError = exceptionMessage(error, '통화 음량을 변경하지 못했습니다.');
-          _notify();
-        }),
-      );
-    }
+    _syncSystemCallVolume();
     _notify();
   }
 
@@ -2040,6 +2103,7 @@ class RoomSession extends ChangeNotifier {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _clearTransientVehicleNotice();
     vehicle.removeListener(_vehicleChanged);
     vehicle.dispose();
     ++_readyContext;

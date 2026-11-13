@@ -123,7 +123,11 @@ class AudioChannel(private val activity: Activity, private val app: UnavoApplica
     }
     override fun onCancel(arguments: Any?) { meterJob?.cancel(); meterJob = null }
 
-    fun onActivityVisible() { activityVisible = true }
+    fun onActivityVisible() {
+        activityVisible = true
+        // Re-read after navigation/Activity pauses; outputState may be stale.
+        app.publishOutput()
+    }
     fun stopPreviewWhenHidden() {
         activityVisible = false
         app.scope.launch { app.micRouter.stopPreview() }

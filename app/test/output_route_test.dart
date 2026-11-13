@@ -145,4 +145,94 @@ void main() {
     }
     debugDefaultTargetPlatformOverride = null;
   });
+
+  test('차량의 일시적·미확인 0은 알 수 없음이며 확인된 시스템 0만 전달한다', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    SharedPreferences.setMockInitialValues({});
+    final store = SessionStore(await SharedPreferences.getInstance());
+    final mic = MicRouter(store);
+    var snapshot = <String, Object?>{
+      'route': 'carAudio',
+      'available': ['carAudio'],
+      'callVolume': 100,
+    };
+    var queryFails = false, queryMissing = false;
+    messenger.setMockMethodCallHandler(MicRouter.channel, (call) async {
+      switch (call.method) {
+        case 'getState':
+        case 'choose':
+          return {'mode': 'car'};
+        case 'permissions':
+          return {'microphone': true};
+        case 'getOutputRoute':
+          if (queryFails) throw PlatformException(code: 'unavailable');
+          return queryMissing ? null : snapshot;
+        default:
+          return null;
+      }
+    });
+    for (final channel in [routesChannel, levelsChannel]) {
+      messenger.setMockMethodCallHandler(channel, (_) async => null);
+    }
+    Future<void> publish(Map<String, Object?> values) async {
+      snapshot = {
+        'route': 'carAudio',
+        'available': ['carAudio'],
+        ...values,
+      };
+      await messenger.handlePlatformMessage(
+        'unavo/audio/routes',
+        const StandardMethodCodec().encodeSuccessEnvelope(snapshot),
+        (_) {},
+      );
+      await pumpEventQueue();
+    }
+
+    try {
+      await mic.initialize();
+      expect(mic.systemCallVolume, 100);
+      for (final value in [null, -1, 101, double.nan, double.infinity, 0]) {
+        await publish({'callVolume': value});
+        expect(
+          mic.systemCallVolume,
+          isNull,
+          reason: '$value is not a verified zero',
+        );
+      }
+      await publish({'callVolume': 0, 'callVolumeZeroConfirmed': true});
+      expect(mic.systemCallVolume, 0);
+      await publish({
+        'callVolume': 0,
+        'callVolumeZeroConfirmed': true,
+        'interrupted': true,
+      });
+      expect(mic.systemCallVolume, isNull);
+      expect(mic.audioInterrupted, isTrue);
+      await publish({'callVolume': .1});
+      expect(mic.systemCallVolume, 1);
+      snapshot = {...snapshot, 'callVolume': 80};
+      await mic.refreshOutputRoute();
+      expect(mic.systemCallVolume, 80);
+      await publish({'callVolume': 0, 'callVolumeZeroConfirmed': true});
+      queryMissing = true;
+      await mic.refreshOutputRoute();
+      expect(mic.systemCallVolume, isNull);
+      queryMissing = false;
+      await publish({'callVolume': 0, 'callVolumeZeroConfirmed': true});
+      queryFails = true;
+      await expectLater(
+        mic.refreshOutputRoute(),
+        throwsA(isA<PlatformException>()),
+      );
+      expect(mic.systemCallVolume, isNull);
+    } finally {
+      mic.dispose();
+      store.dispose();
+      await pumpEventQueue();
+      for (final channel in [MicRouter.channel, routesChannel, levelsChannel]) {
+        messenger.setMockMethodCallHandler(channel, null);
+      }
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 }

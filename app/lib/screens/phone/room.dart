@@ -345,7 +345,7 @@ class _RoomScreenState extends State<RoomScreen> {
           final blocked = session.callJoinBlockedReason;
           final (statusLabel, statusIcon) = switch (session.mediaConnection) {
             MediaConnectionState.connecting => ('음성 연결 중', 'refresh'),
-            MediaConnectionState.connected => ('음성 수신 준비됨', 'check'),
+            MediaConnectionState.connected => ('음성 수신 준비됨', 'wave'),
             MediaConnectionState.failed => (
               '음성 연결 실패',
               session.permissionDenied ? 'lock' : 'hangup',

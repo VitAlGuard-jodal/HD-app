@@ -554,9 +554,12 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         if (!membership) {
           throw new HttpError(403, "NOT_ROOM_MEMBER", "방 참여자만 사용할 수 있습니다.");
         }
-        // Former members still clean up a legacy empty room. Only a current
-        // member needs sender authority to remove the active membership.
-        if (membership.leftAt === null) requireSender(request, room, user, token);
+        // A vacant sender slot (restart, logout, invited member) must not block
+        // leaving. Only another device's active ownership prevents removal.
+        // Check after reading the body so a concurrent takeover still wins.
+        if (membership.leftAt === null && hub.hasSender(code, user.handle)) {
+          requireSender(request, room, user, token);
+        }
         clearReady(code, user.handle);
         if (leaveRoom(db, room.id, user.id)) {
           hub.broadcast(code, "member-left", { handle: user.handle, revision: locations.changed(code) });
