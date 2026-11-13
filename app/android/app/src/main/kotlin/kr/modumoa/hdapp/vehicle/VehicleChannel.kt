@@ -197,7 +197,7 @@ private class VehicleSubscription(private val context: Context, private val sink
 
     private fun failed(error: Throwable) {
         if (!active) return
-        Log.w("unavo-vehicle", "manual fallback=${error.javaClass.simpleName}")
+        Log.w("unavo-vehicle", "manual fallback=${error.javaClass.simpleName} msg=${error.message}")
         publish()
     }
 
