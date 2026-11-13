@@ -21,7 +21,7 @@ test("브로드캐스트는 해당 방의 모든 연결에만 전달된다", () 
   ]);
 });
 
-test("지정 수신자의 여러 연결에 시그널을 모두 전달한다", () => {
+test("동일 기기의 겹친 소켓에도 가장 최근 연결 하나에만 시그널을 전달한다", () => {
   const hub = new RoomEventHub();
   const received: unknown[] = [];
   const payload = { from: "alice", kind: "custom", payload: [null, true, "안녕"] };
@@ -30,7 +30,7 @@ test("지정 수신자의 여러 연결에 시그널을 모두 전달한다", ()
   hub.subscribe("ABC234", "bob", "bob-token-hash", (name, data) => { received.push([name, data]); });
   hub.subscribe("DEF567", "bob", "bob-token-hash", () => assert.fail("다른 방에 전달하면 안 됩니다."));
   assert.equal(hub.sendTo("ABC234", "bob", "signal", payload), true);
-  assert.deepEqual(received, [["signal", payload], ["signal", payload]]);
+  assert.deepEqual(received, [["signal", payload]]);
   assert.equal(hub.subscriberCount("ABC234"), 3);
 });
 
@@ -65,7 +65,7 @@ test("실패한 연결을 정리하면서 정상 연결에는 계속 전달한�
   hub.subscribe("ABC234", "bob", "bob-token-hash", () => false, () => { closed += 1; });
   hub.subscribe("ABC234", "bob", "bob-token-hash", () => { throw new Error("끊어진 연결"); }, () => { closed += 1; });
   hub.subscribe("ABC234", "bob", "bob-token-hash", () => { delivered += 1; });
-  assert.equal(hub.sendTo("ABC234", "bob", "signal", null), true);
+  assert.equal(hub.broadcast("ABC234", "member-updated", null), 1);
   assert.equal(closed, 2);
   assert.equal(delivered, 1);
   assert.equal(hub.subscriberCount("ABC234"), 1);
@@ -75,6 +75,8 @@ test("모든 연결이 실패하면 미전달로 응답한다", () => {
   const hub = new RoomEventHub();
   hub.subscribe("ABC234", "bob", "bob-token-hash", () => false);
   hub.subscribe("ABC234", "bob", "bob-token-hash", () => { throw new Error("끊어진 연결"); });
+  assert.equal(hub.sendTo("ABC234", "bob", "signal", null), false);
+  assert.equal(hub.subscriberCount("ABC234"), 1);
   assert.equal(hub.sendTo("ABC234", "bob", "signal", null), false);
   assert.equal(hub.subscriberCount("ABC234"), 0);
 });

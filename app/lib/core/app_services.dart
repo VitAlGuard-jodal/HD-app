@@ -16,6 +16,7 @@ import '../net/api_client.dart';
 import '../room/room_session.dart';
 import 'device_mode.dart';
 import 'driving_state.dart';
+import 'vehicle_state.dart';
 
 class AppServices {
   AppServices(
@@ -48,6 +49,7 @@ class AppServices {
       locationSource: this.locationSource,
       deviceMode: deviceMode,
       driving: driving,
+      vehicle: VehicleState(mode: deviceMode ?? DeviceMode.phone),
     );
   }
   final SessionStore store;

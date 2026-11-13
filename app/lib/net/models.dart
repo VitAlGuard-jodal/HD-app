@@ -115,12 +115,16 @@ class Member {
     this.joinedAt, {
     this.avatar = const Avatar(),
     this.order,
+    this.ready = false,
+    this.readyRevision = 0,
   });
   factory Member.fromJson(JsonMap json) => Member(
     json['handle'] as String,
     json['displayName'] as String,
     json['joinedAt'] as String? ?? '',
     avatar: Avatar.fromJson(json['avatar']),
+    ready: json['ready'] == true,
+    readyRevision: (json['readyRevision'] as num?)?.toInt() ?? 0,
     order: json['order'] is int && (json['order'] as int) >= 0
         ? json['order'] as int
         : null,
@@ -130,8 +134,26 @@ class Member {
   final String joinedAt;
   final Avatar avatar;
   final int? order;
-  Member withAvatar(Avatar value) =>
-      Member(handle, displayName, joinedAt, avatar: value, order: order);
+  final bool ready;
+  final int readyRevision;
+  Member withAvatar(Avatar value) => Member(
+    handle,
+    displayName,
+    joinedAt,
+    avatar: value,
+    order: order,
+    ready: ready,
+    readyRevision: readyRevision,
+  );
+  Member withReady(bool value, int revision) => Member(
+    handle,
+    displayName,
+    joinedAt,
+    avatar: avatar,
+    order: order,
+    ready: value,
+    readyRevision: revision,
+  );
 }
 
 class RoomDetails {
@@ -434,6 +456,27 @@ final class Signal extends RoomEvent {
   final String from;
   final String kind;
   final Object? payload;
+}
+
+final class ReadyChanged extends RoomEvent {
+  const ReadyChanged(this.handle, this.ready, this.revision);
+  factory ReadyChanged.fromJson(JsonMap json) => ReadyChanged(
+    json['handle'] as String,
+    json['ready'] as bool,
+    (json['revision'] as num).toInt(),
+  );
+  final String handle;
+  final bool ready;
+  final int revision;
+}
+
+final class DeviceReplaced extends RoomEvent {
+  const DeviceReplaced();
+}
+
+final class MemberDeviceChanged extends RoomEvent {
+  const MemberDeviceChanged(this.handle);
+  final String handle;
 }
 
 final class Reconnected extends RoomEvent {

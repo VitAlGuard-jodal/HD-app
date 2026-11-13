@@ -50,6 +50,13 @@ class MemberTile extends StatelessWidget {
       defaultMascot: true,
     );
     final indicators = [
+      if (member.ready)
+        UnavoIcon(
+          'check',
+          key: ValueKey('member-ready-${member.handle}'),
+          size: car ? 24 : 18,
+          color: UnavoColors.onCall,
+        ),
       if (_interrupted || _speaking)
         UnavoIcon(
           _interrupted ? 'micoff' : 'wave',
@@ -103,7 +110,7 @@ class MemberTile extends StatelessWidget {
       button: onTap != null,
       onTap: onTap,
       label:
-          '${member.displayName}, @${member.handle}${self ? ", 나" : ""}${_speaking ? ", 말하는 중" : ""}${_interrupted ? ", 다른 오디오 때문에 잠시 중단" : ""}$_connectionLabel',
+          '${member.displayName}, @${member.handle}${self ? ", 나" : ""}${member.ready ? ", 출발 준비됨" : ""}${_speaking ? ", 말하는 중" : ""}${_interrupted ? ", 다른 오디오 때문에 잠시 중단" : ""}$_connectionLabel',
       child: ExcludeSemantics(
         child: Material(
           color: UnavoColors.input,

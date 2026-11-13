@@ -14,7 +14,7 @@ void main() {
     f.end('stopped');
     f.follow(target: null);
     await tester.pump();
-    expect(f.spoken, ['앨리스 님이 위치 공유를 끝냈습니다']);
+    expect(f.spoken, ['앨리스 님이 위치 공유를 중지했습니다']);
     expect(
       f.calls.single.arguments['expiresAt'],
       f.time.add(const Duration(seconds: 10)).millisecondsSinceEpoch,
@@ -61,7 +61,7 @@ void main() {
     expect(f.spoken, hasLength(1));
     f.finish();
     await tester.pump();
-    expect(f.spoken, ['앨리스 님 위치가 잠시 갱신되지 않고 있습니다', '앨리스 님이 위치 공유를 끝냈습니다']);
+    expect(f.spoken, ['앨리스 님 위치가 잠시 갱신되지 않고 있습니다', '앨리스 님이 위치 공유를 중지했습니다']);
     await f.close(tester);
   }, timeout: const Timeout(Duration(seconds: 30)));
 

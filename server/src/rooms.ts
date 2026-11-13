@@ -15,22 +15,60 @@ type SendEvent = (name: string, data: unknown) => boolean | void;
 interface Subscriber {
   handle: string;
   tokenHash: string;
+  device: string;
   send: SendEvent;
   close: () => void;
 }
 
 export class RoomEventHub extends EventEmitter {
   #subscribers = new Map<string, Set<Subscriber>>();
+  #senders = new Map<string, Map<string, { device: string; tokenHash: string }>>();
   #backlog = new Map<string, Map<string, { at: number; name: string; data: unknown }[]>>();
   #sweepTimer = setInterval(() => this.#sweepSignals(), SIGNAL_BACKLOG_SWEEP_INTERVAL_MS).unref();
 
-  subscribe(code: string, handle: string, tokenHash: string, send: SendEvent, close: () => void = () => {}): () => void {
+  // Explicit entry may replace an owner; resume may claim only a vacant slot.
+  // Socket loss never releases ownership, so stale retries cannot take it back.
+  claim(code: string, handle: string, device: string, tokenHash: string): void {
+    let senders = this.#senders.get(code);
+    if (!senders) { senders = new Map(); this.#senders.set(code, senders); }
+    const previous = senders.get(handle);
+    if (previous?.device === device) return;
+    senders.set(handle, { device, tokenHash });
+    if (previous) {
+      this.clearPeerSignals(code, handle);
+      for (const subscriber of [...(this.#subscribers.get(code) ?? [])]) {
+        if (subscriber.handle !== handle || subscriber.device === device) continue;
+        try { subscriber.send("device-replaced", { handle }); } catch { /* close below */ }
+        this.#disconnect(code, subscriber);
+      }
+      this.emit("sender-changed", { code, handle });
+      this.broadcastExcept(code, handle, "member-device-changed", { handle });
+    }
+  }
+
+  isSender(code: string, handle: string, device: string): boolean {
+    return this.#senders.get(code)?.get(handle)?.device === device;
+  }
+
+  hasSender(code: string, handle: string): boolean {
+    return this.#senders.get(code)?.has(handle) ?? false;
+  }
+
+  forgetSender(code: string, handle: string): void {
+    const senders = this.#senders.get(code);
+    senders?.delete(handle);
+    if (senders?.size === 0) this.#senders.delete(code);
+    this.clearPeerSignals(code, handle);
+  }
+
+  subscribe(code: string, handle: string, tokenHash: string, send: SendEvent, close: () => void = () => {}, device = tokenHash): () => void {
+    this.claim(code, handle, device, tokenHash);
     let subscribers = this.#subscribers.get(code);
     if (!subscribers) {
       subscribers = new Set();
       this.#subscribers.set(code, subscribers);
     }
-    const subscriber = { handle, tokenHash, send, close };
+    const subscriber = { handle, tokenHash, device, send, close };
     subscribers.add(subscriber);
     this.emit("subscribed", { code, handle });
     return () => this.#remove(code, subscriber);
@@ -51,6 +89,13 @@ export class RoomEventHub extends EventEmitter {
   }
 
   sendTo(code: string, handle: string, name: string, data: unknown): boolean {
+    if (name === "signal") {
+      // Even overlapping SSE sockets of the SAME device get only one copy.
+      const receiver = [...(this.#subscribers.get(code) ?? [])].reverse().find(
+        (s) => s.handle === handle && this.isSender(code, handle, s.device),
+      );
+      return receiver !== undefined && this.#deliver(code, (s) => s === receiver, name, data) > 0;
+    }
     return this.#deliver(code, (subscriber) => subscriber.handle === handle, name, data) > 0;
   }
 
@@ -97,6 +142,22 @@ export class RoomEventHub extends EventEmitter {
     if (backlog?.size === 0) this.#backlog.delete(code);
   }
 
+  clearPeerSignals(code: string, handle: string): void {
+    this.clearSignals(code, handle);
+    const backlog = this.#backlog.get(code);
+    for (const [recipient, signals] of backlog ?? []) {
+      const retained = signals.filter((signal) => (signal.data as { from?: string } | null)?.from !== handle);
+      if (retained.length) backlog!.set(recipient, retained);
+      else backlog!.delete(recipient);
+    }
+    if (backlog?.size === 0) this.#backlog.delete(code);
+  }
+
+  clearRoom(code: string): void {
+    this.#senders.delete(code);
+    this.clearSignals(code);
+  }
+
   disconnectUser(code: string, handle: string): void {
     for (const subscriber of [...(this.#subscribers.get(code) ?? [])]) {
       if (subscriber.handle === handle) this.#disconnect(code, subscriber);
@@ -110,6 +171,14 @@ export class RoomEventHub extends EventEmitter {
         if (subscriber.tokenHash === tokenHash) this.#disconnect(code, subscriber);
       }
     }
+    for (const [code, senders] of [...this.#senders]) {
+      for (const [handle, sender] of [...senders]) {
+        if (sender.tokenHash === tokenHash) {
+          this.forgetSender(code, handle);
+          this.emit("sender-revoked", { code, handle });
+        }
+      }
+    }
   }
 
   close(): void {
@@ -119,6 +188,7 @@ export class RoomEventHub extends EventEmitter {
       for (const subscriber of [...subscribers]) this.#disconnect(code, subscriber);
     }
     this.#backlog.clear();
+    this.#senders.clear();
   }
 
   #sweepSignals(): void {

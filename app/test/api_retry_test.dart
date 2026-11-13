@@ -194,7 +194,7 @@ void main() {
     expect(clients.single.closed, isTrue);
   });
 
-  test('방 참여만 재시도하고 방 생성·시그널·동의 PUT·401은 반복하지 않는다', () async {
+  test('송신 기기를 바꾸는 참여·방 생성·시그널·동의 PUT·401은 반복하지 않는다', () async {
     for (final action in [
       'join',
       'create',
@@ -218,7 +218,10 @@ void main() {
       addTearDown(api.close);
       switch (action) {
         case 'join':
-          await api.joinRoom('ABC123');
+          await expectLater(
+            api.joinRoom('ABC123'),
+            throwsA(isA<SocketException>()),
+          );
         case 'create':
           await expectLater(api.createRoom(), throwsA(isA<SocketException>()));
         case 'signal':
@@ -237,7 +240,7 @@ void main() {
             throwsA(isA<ApiException>().having((e) => e.status, 'status', 401)),
           );
       }
-      expect(clients.single.opens, action == 'join' ? 2 : 1);
+      expect(clients.single.opens, 1);
       expect(clients.single.closed, isFalse);
       api.close();
       expect(clients.single.closed, isTrue);

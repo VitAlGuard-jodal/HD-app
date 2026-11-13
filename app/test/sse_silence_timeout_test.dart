@@ -21,6 +21,7 @@ void main() {
         clock.flushMicrotasks();
         expect(f.events, [isA<Hello>()]);
         expect(f.clients, hasLength(1));
+        expect(f.clients.single.url?.queryParameters['resume'], isNull);
 
         clock.elapse(const Duration(milliseconds: 199));
         expect(f.events.whereType<Disconnected>(), isEmpty);
@@ -37,6 +38,11 @@ void main() {
         expect(f.clients, hasLength(1));
         clock.elapse(const Duration(milliseconds: 1));
         expect(f.clients, hasLength(2));
+        expect(f.clients.last.url?.queryParameters['resume'], '1');
+        expect(
+          f.clients.last.headers.values['x-unavo-device'],
+          f.clients.first.headers.values['x-unavo-device'],
+        );
         expect(f.clients.last.closed, isFalse);
         expect(f.events, [
           isA<Hello>(),
@@ -75,15 +81,59 @@ void main() {
       }
     });
   });
+
+  test('이어받음 SSE는 준비 이벤트를 파싱한 뒤 재접속 없이 끝낸다', () {
+    fakeAsync((clock) {
+      final f = _Fixture();
+      try {
+        clock.flushMicrotasks();
+        f.clients.single.response.send(
+          'event: ready-changed\ndata: {"handle":"alice","ready":true,"revision":3}\n\n',
+        );
+        f.clients.single.response.send(
+          'event: device-replaced\ndata: {"handle":"alice"}\n\n',
+        );
+        clock.flushMicrotasks();
+        expect(f.events.whereType<ReadyChanged>().single.ready, isTrue);
+        expect(f.events.whereType<DeviceReplaced>(), hasLength(1));
+        expect(f.clients.single.closed, isTrue);
+        clock.elapse(const Duration(minutes: 1));
+        expect(f.clients, hasLength(1));
+        expect(f.events.whereType<Disconnected>(), isEmpty);
+      } finally {
+        f.dispose(clock);
+      }
+    });
+  });
+
+  test('놓친 이어받음은 resume의 409로 처리하고 자동 입장을 반복하지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture(replaceOnRetry: true);
+      try {
+        clock.flushMicrotasks();
+        clock.elapse(const Duration(milliseconds: 2200));
+        clock.flushMicrotasks();
+        expect(f.clients, hasLength(2));
+        expect(f.clients.last.url?.queryParameters['resume'], '1');
+        expect(f.events.whereType<DeviceReplaced>(), hasLength(1));
+        clock.elapse(const Duration(minutes: 1));
+        expect(f.clients, hasLength(2));
+      } finally {
+        f.dispose(clock);
+      }
+    });
+  });
 }
 
 class _Fixture {
-  _Fixture() {
+  _Fixture({bool replaceOnRetry = false}) {
     final api = ApiClient(
       tokenStore: _Store(),
       sseSilenceTimeout: const Duration(milliseconds: 200),
       clientFactory: () {
-        final client = _Client();
+        final client = _Client(
+          status: replaceOnRetry && clients.isNotEmpty ? 409 : 200,
+        );
         clients.add(client);
         return client;
       },
@@ -111,14 +161,19 @@ class _Store implements TokenStore {
 }
 
 class _Client implements HttpClient {
-  final response = _Response();
+  _Client({int status = 200}) : response = _Response(status);
+  final _Response response;
+  final headers = _Headers();
+  Uri? url;
   bool closed = false;
 
   @override
   set connectionTimeout(Duration? value) {}
   @override
-  Future<HttpClientRequest> openUrl(String method, Uri url) async =>
-      _Request(response);
+  Future<HttpClientRequest> openUrl(String method, Uri url) async {
+    this.url = url;
+    return _Request(response, headers);
+  }
 
   @override
   void close({bool force = false}) {
@@ -132,18 +187,22 @@ class _Client implements HttpClient {
 }
 
 class _Headers implements HttpHeaders {
+  final values = <String, Object>{};
   @override
-  void set(String name, Object value, {bool preserveHeaderCase = false}) {}
+  void set(String name, Object value, {bool preserveHeaderCase = false}) {
+    values[name] = value;
+  }
+
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _Request implements HttpClientRequest {
-  _Request(this.response);
+  _Request(this.response, this.headers);
   final _Response response;
 
   @override
-  HttpHeaders get headers => _Headers();
+  final HttpHeaders headers;
   @override
   set followRedirects(bool value) {}
   @override
@@ -153,19 +212,25 @@ class _Request implements HttpClientRequest {
 }
 
 class _Response extends Stream<List<int>> implements HttpClientResponse {
-  _Response() {
+  _Response(this.status) {
     // 완료·취소 Future를 fake_async 영역 안에 두어 정리까지 재현한다.
     unawaited(_bytes.done);
-    send('event: hello\ndata: {"self":"alice","members":[]}\n\n');
+    if (status == 200) {
+      send('event: hello\ndata: {"self":"alice","members":[]}\n\n');
+    } else {
+      send('{"error":{"code":"DEVICE_REPLACED","message":"다른 기기에서 이어받았습니다"}}');
+      close();
+    }
   }
 
   final _bytes = StreamController<List<int>>(onCancel: () async {});
+  final int status;
 
   void send(String text) => _bytes.add(utf8.encode(text));
   void close() => unawaited(_bytes.close());
 
   @override
-  int get statusCode => 200;
+  int get statusCode => status;
   @override
   StreamSubscription<List<int>> listen(
     void Function(List<int>)? onData, {

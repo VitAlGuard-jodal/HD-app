@@ -1,0 +1,52 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { RoomReadyStore } from "../../src/ready.ts";
+import { RoomEventHub } from "../../src/rooms.ts";
+
+test("준비는 방·계정별이고 취소·퇴장·방 제거 후 남지 않는다", () => {
+  const ready = new RoomReadyStore();
+  assert.equal(ready.isReady("ABC234", "alice"), false);
+  assert.deepEqual(ready.set("ABC234", "alice", true), { handle: "alice", ready: true, revision: 1 });
+  assert.equal(ready.set("ABC234", "alice", true).revision, 1);
+  assert.equal(ready.isReady("ABC234", "bob"), false);
+  assert.equal(ready.isReady("DEF567", "alice"), false);
+  ready.set("ABC234", "bob", true);
+  assert.equal(ready.remove("ABC234", "alice").revision, 3);
+  assert.equal(ready.isReady("ABC234", "alice"), false);
+  assert.equal(ready.isReady("ABC234", "bob"), true);
+  ready.clear("ABC234");
+  assert.equal(ready.isReady("ABC234", "bob"), false);
+  assert.equal(ready.revision("ABC234"), 0);
+});
+
+test("나중 기기 입장·재가져오기는 이전 기기를 닫고 하나의 송신자만 선택한다", (t) => {
+  const hub = new RoomEventHub();
+  t.after(() => hub.close());
+  const car: string[] = [], phone: string[] = [], peer: string[] = [];
+  let carClosed = 0, phoneClosed = 0;
+  hub.subscribe("ABC234", "alice", "car", (name) => { car.push(name); }, () => { carClosed++; });
+  hub.subscribe("ABC234", "bob", "bob", (name) => { peer.push(name); });
+  hub.queueSignal("ABC234", "alice", "signal", { from: "bob" });
+  hub.queueSignal("ABC234", "bob", "signal", { from: "alice" });
+  hub.subscribe("ABC234", "alice", "phone", (name) => { phone.push(name); }, () => { phoneClosed++; });
+  assert.deepEqual(car, ["device-replaced"]);
+  assert.equal(carClosed, 1);
+  assert.deepEqual(peer, ["member-device-changed"]);
+  assert.equal(hub.isSender("ABC234", "alice", "car"), false);
+  assert.equal(hub.isSender("ABC234", "alice", "phone"), true);
+  assert.equal(hub.replaySignals("ABC234", "alice", () => assert.fail("old recipient signal")), 0);
+  assert.equal(hub.replaySignals("ABC234", "bob", () => assert.fail("old sender signal")), 0);
+  assert.equal(hub.sendTo("ABC234", "alice", "signal", {}), true);
+  assert.deepEqual(phone, ["signal"]);
+  hub.subscribe("ABC234", "alice", "car", (name) => { car.push(name); });
+  assert.equal(phoneClosed, 1);
+  assert.deepEqual(phone, ["signal", "device-replaced"]);
+  assert.equal(hub.subscriberCount("ABC234", "alice"), 1);
+  hub.sendTo("ABC234", "alice", "signal", {});
+  assert.deepEqual(car, ["device-replaced", "signal"]);
+  hub.disconnectUser("ABC234", "alice");
+  hub.forgetSender("ABC234", "alice");
+  assert.equal(hub.isSender("ABC234", "alice", "car"), false);
+  hub.clearRoom("ABC234");
+  assert.equal(hub.isSender("ABC234", "bob", "bob"), false);
+});

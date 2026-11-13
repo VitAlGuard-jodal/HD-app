@@ -435,3 +435,37 @@ C1b의 차량 `PanelField`는 바깥 영역뿐 아니라 `InputDecorator`가 실
 C1b는 `panel_field_test.dart`와 `support/car_field_expectations.dart`에서 `InputDecorator.containerOf`로 실제 채움·테두리 영역의 80dp 높이, 버튼·입력·아이콘·placeholder의 세로 중앙, 포커스 전후 경계 일치, 일반/비밀번호/비활성 입력 및 폰 기존 표시를 검사한다. 로그인·가입·친구·로비·서버 주소 통합 검사에도 같은 실제 상자 검사를 적용한다. 설정 통합 검사는 차량 상세 뒤로 없음·폰 뒤로 유지·저장/문서 전환 유지, 빈 상태의 테두리/입력/버튼/탭 부재, 톱니의 금색 선택·비활성 접근성과 재탭 시 상세/모달 보존·닫은 뒤 재활성화를 포함한다. C1·C2 구현과 따라가기 마커는 유지한다.
 
 C3는 `enterText` 후 기존 pump 도우미를 거쳐 포커스를 검사하고, 빈 로비·톱니 검사의 SemanticsHandle을 테스트 본문 `finally`에서 해제한다. `support/car_shell_expectations.dart`는 실제 semantics 트리에서 머리줄 문구·버튼을 찾고 `open-settings`의 노드와 같은지도 확인한다. 로그인·가입 2종×2크기, 로비·설정, 첫 동의와 루트 모달의 검사에서 주 패널의 입력·버튼·설정 메뉴 접근성과 모달 차단도 고정한다. §13의 C3 검사는 실제 painter의 채움 크기·흰 2dp 외곽선·옅은 대비선·프로필 2dp 간격·회전 시 잘림 없음·이름표 포함 56dp 상한, 네이버의 고정 프로필/각도 갱신 및 브이월드 폰·차량의 회전/정차 방향 유지를 포함한다. 실행은 메인의 `flutter test`에 맡기며 여기서는 Dart 정적 분석까지만 수행한다.
+
+## 20. 출발 준비·하차 보호·계정당 한 기기 송신(D3, 2026-11-13)
+
+**출발 준비.** `RoomReadyStore`는 방·계정별 준비 여부를 메모리에만 보관한다. `PUT /v1/rooms/:code/ready {ready:boolean}`는 현재 송신 기기만 사용할 수 있고 `{handle, ready, revision}`을 반환하며 같은 데이터를 `ready-changed` SSE로 방에 알린다. `GET /v1/rooms/:code`, `GET /v1/me`의 방 멤버, SSE `hello.members`는 `ready`·`readyRevision`을 포함한다. 기본값은 false다. 준비 revision은 위치 revision과 별개이며 늦은 HTTP/hello가 이미 받은 새 준비 상태를 덮지 않는다. 방 퇴장, 기기 교체, 송신 토큰 로그아웃 시 준비를 취소하고 마지막 멤버 퇴장 시 방의 메모리 상태를 지운다. 방 상단의 체크 아이콘·준비 인원/전체 인원과 `room-ready-toggle`, 카드의 `member-ready-<handle>`을 통해 표시한다. 새 조작부는 모두 아이콘이며 접근성 라벨·선택 상태를 제공한다.
+
+**차량 신호.** 차량 모드에서만 `VehicleState`가 `unavo/vehicle`을 구독한다. Android `VehicleChannel`은 `FEATURE_AUTOMOTIVE`를 다시 확인한 뒤 Pleos `Vehicle:2.3.2`를 초기화한다. `checkDoorPositionCapabilities`가 돌려준 `DoorArea`들만 `registerDoorPosition`에 등록하고 각 영역의 초기 `getCurrentDoorPosition`도 받는다. 0은 닫힘, 양수는 열림이다. null·오류·범위 밖 값은 닫힘으로 간주하지 않는다. 초기 조회가 늦게 끝나도 이미 받은 리스너 값을 덮지 않는다. 운전석은 지원 영역 중 `ROW_1_LEFT`, 없으면 `ROW_1_RIGHT`가 포함된 앞문을 사용한다. 앞문이 없으면 하차를 추정하지 않는다. 구독 해제/엔진 정리 시 문·기어 리스너를 해제하며 진행 중인 capability/get 콜백이 끝난 뒤 `Vehicle.release()`를 호출한다. 콜백이 영원히 돌아오지 않으면 SDK 참조를 조기 해제하지 않고 프로세스 수명까지 보유할 수 있다.
+
+기어는 기존 optional `android.car` 연결을 재사용하는 `CarPropertyManager.GEAR_SELECTION`(area 0, ONCHANGE)이다. `VehicleGear.GEAR_PARK`만 P로 인정하며 UNKNOWN·오류는 미지원이다. [Android VehiclePropertyIds](https://developer.android.com/reference/android/car/VehiclePropertyIds#GEAR_SELECTION)는 읽기에 normal `Car.PERMISSION_POWERTRAIN`을 명시하고, [AOSP Car manifest](https://android.googlesource.com/platform/packages/services/Car/+/refs/heads/master/service/AndroidManifest.xml)는 `android.car.permission.CAR_POWERTRAIN`을 normal로 선언한다. manifest에는 이 권한과 normal `pleos.car.permission.CAR_DOORS`만 추가한다. CAR_SPEED, CAR_DRIVING_STATE, 기어/문 런타임 권한 요청은 없다. 기존 UX restrictions 잠금은 그대로 적용한다.
+
+지원 문 전부의 값과 기어를 받으면 모두 닫힘+P에서만 준비할 수 있다. 문이 열려 있으면 “문이 열려 있습니다”, P가 아니면 “P단에서 준비할 수 있습니다”를 표시한다. 준비 중 문 열림/P 이탈은 로컬에서 즉시 취소하고 준비 PUT을 직렬화해 서버에도 false를 보낸다. 이미 전송한 true가 늦게 끝나도 false를 뒤이어 전송하며, 취소 전송 실패는 2초 간격으로 재시도한다. 닫힘/P 복귀가 준비를 자동으로 켜지 않는다. 폰은 차량 채널을 구독하지 않고 수동 토글만 한다. 차량도 SDK·기어를 못 받으면 수동 토글로 대체하고 `unavo-vehicle`에 이유를 기록한다.
+
+**음성.** 준비 취소는 화면 안내와 함께 “준비가 취소됐습니다”를 말한다. D2 `FollowVoiceGuidance`의 직렬 큐·10초 만료·세대별 취소·중복 억제를 재사용한다. `SpeechOutputCoordinator`는 따라가기와 준비 안내를 실제 TTS 하나에 직렬로 보내되 중지는 각 기능의 발화에만 적용한다. 하차로 위치 공유가 끝나며 따라가기 음성이 정리되어도 준비 취소 음성을 끊지 않는다. 새 준비/방 종료/기기 교체는 이전 준비 안내를 폐기한다. D2 공유 중지 문장은 화면과 같은 “○○ 님이 위치 공유를 중지했습니다”로 통일하며 지연 문장은 유지한다.
+
+**하차 보호.** 차량 설정 `car-settings-menu-exit`에서 마이크+위치 중지(기본), 마이크만 끄기, 아무것도 안 함 중 하나를 고른다. 선택은 계정이 아닌 이 설치의 SharedPreferences `vehicle.exitProtection`에 저장하며 로그아웃 후에도 보존한다. 지원 앞문 열림+P 상태로 진입하면 고른 동작을 실행한다. 연속된 같은 상태는 중복 실행하지 않는다. 한 번 입장한 방은 SSE가 끊겨도 로컬 하차 보호와 준비 취소가 동작한다. 최초 hello 전에는 다른 기기의 스냅샷을 보고 준비 취소를 보내지 않는다. 첫 두 동작은 마이크를 음소거하고 기본 동작은 진행 중인 위치 시작/관찰/송신도 중단한다. 사실 안내와 `room-exit-resume` 아이콘을 표시한다. 문 닫힘·P 복귀·홈 복귀로 재개하지 않는다. 사용자가 재개 아이콘을 누르면 마이크를 켜고 보호 직전에 공유 중이던 위치만 다시 시작한다. 기존 따라가기 관계는 복원하지 않고 새 요청/동의를 거친다. 하차 자체는 수신 스피커/통화 연결을 유지한다.
+
+**입장과 송신 기기.** 방 멤버십은 기존처럼 계정(handle) 하나다. 별도로 방·계정마다 송신 기기 하나를 `RoomEventHub` 메모리에 둔다. 기기 키는 인증 토큰 해시+`x-unavo-device` 헤더(앱 API 인스턴스에서 생성한 128비트 난수, 해당 인스턴스의 HTTP/SSE 재시도에 공통)다. 헤더가 없는 기존 클라이언트는 인증 토큰 해시를 사용한다. ID나 토큰을 SSE·멤버 응답에 공개하지 않는다.
+
+명시적 입장은 방 생성 성공, `POST /join` 성공, 새 `GET /events` 연결이다. 기존 “참여 중” 카드로 `RoomSession.open`을 호출하면 새 이벤트 스트림을 열므로 폰이 직접 누른 시점에 송신 기기가 된다. 명시적 입장은 기존 송신자가 있어도 이 기기로 교체하며, 동일 기기의 중복 입장은 준비/위치/통화를 취소하지 않는다. SSE 내부 자동 재접속은 첫 요청 이후 반드시 `/events?resume=1`을 쓴다. 인증과 현재 방 멤버십을 확인한 뒤 **그 방·계정의 송신자가 없으면 이 기기를 등록하고, 같은 기기이면 유지하며, 다른 기기가 송신자일 때만 `409 DEVICE_REPLACED`로 거절한다**. 빈 자리는 서버 재시작으로 메모리가 사라졌거나 송신 토큰이 로그아웃한 경우에도 생긴다. 단순 소켓 단절은 송신자를 지우지 않으므로 이전 기기의 자동 복귀가 현재 기기를 밀어낼 수 없다. 멤버십까지 끝낸 퇴장은 resume으로 되살리지 않는다.
+
+**자동 복구(D3b).** 서버 재시작 후에도 DB의 방·계정·멤버십·인증 토큰은 유지된다. SSE 재시도가 빈 송신 자리를 먼저 확보한 뒤 서버가 `hello`와 통화 시그널 백로그를 전달하고, 앱의 `ApiClient`는 성공한 재연결에서 `Reconnected`를 먼저 발생시킨다. 앱은 사용자의 재입장 없이 같은 방에서 멤버/스냅샷을 갱신하고 살아 있는 통화를 유지하며 누락된 peer 협상만 복구한다. `Reconnected`는 `/join`을 호출하지 않고, 다른 명시 입장을 덮을 수 있는 POST join의 HTTP 자동 재시도도 계속 금지한다. resume보다 먼저 도착한 HTTP 송신 요청은 소유권을 얻지 않으며 송신자가 비어 있으면 `503 SENDER_UNAVAILABLE`로 일시 실패한다. 이를 기기 교체로 처리해 자동 복구를 중단하지 않는다.
+
+위치 공유는 기존 관찰을 유지하여 연결 회복 후 다음 표본부터 전송한다. 통신 단절 동안 서버에 남아 있는 따라가기·궤적은 hello에서 복원한다. 서버 재시작으로 소실된 위치·따라가기·궤적·준비는 빈 스냅샷/false가 정본이며, 기존처럼 따라가기를 몰래 재요청하거나 동의를 복원하지 않는다. 앱은 새 연결에서 위치 revision뿐 아니라 준비 revision의 비교 기준도 초기화하고 이전 연결의 진행 중인 준비 응답을 무시하여, 재시작 후 낮은 revision의 hello와 준비 이벤트를 적용한다. 로컬에서 필요한 준비 취소는 새 연결에서도 이어서 전송한다.
+
+다른 기기가 명시적으로 입장하면 이전 기기에 `device-replaced {handle}`를 보낸 뒤 그 기기의 SSE를 닫는다. 준비, 위치, 따라가기 관계, 이전 기기로 오고 간 시그널 백로그와 위치 순번/속도 제한 기록을 정리한다. 다른 계정에는 `member-device-changed {handle}`를 보내 같은 계정의 이전 WebRTC peer를 닫고 새 협상을 시작하게 한다. 멤버를 추가하지 않으므로 같은 사람이 두 카드로 보이지 않는다. WebRTC `signal`은 송신 기기의 최신 소켓 하나로만 전달하며 같은 기기의 겹친 소켓에도 복제하지 않는다. 이전 기기의 signal·위치 POST, ready PUT, location/follow DELETE, follow 응답 및 leave는 `409 DEVICE_REPLACED`로 거절한다. 본문을 기다린 뒤 소유권과 인증을 다시 검사한다. 이전 기기의 늦은 위치 DELETE가 새 기기의 공유를 지울 수 없다.
+
+반복 leave는 현재 멤버일 때만 송신 권한을 요구한다. 이미 나간 멤버도 자기 준비·구독·송신자·위치 잔여 상태와 과거 버전에서 남은 빈 방을 정리한 뒤 204를 반환한다. 참여 이력이 없는 계정은 계속 403이며 현재 다른 기기의 멤버십을 지울 수 없다.
+
+앱은 `device-replaced`를 일반 이벤트 큐보다 먼저 처리해 마이크·수신 게인을 즉시 끄고 WebRTC/통화 서비스를 종료하며 위치 관찰·송신을 중지한다. 자동 재접속/통화 복구를 막고 “다른 기기에서 이어받았습니다”와 `room-take-back` 아이콘을 표시한다. SSE를 놓친 경우 `resume=1`의 409도 같은 종료 동작으로 연결한다. 사용자가 다시 가져오기를 누를 때에만 기존 정리를 기다린 뒤 새 이벤트 스트림으로 입장한다. 위치 공유는 재입장만으로 재개하지 않는다. 교체된 기기의 방 나가기는 해당 기기 화면만 정리하며 현재 송신 기기의 계정 멤버십을 지우지 않는다.
+
+**설계 경계.** (1) 하차는 차량의 자기 송신만 제어하며 폰 자동 접속/통화 이전이나 자동 이전 승인 설정이 없다. (2) 하차 안내의 응답으로 통화를 넘기는 동작이 없고 재개 아이콘은 그 차량의 로컬 동작이다. (3) BLE·초음파·근거리 감지로 기기를 전환하지 않으며 다시 탈 때도 사용자가 직접 켠다. (4) 같은 계정의 나중 명시적 입장 기기만 시그널을 받아 통화에 참여하고 이전 기기는 수신까지 정리한다. (5) 음성 통화 범위를 유지하며 영상·차량 상담원·긴급 통화 연동을 추가하지 않는다.
+
+**검증 분담.** 서버 `ready_devices.test.ts`, 변경된 `rooms.test.ts`·`api.test.ts`는 준비 수명, 여러 토큰/동일 토큰의 여러 기기, 단일 시그널 수신, 이전 송신 거절, 재가져오기, 본문 대기 중 교체를 검사한다. 앱의 `vehicle_state_test.dart`, `room_vehicle_session_test.dart`, `vehicle_widgets_test.dart`, `speech_coordinator_test.dart` 및 기존 SSE/음성/재접속 테스트를 갱신한다. 여기서는 Dart 정적 분석·포맷과 Node 구문 검사만 수행한다. 서버 테스트·Flutter 테스트·Gradle 빌드, Virtual Console에서 문/기어 조작, iPhone/시뮬레이터의 두 기기 통화 확인과 서버 배포는 메인이 수행한다.
+
+D3b는 같은 SQLite 파일을 닫고 다시 여는 새 HTTP 서버의 resume·시그널 복구, 송신자 없는 동안의 일시적 HTTP 실패, 동일 기기 통신 복구의 상태 보존, 다른 기기 resume 거절과 송신 토큰 로그아웃 후 빈 자리 복구를 추가한다. `locations.test.ts`는 실제 join을 통한 follow 응답 권한과 반복 leave의 빈 방/메모리 정리를 검사한다. 앱은 join 없는 통화·시그널·준비 복구와 위치 관찰 유지/hello 기준 따라가기 복구를 검사한다. 위젯이 없는 음성 큐·차량 상태 검사는 `test()`와 `pumpEventQueue()`로 처리하고, 음성 만료 시각은 주입한 시계로 제어한다.

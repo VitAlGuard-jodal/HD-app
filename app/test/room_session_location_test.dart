@@ -61,7 +61,7 @@ void main() {
         );
         expect(speech.texts, [
           reason == 'stopped'
-              ? '앨리스 님이 위치 공유를 끝냈습니다'
+              ? '앨리스 님이 위치 공유를 중지했습니다'
               : '앨리스 님 위치가 잠시 갱신되지 않고 있습니다',
         ]);
         expect(f.session.followTarget, isNull);
@@ -344,6 +344,71 @@ void main() {
     },
     timeout: _timeout,
   );
+
+  for (final restarted in [false, true]) {
+    test('자동 복구 restart=$restarted: 위치 관찰은 유지하고 따라가기는 hello를 따른다', () {
+      fakeAsync((clock) {
+        final f = _Fixture.create(clock);
+        f.open();
+        f.startSharing();
+        f.sample();
+        _finish(clock, f.session.startFollowing('alice'));
+        final requestId = f.session.followRequestId;
+        final fix = _fix('alice', 100);
+        f.event(LocationUpdated(fix, revision: 5000));
+        f.event(const Disconnected('연결 복구 중', 2000));
+        f.http.failures = 1;
+        clock.elapse(const Duration(seconds: 1));
+        f.sample(lat: 37.001);
+        expect(f.session.locationShare.error, isNotNull);
+        expect(f.session.locationShare.sharing, isTrue);
+        expect(f.source.watches, 1);
+        expect(f.source.cancellations, 0);
+
+        f.event(const Reconnected());
+        f.event(
+          Hello(
+            'bob',
+            f.api.members,
+            'alice',
+            restarted ? const [] : [fix],
+            restarted
+                ? const {}
+                : {
+                    'alice': [fix],
+                  },
+            restarted ? null : 'alice',
+            const [],
+            restarted ? 0 : 5000,
+            null,
+            restarted ? null : requestId,
+          ),
+        );
+        expect(f.session.state.code, 'ABC123');
+        expect(f.session.state.isConnected, isTrue);
+        expect(f.session.deviceReplaced, isFalse);
+        expect(f.session.followTarget, restarted ? isNull : 'alice');
+        expect(f.session.followRequestId, restarted ? isNull : requestId);
+        expect(f.session.trailOf('alice'), restarted ? isEmpty : [fix]);
+        expect(f.api.follows, [
+          'alice',
+        ]); // no silent re-request after lost consent
+        expect(f.session.locationShare.sharing, isTrue);
+
+        // The existing location subscription supplies the next fix without a
+        // permission prompt, another watch, or a user action.
+        clock.elapse(const Duration(seconds: 1));
+        f.sample(lat: 37.002);
+        expect(f.session.locationShare.error, isNull);
+        expect(f.session.locationShare.lastSent?.lat, 37.002);
+        expect(f.source.requests, 1);
+        expect(f.source.watches, 1);
+        expect(f.source.cancellations, 0);
+        expect(f.http.deletes, isEmpty);
+        f.dispose();
+      });
+    }, timeout: _timeout);
+  }
 
   test('이전 연결의 보류 수락 응답은 재접속 뒤 완료된 POST 에 적용되지 않는다', () {
     fakeAsync((clock) {

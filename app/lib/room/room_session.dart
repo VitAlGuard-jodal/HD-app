@@ -11,6 +11,7 @@ import '../call/mesh_coordinator.dart';
 import '../core/errors.dart';
 import '../core/device_mode.dart';
 import '../core/driving_state.dart';
+import '../core/vehicle_state.dart';
 import '../location/location_share.dart';
 import '../location/location_source.dart';
 import '../location/follow_voice_guidance.dart';
@@ -71,15 +72,39 @@ class RoomSession extends ChangeNotifier {
     LocationSource? locationSource,
     DateTime Function()? locationNow,
     FollowVoiceGuidance? followVoice,
+    VehicleState? vehicle,
+    FollowVoiceGuidance? vehicleVoice,
   }) {
+    final speech = SpeechOutputCoordinator(now: locationNow);
+    // AppServices supplies the platform stream. Standalone/test sessions retain
+    // the same manual fallback without constructing a platform dependency.
+    this.vehicle =
+        vehicle ??
+        VehicleState(
+          mode: deviceMode ?? DeviceMode.phone,
+          events: const Stream<Object?>.empty(),
+        );
+    this.vehicle.addListener(_vehicleChanged);
+    _vehicleVoice =
+        vehicleVoice ??
+        FollowVoiceGuidance(
+          enabled: () => _carMode,
+          now: locationNow,
+          output: speech.scope(),
+        );
     _followVoice =
         followVoice ??
-        FollowVoiceGuidance(enabled: () => _carMode, now: locationNow);
+        FollowVoiceGuidance(
+          enabled: () => _carMode,
+          now: locationNow,
+          output: speech.scope(),
+        );
     locationShare = LocationShare(
       api: api,
       source: locationSource,
       roomCode: () => state.code,
-      canStart: () => !state.isLeaving,
+      canStart: () =>
+          !state.isLeaving && !_deviceReplaced && !_exitStopsLocation,
       selfHandle: () => store.handle,
       now: locationNow,
     );
@@ -106,7 +131,15 @@ class RoomSession extends ChangeNotifier {
     };
     mediaEngine.sendSignal = (to, kind, payload) async {
       final code = state.code;
-      if (code != null) await api.sendSignal(code, to, kind, payload);
+      if (code != null && !_deviceReplaced) {
+        try {
+          await api.sendSignal(code, to, kind, payload);
+        } on ApiException catch (error) {
+          if (error.code == 'DEVICE_REPLACED')
+            unawaited(_handleDeviceReplaced());
+          rethrow;
+        }
+      }
     };
     mediaEngine.connectionChanged = (connection, message) {
       mediaConnection = connection;
@@ -130,6 +163,8 @@ class RoomSession extends ChangeNotifier {
   final MicRouter micRouter;
   final DeviceMode? deviceMode;
   final DrivingState? driving;
+  late final VehicleState vehicle;
+  late final FollowVoiceGuidance _vehicleVoice;
   late final LocationShare locationShare;
   late final FollowVoiceGuidance _followVoice;
   late final StreamSubscription<Map<String, MeshPeerState>> _peerSubscription;
@@ -141,6 +176,14 @@ class RoomSession extends ChangeNotifier {
     final changedMembers = !identical(_state.members, value.members);
     _state = value;
     if (changedRoom) {
+      _hasEntered = false;
+      ++_readyContext;
+      _cancelReadyTimer?.cancel();
+      _cancelReadyPending = _readyRequested = _readyCancelled = false;
+      _wasExiting = _exitProtected = _exitStopsLocation = _resumeLocation =
+          false;
+      vehicleNotice = null;
+      _vehicleVoice.clear();
       ++_membersGeneration;
       _displayNames.clear();
       _clearLocations();
@@ -151,6 +194,263 @@ class RoomSession extends ChangeNotifier {
       }
     }
     locationShare.roomChanged();
+  }
+
+  bool _deviceReplaced = false;
+  bool _hasEntered = false;
+  bool get deviceReplaced => _deviceReplaced;
+  Future<void>? _deviceCleanup;
+  bool takingBack = false;
+  bool _wasExiting = false, _exitProtected = false, _exitStopsLocation = false;
+  bool _resumeLocation = false;
+  bool get exitProtected => _exitProtected;
+  Future<void> _exitStopping = Future<void>.value();
+  String? vehicleNotice;
+  bool _readyRequested = false,
+      _readyCancelled = false,
+      _cancelReadyPending = false;
+  int _readyContext = 0, _readyWrites = 0;
+  Future<void> _readyQueue = Future<void>.value();
+  Timer? _cancelReadyTimer;
+  bool get readyBusy => _readyWrites != 0 || _cancelReadyPending;
+  bool get selfReady =>
+      !_readyCancelled &&
+      state.members.any((m) => m.handle == store.handle && m.ready);
+  int get readyCount => state.members
+      .where((m) => m.ready && (m.handle != store.handle || !_readyCancelled))
+      .length;
+
+  Future<void> toggleReady() async {
+    if (_deviceReplaced || !state.isConnected || state.isLeaving || readyBusy)
+      return;
+    final ready = !selfReady;
+    final reason = _carMode ? vehicle.readyBlockedReason : null;
+    if (ready && reason != null) {
+      vehicleNotice = reason;
+      _notify();
+      return;
+    }
+    _readyRequested = ready;
+    _readyCancelled = false;
+    vehicleNotice = null;
+    if (ready) _vehicleVoice.clear();
+    await _writeReady(ready);
+  }
+
+  void _applyReady(ReadyChanged event) {
+    state = state.copyWith(
+      members: [
+        for (final member in state.members)
+          if (member.handle == event.handle &&
+              event.revision >= member.readyRevision)
+            member.withReady(
+              event.ready && !(event.handle == store.handle && _readyCancelled),
+              event.revision,
+            )
+          else
+            member,
+      ],
+    );
+    _vehicleChanged();
+  }
+
+  Future<void> _writeReady(bool ready) {
+    final code = state.code;
+    final context = _readyContext;
+    if (code == null || _deviceReplaced) return Future<void>.value();
+    _readyWrites++;
+    _notify();
+    final operation = _readyQueue.then((_) async {
+      if (_disposed ||
+          context != _readyContext ||
+          _deviceReplaced ||
+          state.isLeaving)
+        return;
+      // A door/gear transition can cancel a request before it leaves the queue.
+      if (ready && _readyCancelled) return;
+      try {
+        final result = await api.setReady(code, ready);
+        if (_disposed || context != _readyContext || _deviceReplaced) return;
+        if (!ready) {
+          _cancelReadyPending = false;
+          _cancelReadyTimer?.cancel();
+        }
+        _applyReady(result);
+      } on ApiException catch (error) {
+        if (error.code == 'DEVICE_REPLACED') {
+          unawaited(_handleDeviceReplaced());
+          return;
+        }
+        rethrow;
+      }
+    });
+    final completed = operation.whenComplete(() {
+      _readyWrites--;
+      _notify();
+    });
+    _readyQueue = completed.catchError((Object _) {});
+    return completed;
+  }
+
+  void _cancelReady() {
+    _readyRequested = false;
+    _readyCancelled = true; // immediately hides a late true response/event
+    state = state.copyWith(
+      members: [
+        for (final member in state.members)
+          member.handle == store.handle
+              ? member.withReady(false, member.readyRevision)
+              : member,
+      ],
+    );
+    _cancelReadyPending = true;
+    vehicleNotice = '준비가 취소됐습니다';
+    _vehicleVoice.announceOnce(
+      room: state.code!,
+      key: 'ready-cancelled',
+      text: '준비가 취소됐습니다',
+    );
+    _sendReadyCancellation();
+  }
+
+  void _sendReadyCancellation() {
+    _cancelReadyTimer?.cancel();
+    final context = _readyContext;
+    unawaited(
+      _writeReady(false).catchError((Object error) {
+        if (_disposed ||
+            context != _readyContext ||
+            _deviceReplaced ||
+            state.isLeaving)
+          return;
+        _setError(exceptionMessage(error, '준비 취소를 다시 전송하고 있습니다'));
+        _cancelReadyTimer = Timer(const Duration(seconds: 2), () {
+          if (_cancelReadyPending) _sendReadyCancellation();
+        });
+      }),
+    );
+  }
+
+  void _vehicleChanged() {
+    if (_disposed ||
+        !_carMode ||
+        _deviceReplaced ||
+        !_hasEntered ||
+        state.code == null ||
+        state.isLeaving)
+      return;
+    final cancelledReady =
+        vehicle.readyBlockedReason != null &&
+        !_readyCancelled &&
+        (selfReady || _readyRequested);
+    if (cancelledReady) {
+      _cancelReady();
+    }
+    final exiting = vehicle.exiting;
+    if (exiting && !_wasExiting) {
+      final action = store.exitProtection;
+      if (action != ExitProtection.none) {
+        _exitProtected = true;
+        _exitStopsLocation = action == ExitProtection.micAndLocation;
+        _resumeLocation =
+            _resumeLocation || (_exitStopsLocation && locationShare.sharing);
+        setMuted(true);
+        if (_exitStopsLocation) {
+          _cancelStarts();
+          _exitStopping = locationShare.stop();
+        }
+        vehicleNotice = _exitStopsLocation
+            ? '내리는 중이라 차량 마이크와 위치 보내기를 멈췄습니다'
+            : '내리는 중이라 차량 마이크를 껐습니다';
+        if (cancelledReady) vehicleNotice = '준비가 취소됐습니다. $vehicleNotice';
+      }
+    }
+    _wasExiting = exiting;
+    _notify();
+  }
+
+  Future<void> resumeAfterExit() async {
+    if (!_exitProtected || _deviceReplaced || state.isLeaving) return;
+    final code = state.code;
+    await _exitStopping;
+    if (_disposed || code != state.code || _deviceReplaced || state.isLeaving)
+      return;
+    final resumeLocation = _resumeLocation;
+    _exitProtected = _exitStopsLocation = _resumeLocation = false;
+    vehicleNotice = null;
+    setMuted(false);
+    if (resumeLocation) {
+      await locationShare.start(
+        token: Object(),
+        stillValid: () =>
+            !_disposed &&
+            state.code == code &&
+            !_deviceReplaced &&
+            !_exitStopsLocation &&
+            !state.isLeaving,
+      );
+    }
+    _notify();
+  }
+
+  Future<void> _handleDeviceReplaced() {
+    if (_deviceReplaced || _disposed)
+      return _deviceCleanup ?? Future<void>.value();
+    _deviceReplaced = true;
+    _hasEntered = false;
+    ++_generation;
+    ++_membersGeneration;
+    ++_readyContext;
+    _cancelReadyTimer?.cancel();
+    _cancelReadyPending = _readyRequested = false;
+    _readyCancelled = true;
+    _vehicleVoice.clear();
+    _clearLocations(); // prevents old follow cleanup mutating the new device
+    _beginConnection(); // invalidates in-flight follow responses and cleanups
+    state = state.copyWith(
+      isConnected: false,
+      error: null,
+      members: [for (final member in state.members) member.withReady(false, 0)],
+    );
+    vehicleNotice = '다른 기기에서 이어받았습니다';
+    mediaEngine.setMuted(true);
+    mediaEngine.setInterrupted(true);
+    final silencing = mediaEngine.setVolume(0).catchError((Object _) {});
+    final stopping = leaveCall();
+    final cancelling = _subscription?.cancel();
+    _subscription = null;
+    if (cancelling != null) unawaited(cancelling.catchError((Object _) {}));
+    _notify();
+    return _deviceCleanup = Future.wait<void>([
+      silencing,
+      stopping,
+      locationShare.stop(notifyServer: false),
+      _readyQueue,
+      _followQueue,
+    ]).then<void>((_) {});
+  }
+
+  Future<void> takeBack() async {
+    if (!_deviceReplaced || takingBack || state.isLeaving) return;
+    takingBack = true;
+    _notify();
+    try {
+      await _deviceCleanup;
+      final code = state.code;
+      if (_disposed || code == null || state.isLeaving) return;
+      _deviceReplaced = false;
+      _deviceCleanup = null;
+      _readyCancelled = false;
+      muted = _exitProtected;
+      vehicleNotice = null;
+      _wantCall = true;
+      retryAttempts = 0;
+      permissionDenied = false;
+      await open(code, force: true); // a NEW stream is explicit entry
+    } finally {
+      takingBack = false;
+      _notify();
+    }
   }
 
   final Map<String, String> _displayNames = {};
@@ -217,6 +517,8 @@ class RoomSession extends ChangeNotifier {
     final start = _locationStarts[token];
     return start != null &&
         !_disposed &&
+        !_deviceReplaced &&
+        !_exitStopsLocation &&
         !state.isLeaving &&
         state.code == start.code &&
         (start.incoming
@@ -305,6 +607,7 @@ class RoomSession extends ChangeNotifier {
   MediaConnectionState mediaConnection = MediaConnectionState.idle;
   String? mediaError;
   String? get callJoinBlockedReason {
+    if (_deviceReplaced) return '다른 기기에서 이어받았습니다';
     final handle = store.handle;
     if (handle == null || !state.isConnected) return '방 연결을 기다려 주세요.';
     if (!state.members.any((member) => member.handle == handle)) {
@@ -334,6 +637,18 @@ class RoomSession extends ChangeNotifier {
 
   void _beginConnection() {
     ++_connectionId;
+    // Readiness is also in server memory. A restarted server's revision 0
+    // snapshot must replace the previous connection's higher revisions.
+    ++_readyContext;
+    ++_membersGeneration;
+    _readyRequested = false;
+    _cancelReadyTimer?.cancel();
+    _cancelReadyTimer = null;
+    state = state.copyWith(
+      members: [
+        for (final member in state.members) member.withReady(member.ready, 0),
+      ],
+    );
     _serverRevision = 0;
     _myFollowRevision = null;
     _answeredRequestIds.clear();
@@ -351,6 +666,10 @@ class RoomSession extends ChangeNotifier {
 
   Future<void> open(String code, {bool force = false}) async {
     if (state.isLeaving) return;
+    if (_deviceReplaced && state.code == code) {
+      await takeBack();
+      return;
+    }
     if (!force && state.code == code && _subscription != null) return;
     if (state.code != null && state.code != code)
       throw StateError(joinedRoomReason);
@@ -378,6 +697,11 @@ class RoomSession extends ChangeNotifier {
         .subscribeEvents(code)
         .listen(
           (event) {
+            // Do not wait for slow member HTTP/media work before stopping.
+            if (event is DeviceReplaced) {
+              unawaited(_handleDeviceReplaced());
+              return;
+            }
             // hello / 재연결 / 멤버 갱신은 Kotlin collect처럼 순서대로 처리한다.
             _eventQueue = _eventQueue
                 .then((_) async {
@@ -413,6 +737,27 @@ class RoomSession extends ChangeNotifier {
 
   Future<void> _onEvent(String code, RoomEvent event, int generation) async {
     switch (event) {
+      case DeviceReplaced():
+        await _handleDeviceReplaced();
+        return;
+      case ReadyChanged():
+        _applyReady(event);
+      case MemberDeviceChanged():
+        if (event.handle != store.handle && !_deviceReplaced) {
+          _speaking.remove(event.handle);
+          // Drop the old peer before negotiating with the new device. The
+          // account/member list never gains a second entry.
+          await mediaEngine.setMembers(
+            state.members
+                .where((m) => m.handle != event.handle)
+                .map((m) => m.handle)
+                .toList(),
+          );
+          if (!_current(generation)) return;
+          await mediaEngine.setMembers(
+            state.members.map((m) => m.handle).toList(),
+          );
+        }
       case FollowRequest():
         if (event.requester == store.handle || event.revision < _serverRevision)
           return;
@@ -495,7 +840,8 @@ class RoomSession extends ChangeNotifier {
         if (changed) _notify();
         return;
       case Signal():
-        await mediaEngine.onSignal(event.from, event.kind, event.payload);
+        if (!_deviceReplaced)
+          await mediaEngine.onSignal(event.from, event.kind, event.payload);
       case Disconnected():
         state = state.copyWith(
           isConnected: false,
@@ -504,8 +850,8 @@ class RoomSession extends ChangeNotifier {
       case Reconnected():
         _beginConnection();
         try {
-          await api.joinRoom(code);
-          if (!_current(generation)) return;
+          // SSE resume has already retained/reclaimed the sender slot. Keep
+          // media alive and reconcile; POST join could replace another device.
           await _refresh(code, generation);
           if (_current(generation) && _mediaJoined) {
             await mediaEngine.reconcilePeers(
@@ -521,8 +867,12 @@ class RoomSession extends ChangeNotifier {
           }
         }
       case Hello():
+        // The stream has now established ownership, including explicit entry.
+        if (_cancelReadyPending) _sendReadyCancellation();
         if (event.revision < _serverRevision) {
           state = state.copyWith(isConnected: true, error: null);
+          _hasEntered = true;
+          _vehicleChanged();
           _maybeAutoJoin();
           _notify();
           return;
@@ -532,6 +882,8 @@ class RoomSession extends ChangeNotifier {
         if (!_current(generation)) return;
         // Keep live peers; repair only offers lost while SSE was unavailable.
         state = state.copyWith(isConnected: true, error: null);
+        _hasEntered = true;
+        _vehicleChanged();
         if (_mediaJoined) {
           await mediaEngine.reconcilePeers(
             state.members.map((member) => member.handle).toList(),
@@ -638,6 +990,20 @@ class RoomSession extends ChangeNotifier {
     final previous = {
       for (final member in state.members) member.handle: member.avatar,
     };
+    final previousReady = {
+      for (final member in state.members) member.handle: member,
+    };
+    members = {for (final member in members) member.handle: member}.values.map((
+      member,
+    ) {
+      final old = previousReady[member.handle];
+      if (old != null && old.readyRevision > member.readyRevision) {
+        member = member.withReady(old.ready, old.readyRevision);
+      }
+      return member.handle == store.handle && _readyCancelled
+          ? member.withReady(false, member.readyRevision)
+          : member;
+    }).toList();
     final self = store.handle;
     if (self != null &&
         store.avatar.version > (previous[self]?.version ?? -1)) {
@@ -963,6 +1329,8 @@ class RoomSession extends ChangeNotifier {
 
   bool checkFollowAllowed(String target) {
     if (_disposed ||
+        _deviceReplaced ||
+        _exitStopsLocation ||
         state.code == null ||
         state.isLeaving ||
         target == store.handle ||
@@ -1300,6 +1668,7 @@ class RoomSession extends ChangeNotifier {
   }
 
   Future<void> reconnect() async {
+    if (_deviceReplaced) return;
     _retryTimer?.cancel();
     _retryTimer = null;
     retryAttempts = 0;
@@ -1443,8 +1812,8 @@ class RoomSession extends ChangeNotifier {
     mediaConnection = MediaConnectionState.idle;
     _setLocalSpeaking(false);
     _speaking.clear();
-    muted = false;
-    speakerphone = true;
+    muted = _deviceReplaced || _exitProtected;
+    speakerphone = !_deviceReplaced;
     micRouter.resetOutputPreference();
     try {
       await Future.wait([mediaEngine.leave(), callService.stop()]);
@@ -1455,6 +1824,7 @@ class RoomSession extends ChangeNotifier {
   }
 
   void setMuted(bool value) {
+    if (!value && (_deviceReplaced || _exitProtected)) return;
     muted = value;
     if (value) _localSpeaking = false;
     mediaEngine.setMuted(value);
@@ -1481,7 +1851,7 @@ class RoomSession extends ChangeNotifier {
       if (_disposed) return;
       _settingVolume = true;
       try {
-        await mediaEngine.setVolume(volume / 100);
+        await mediaEngine.setVolume(_deviceReplaced ? 0 : volume / 100);
         if (carVolumeSlider && micRouter.isAutomotive) {
           await micRouter.setSystemCallVolume(volume);
         }
@@ -1530,7 +1900,7 @@ class RoomSession extends ChangeNotifier {
     if (_interrupted != micRouter.audioInterrupted) {
       _interrupted = micRouter.audioInterrupted;
       if (_interrupted) _setLocalSpeaking(false);
-      mediaEngine.setInterrupted(_interrupted);
+      mediaEngine.setInterrupted(_interrupted || _deviceReplaced);
     }
     if (_wantCall &&
         micRouter.resumeFailed &&
@@ -1550,7 +1920,9 @@ class RoomSession extends ChangeNotifier {
       callVolume = volume;
       unawaited(store.setCallVolume(volume));
       unawaited(
-        mediaEngine.setVolume(volume / 100).catchError((Object error) {
+        mediaEngine.setVolume(_deviceReplaced ? 0 : volume / 100).catchError((
+          Object error,
+        ) {
           mediaError = exceptionMessage(error, '통화 음량을 변경하지 못했습니다.');
           _notify();
         }),
@@ -1578,8 +1950,13 @@ class RoomSession extends ChangeNotifier {
   }
 
   Future<void> leave() async {
+    if (_deviceReplaced) {
+      await forget();
+      return;
+    }
     final code = state.code;
     if (code == null || state.isLeaving) return;
+    _vehicleVoice.clear();
     final stoppingCall = leaveCall();
     state = state.copyWith(isConnected: false, isLeaving: true);
     _cancelStarts();
@@ -1607,16 +1984,18 @@ class RoomSession extends ChangeNotifier {
 
   Future<void> forget() async {
     ++_generation;
+    _vehicleVoice.clear();
     _restorableRoom = null;
     final stoppingCall = leaveCall();
     state = state.copyWith(isConnected: false, isLeaving: true);
     _cancelStarts();
     _notify();
     await stoppingCall;
-    await locationShare.stop();
+    await locationShare.stop(notifyServer: !_deviceReplaced);
     await _subscription?.cancel();
     _subscription = null;
     state = const RoomState();
+    _deviceReplaced = false;
     _notify();
   }
 
@@ -1661,6 +2040,10 @@ class RoomSession extends ChangeNotifier {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    vehicle.removeListener(_vehicleChanged);
+    vehicle.dispose();
+    ++_readyContext;
+    _cancelReadyTimer?.cancel();
     store.removeListener(_profileChanged);
     locationShare.removeListener(_locationChanged);
     final stoppingLocation = locationShare.shutdown();
@@ -1686,6 +2069,8 @@ class RoomSession extends ChangeNotifier {
     unawaited(_peerSubscription.cancel());
     _shutdown = Future.wait<void>([
       _followVoice.dispose(),
+      _vehicleVoice.dispose(),
+      _readyQueue,
       stoppingLocation,
       _followQueue,
       _eventQueue,

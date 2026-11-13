@@ -463,7 +463,10 @@ void main() {
       f.api.events.add(const Reconnected());
       f.api.events.add(Hello('alice', f.api.members));
       clock.flushMicrotasks();
-      expect(f.api.joins, 1);
+      expect(
+        f.api.joins,
+        0,
+      ); // SSE resume restores a vacant sender; no ownership-changing join.
       expect(f.media.reconciliations, [
         ['alice', 'bob'],
         ['alice', 'bob'],
@@ -480,6 +483,81 @@ void main() {
       _microtasksOnly(clock, f.session.leave());
       _microtasksOnly(clock, f.dispose());
     });
+  });
+
+  test('재시작 복구는 일시적 송신 실패 뒤 join 없이 통화·준비·시그널을 이어간다', () async {
+    final f = await _Fixture.create();
+    final oldReadyResponse = Completer<ReadyChanged>();
+    Future<void>? cancellingReady;
+    try {
+      f.api.members = [
+        f.api.members.first.withReady(true, 5000),
+        f.api.members.last,
+      ];
+      await f.open();
+      await pumpEventQueue();
+      expect(f.session.selfReady, isTrue);
+      expect(f.calls.state.isActive, isTrue);
+      f.api.readyResponse = oldReadyResponse.future;
+      cancellingReady = f.session.toggleReady();
+      await pumpEventQueue();
+      f.api.events.add(const Disconnected('서버 재시작', 2000));
+      await pumpEventQueue();
+      expect(f.session.state.isConnected, isFalse);
+
+      // An ICE retry may arrive before SSE restores sender ownership.
+      f.api.signalError = const ApiException(
+        503,
+        'SENDER_UNAVAILABLE',
+        '연결 복구 중',
+      );
+      await expectLater(
+        f.media.sendSignal!('bob', 'ice', 'before-resume'),
+        throwsA(isA<ApiException>().having((e) => e.status, 'status', 503)),
+      );
+      expect(f.session.deviceReplaced, isFalse);
+      expect(f.calls.state.isActive, isTrue);
+      expect(f.media.leaves, 0);
+
+      f.api.signalError = null;
+      f.api.members = [
+        f.api.members.first.withReady(false, 0),
+        f.api.members.last,
+      ];
+      f.api.events.add(const Reconnected());
+      f.api.events.add(Hello('alice', f.api.members));
+      await pumpEventQueue();
+      expect(f.session.state.code, 'ABC123');
+      expect(f.session.state.isConnected, isTrue);
+      expect(f.session.selfReady, isFalse);
+      expect(f.api.joins, 0);
+      expect(f.api.subscriptions, 1);
+      expect(f.media.joins, 1);
+      expect(f.media.leaves, 0);
+      expect(f.media.reconciliations, [
+        ['alice', 'bob'],
+        ['alice', 'bob'],
+      ]);
+      oldReadyResponse.complete(const ReadyChanged('alice', false, 5001));
+      await cancellingReady;
+      expect(f.session.state.members.first.readyRevision, 0);
+      f.api.events.add(const ReadyChanged('alice', true, 1));
+      f.api.events.add(const Signal('bob', 'offer', 'after-restart'));
+      await pumpEventQueue();
+      expect(f.session.selfReady, isTrue);
+      expect(f.media.signals, [('bob', 'offer', 'after-restart')]);
+      await f.media.sendSignal!('bob', 'answer', 'after-resume');
+      expect(f.api.signals, [('bob', 'answer', 'after-resume')]);
+      expect(f.calls.starts, 1);
+      expect(f.calls.stops, 0);
+    } finally {
+      if (!oldReadyResponse.isCompleted) {
+        oldReadyResponse.complete(const ReadyChanged('alice', false, 5001));
+      }
+      await cancellingReady;
+      await f.session.leave();
+      await f.dispose();
+    }
   });
 
   test('피어 실패 상태는 전달하되 정상 통화와 FGS를 다시 시작하지 않는다', () {
@@ -698,7 +776,9 @@ class _Api extends ApiClient {
     Member('bob', 'Bob', '2'),
   ];
   Room? currentRoom;
-  Object? meError, roomError;
+  Object? meError, roomError, signalError;
+  final signals = <(String, String, Object?)>[];
+  Future<ReadyChanged>? readyResponse;
   Completer<MeResult>? pendingMe;
   int roomReads = 0, subscriptions = 0, joins = 0;
   @override
@@ -712,6 +792,21 @@ class _Api extends ApiClient {
   Future<Room> joinRoom(String code) async {
     joins++;
     return Room(code, null);
+  }
+
+  @override
+  Future<ReadyChanged> setReady(String code, bool ready) async =>
+      await readyResponse ?? ReadyChanged('alice', ready, 1);
+
+  @override
+  Future<void> sendSignal(
+    String code,
+    String to,
+    String kind,
+    Object? payload,
+  ) async {
+    if (signalError != null) throw signalError!;
+    signals.add((to, kind, payload));
   }
 
   @override
@@ -800,6 +895,7 @@ class _Media extends NoopMediaEngine {
   final List<String> order;
   List<String> members = [];
   final reconciliations = <List<String>>[];
+  final signals = <(String, String, Object?)>[];
   bool failJoin = false, muted = false, interrupted = false;
   int joins = 0, leaves = 0;
   double volume = 1;
@@ -821,6 +917,11 @@ class _Media extends NoopMediaEngine {
   @override
   Future<void> reconcilePeers(List<String> handles) async {
     reconciliations.add(List.of(handles));
+  }
+
+  @override
+  Future<void> onSignal(String from, String kind, Object? payload) async {
+    signals.add((from, kind, payload));
   }
 
   @override

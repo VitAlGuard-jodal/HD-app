@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../net/models.dart';
+import '../core/vehicle_state.dart';
 import 'legal_consent_store.dart';
 
 abstract interface class TokenStore {
@@ -104,6 +105,15 @@ class SessionStore extends ChangeNotifier implements TokenStore {
   String get baseUrl => preferences.getString('baseUrl') ?? defaultBaseUrl;
   int? get manualMicId => preferences.getInt('manualMicId');
   int get callVolume => (preferences.getInt('callVolume') ?? 100).clamp(0, 100);
+  ExitProtection get exitProtection => ExitProtection.values.firstWhere(
+    (value) => value.name == preferences.getString('vehicle.exitProtection'),
+    orElse: () => ExitProtection.micAndLocation,
+  );
+
+  Future<void> setExitProtection(ExitProtection value) async {
+    await preferences.setString('vehicle.exitProtection', value.name);
+    notifyListeners();
+  }
 
   Future<void> setCallVolume(int value) =>
       preferences.setInt('callVolume', value.clamp(0, 100));

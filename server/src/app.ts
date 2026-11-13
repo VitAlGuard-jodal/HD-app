@@ -5,6 +5,7 @@ import { hashPassword, issueToken, lookupToken, revokeToken, tokenHash, verifyPa
 import { isValidDisplayName, isValidHandle, isValidPassword } from "./handles.ts";
 import { LOCATION_DISCONNECT_GRACE_MS, LOCATION_STALE_MS, LOCATION_SWEEP_INTERVAL_MS, RoomLocationStore } from "./locations.ts";
 import { generateRoomCode, RoomEventHub } from "./rooms.ts";
+import { RoomReadyStore } from "./ready.ts";
 import { openEventStream } from "./sse.ts";
 import { issueIceServers } from "./turn.ts";
 import {
@@ -148,9 +149,42 @@ function requireMember(db: DatabaseSync, room: StoredRoom, user: StoredUser): vo
   }
 }
 
-export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLocationStore(), avatarsDir = avatarDirectory(db) }: {
-  db: DatabaseSync; hub?: RoomEventHub; locations?: RoomLocationStore; avatarsDir?: string;
+export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLocationStore(), readiness = new RoomReadyStore(), avatarsDir = avatarDirectory(db) }: {
+  db: DatabaseSync; hub?: RoomEventHub; locations?: RoomLocationStore; readiness?: RoomReadyStore; avatarsDir?: string;
 }): RequestListener {
+  function deviceOf(request: IncomingMessage, token: string): string {
+    const device = request.headers["x-unavo-device"];
+    if (device !== undefined && (typeof device !== "string" || !/^[0-9a-f]{32}$/.test(device))) {
+      invalid("기기 식별자가 올바르지 않습니다.");
+    }
+    // A supplied device ID cannot impersonate another authenticated session.
+    return device === undefined ? tokenHash(token) : `${tokenHash(token)}:${device}`;
+  }
+
+  function requireSender(request: IncomingMessage, room: StoredRoom, user: StoredUser, token: string): void {
+    authenticate(db, request); // body awaits must not revive revoked sessions
+    requireMember(db, room, user);
+    if (!hub.hasSender(room.code, user.handle)) {
+      // During restart recovery, HTTP may arrive before the SSE resume claims
+      // the vacant slot. Do not terminate the client's recovery as "replaced".
+      throw new HttpError(503, "SENDER_UNAVAILABLE", "방 연결을 복구하고 있습니다. 잠시 후 다시 시도해 주세요.");
+    }
+    if (!hub.isSender(room.code, user.handle, deviceOf(request, token))) {
+      throw new HttpError(409, "DEVICE_REPLACED", "다른 기기에서 이어받았습니다. 직접 다시 참여해 주세요.");
+    }
+  }
+
+  function members(room: StoredRoom) {
+    return listRoomMembers(db, room.id).map((member) => ({
+      ...member, ready: readiness.isReady(room.code, member.handle), readyRevision: readiness.revision(room.code),
+    }));
+  }
+
+  function clearReady(code: string, handle: string): void {
+    const wasReady = readiness.isReady(code, handle);
+    const result = readiness.remove(code, handle);
+    if (wasReady) hub.broadcast(code, "ready-changed", result);
+  }
   const locationCounts = new Map<string, { accepted: number; dropped: number; rate: number }>();
   let locationLogTimer: ReturnType<typeof setTimeout> | undefined;
   function countLocation(code: string, outcome: "accepted" | "dropped" | "rate"): void {
@@ -229,6 +263,16 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
   }
 
   const locationSweepTimer = setInterval(expireLocations, LOCATION_SWEEP_INTERVAL_MS).unref();
+  hub.on("sender-changed", ({ code, handle }: { code: string; handle: string }) => {
+    clearReady(code, handle);
+    removeLocation(code, handle, "device-changed");
+    locations.resetDevice(code, handle);
+  });
+  hub.on("sender-revoked", ({ code, handle }: { code: string; handle: string }) => {
+    clearReady(code, handle);
+    removeLocation(code, handle, "stopped");
+    locations.resetDevice(code, handle);
+  });
   hub.on("subscribed", ({ code, handle }: { code: string; handle: string }) => {
     cancelDisconnect(code, handle);
     locations.reconnected(code, handle);
@@ -293,6 +337,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
     }
 
     const { user, token } = authenticate(db, request);
+    const device = deviceOf(request, token);
     actors.set(response, user.handle);
 
     if (method === "GET" && path === "/v1/turn") {
@@ -322,7 +367,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
 
     if (method === "GET" && path === "/v1/me") {
       const room = findCurrentRoom(db, user.id);
-      const details = room ? publicRoomDetails(db, room) : null;
+      const details = room ? { ...publicRoomDetails(db, room), members: members(room) } : null;
       json(response, 200, {
         user: { ...publicUser(user), order: details?.members.find((member) => member.handle === user.handle)?.order ?? null },
         room: details,
@@ -465,6 +510,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
           createdBy: user.id,
         });
         if (room) {
+          hub.claim(room.code, user.handle, device, tokenHash(token));
           json(response, 201, { room: publicRoom(room) });
           return;
         }
@@ -472,7 +518,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       throw new HttpError(409, "ROOM_CODE_CONFLICT", "방 코드를 발급하지 못했습니다. 다시 시도해 주세요.");
     }
 
-    const roomMatch = /^\/v1\/rooms\/([^/]+)(?:\/(join|leave|events|signal|location|positions|follow(?:\/respond)?))?$/.exec(path);
+    const roomMatch = /^\/v1\/rooms\/([^/]+)(?:\/(join|leave|events|ready|signal|location|positions|follow(?:\/respond)?))?$/.exec(path);
     if (roomMatch) {
       const rawCode = pathValue(roomMatch[1]);
       if (!/^[A-Za-z0-9]+$/.test(rawCode)) {
@@ -484,11 +530,12 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       if (!room) throw new HttpError(404, "ROOM_NOT_FOUND", "방을 찾을 수 없습니다.");
 
       if (method === "GET" && !action) {
-        json(response, 200, { room: publicRoom(room), members: listRoomMembers(db, room.id) });
+        json(response, 200, { room: publicRoom(room), members: members(room) });
         return;
       }
       if (method === "POST" && action === "join") {
         await readJson(request, true);
+        authenticate(db, request);
         const currentRoom = findCurrentRoom(db, user.id);
         if (currentRoom && currentRoom.id !== room.id) {
           throw new HttpError(409, "ROOM_ACTIVE", "이미 참여 중인 방이 있습니다. 나간 뒤 다시 시도해 주세요.");
@@ -496,33 +543,54 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         if (joinRoom(db, room.id, user.id)) {
           hub.broadcast(code, "member-joined", { handle: user.handle, revision: locations.changed(code) });
         }
+        hub.claim(code, user.handle, device, tokenHash(token));
         json(response, 200, { room: publicRoom(room) });
         return;
       }
       if (method === "POST" && action === "leave") {
         await readJson(request, true);
-        if (!findRoomMembership(db, room.id, user.id)) {
+        authenticate(db, request);
+        const membership = findRoomMembership(db, room.id, user.id);
+        if (!membership) {
           throw new HttpError(403, "NOT_ROOM_MEMBER", "방 참여자만 사용할 수 있습니다.");
         }
+        // Former members still clean up a legacy empty room. Only a current
+        // member needs sender authority to remove the active membership.
+        if (membership.leftAt === null) requireSender(request, room, user, token);
+        clearReady(code, user.handle);
         if (leaveRoom(db, room.id, user.id)) {
           hub.broadcast(code, "member-left", { handle: user.handle, revision: locations.changed(code) });
         }
         hub.disconnectUser(code, user.handle);
+        hub.forgetSender(code, user.handle);
         removeLocation(code, user.handle);
         hub.clearSignals(code, user.handle);
         if (deleteEmptyRoom(db, room.id)) {
           for (const timer of disconnectTimers.get(code)?.values() ?? []) clearTimeout(timer);
           disconnectTimers.delete(code);
           locations.clear(code);
-          hub.clearSignals(code);
+          readiness.clear(code);
+          hub.clearRoom(code);
         }
         json(response, 204);
+        return;
+      }
+      if (method === "PUT" && action === "ready") {
+        requireMember(db, room, user);
+        const body = await readJson(request);
+        if (typeof body.ready !== "boolean" || Object.keys(body).some((key) => key !== "ready")) {
+          invalid("ready는 boolean이어야 합니다.");
+        }
+        requireSender(request, room, user, token);
+        const result = readiness.set(code, user.handle, body.ready);
+        hub.broadcast(code, "ready-changed", result);
+        json(response, 200, result);
         return;
       }
       if (action === "follow" && method === "POST") {
         requireMember(db, room, user);
         const body = await readJson(request);
-        requireMember(db, room, user);
+        requireSender(request, room, user, token);
         if (!isValidHandle(body.target) || body.target === user.handle) invalid("다른 참여자의 아이디가 필요합니다.");
         const target = findUserByHandle(db, body.target);
         if (!target || !isRoomMember(db, room.id, target.id)) {
@@ -550,7 +618,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       if (action === "follow/respond" && method === "POST") {
         requireMember(db, room, user);
         const body = await readJson(request);
-        requireMember(db, room, user);
+        requireSender(request, room, user, token);
         if (typeof body.requestId !== "string" || typeof body.accepted !== "boolean") invalid("요청 ID와 동의 여부가 필요합니다.");
         if (!locations.requestById(code, user.handle, body.requestId)) {
           throw new HttpError(404, "FOLLOW_EXPIRED", "이미 끝난 따라가기 요청입니다.");
@@ -567,7 +635,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         return;
       }
       if (action === "follow" && method === "DELETE") {
-        requireMember(db, room, user);
+        requireSender(request, room, user, token);
         requireFollowRate(code, user.handle);
         const relation = locations.unfollow(code, user.handle);
         if (relation) cancelRequest(code, relation);
@@ -577,7 +645,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       if (method === "POST" && action === "location") {
         requireMember(db, room, user);
         const body = await readJson(request);
-        requireMember(db, room, user);
+        requireSender(request, room, user, token);
         const result = locations.accept(code, { ...body, handle: user.handle });
         if (!result.ok) {
           if (result.reason === "invalid") invalid("위치 표본이 올바르지 않습니다.");
@@ -599,20 +667,26 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         return;
       }
       if (method === "DELETE" && action === "location") {
-        requireMember(db, room, user);
+        requireSender(request, room, user, token);
         removeLocation(code, user.handle, "stopped");
         json(response, 202, { accepted: true });
         return;
       }
       if (method === "GET" && action === "events") {
         requireMember(db, room, user);
+        const resuming = new URL(request.url!, "http://localhost").searchParams.get("resume") === "1";
+        if (resuming && hub.hasSender(code, user.handle)) requireSender(request, room, user, token);
+        // Initial stream connection is explicit entry (including the joined-room
+        // card). Resume can fill an empty slot after restart/revocation, but
+        // cannot replace another device. The check and claim are synchronous.
+        else hub.claim(code, user.handle, device, tokenHash(token));
         expireLocations();
         let unsubscribe = () => {};
         const stream = openEventStream(response, () => unsubscribe(), () => Boolean(lookupToken(db, token)));
-        unsubscribe = hub.subscribe(code, user.handle, tokenHash(token), stream.send, stream.close);
+        unsubscribe = hub.subscribe(code, user.handle, tokenHash(token), stream.send, stream.close, device);
         if (!stream.send("hello", {
           self: { ...publicUser(user), order: listRoomMembers(db, room.id).find((member) => member.handle === user.handle)?.order },
-          members: listRoomMembers(db, room.id),
+          members: members(room),
           leader: room.createdBy, ...locations.snapshot(code, user.handle),
           revision: locations.revision(code),
           followTarget: locations.targetOf(code, user.handle),
@@ -635,7 +709,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
           invalid("수신 아이디, offer·answer·ice·custom 중 종류, JSON payload가 필요합니다.");
         }
         // 본문을 받는 사이 나간 사용자도 시그널을 보내지 못하게 다시 확인한다.
-        requireMember(db, room, user);
+        requireSender(request, room, user, token);
         const recipient = findUserByHandle(db, body.to);
         if (!recipient || !isRoomMember(db, room.id, recipient.id)) {
           throw new HttpError(403, "NOT_ROOM_MEMBER", "수신자가 방 참여자가 아닙니다.");

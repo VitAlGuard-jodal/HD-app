@@ -12,6 +12,7 @@ import kr.modumoa.hdapp.call.CallForegroundService
 import kr.modumoa.hdapp.drive.DriveChannel
 import kr.modumoa.hdapp.location.LocationChannel
 import kr.modumoa.hdapp.tts.TtsChannel
+import kr.modumoa.hdapp.vehicle.VehicleChannel
 
 class MainActivity : FlutterActivity() {
     private var audioChannel: AudioChannel? = null
@@ -19,6 +20,7 @@ class MainActivity : FlutterActivity() {
     private var driveChannel: DriveChannel? = null
     private var locationChannel: LocationChannel? = null
     private var ttsChannel: TtsChannel? = null
+    private var vehicleChannel: VehicleChannel? = null
     private var deviceChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -41,6 +43,7 @@ class MainActivity : FlutterActivity() {
         driveChannel = DriveChannel(this, messenger)
         locationChannel = LocationChannel(this, messenger)
         ttsChannel = TtsChannel(this, messenger)
+        vehicleChannel = VehicleChannel(this, messenger)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -75,12 +78,14 @@ class MainActivity : FlutterActivity() {
         driveChannel?.dispose()
         locationChannel?.dispose()
         ttsChannel?.dispose()
+        vehicleChannel?.dispose()
         deviceChannel?.setMethodCallHandler(null)
         audioChannel = null
         callChannel = null
         driveChannel = null
         locationChannel = null
         ttsChannel = null
+        vehicleChannel = null
         deviceChannel = null
         super.cleanUpFlutterEngine(flutterEngine)
     }

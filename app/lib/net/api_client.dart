@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
@@ -27,6 +28,12 @@ class ApiClient {
        _avatarNow = avatarNow ?? DateTime.now,
        _clientFactory = clientFactory ?? HttpClient.new;
   final TokenStore tokenStore;
+  // One identity per app process, shared by HTTP and every SSE retry. The
+  // authentication token additionally scopes it on the server.
+  final String deviceId = List.generate(
+    16,
+    (_) => Random.secure().nextInt(256),
+  ).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
   final bool allowPrivateCleartext;
   final Duration retryDelay;
   final Duration _sseSilenceTimeout;
@@ -204,6 +211,13 @@ class ApiClient {
     await _request('POST', '/v1/rooms/${_segment(code)}/leave');
   }
 
+  Future<ReadyChanged> setReady(String code, bool ready) async =>
+      ReadyChanged.fromJson(
+        await _response('PUT', '/v1/rooms/${_segment(code)}/ready', {
+          'ready': ready,
+        }),
+      );
+
   Future<bool> sendLocation(String code, LocationFix fix) async =>
       (await _response(
             'POST',
@@ -273,6 +287,7 @@ class ApiClient {
     Timer? retryTimer;
     Completer<void>? retryWait;
     var cancelled = false;
+    var attempted = false;
 
     Future<void> read() async {
       var wasConnected = false;
@@ -285,8 +300,9 @@ class ApiClient {
           final request = await _open(
             client,
             'GET',
-            '/v1/rooms/${_segment(code)}/events',
+            '/v1/rooms/${_segment(code)}/events${attempted ? '?resume=1' : ''}',
           );
+          attempted = true;
           request.headers.set(HttpHeaders.acceptHeader, 'text/event-stream');
           request.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
           final response = await request.close().timeout(
@@ -312,10 +328,18 @@ class ApiClient {
             if (event == null) continue;
             final decoded = _decode(event);
             if (decoded != null) controller.add(decoded);
+            if (decoded is DeviceReplaced) {
+              cancelled = true;
+              break;
+            }
           }
           if (!cancelled) throw const SocketException('서버 연결이 끊겼습니다.');
         } catch (error, stack) {
           if (cancelled) break;
+          if (error is ApiException && error.code == 'DEVICE_REPLACED') {
+            controller.add(const DeviceReplaced());
+            break;
+          }
           if (error is ApiException && {401, 403, 404}.contains(error.status)) {
             controller.addError(error, stack);
             break;
@@ -373,10 +397,9 @@ class ApiClient {
       (throw const ApiException(0, 'empty_response', '서버 응답이 비어 있습니다.'));
 
   Future<JsonMap?> _request(String method, String path, [JsonMap? body]) async {
-    // GET and membership join are idempotent. Do not replay room creation,
-    // authentication, or signaling when a response is lost.
-    final retryable =
-        method == 'GET' || method == 'POST' && path.endsWith('/join');
+    // Join now claims device ownership. A lost response must not cause an
+    // automatic retry to take ownership back from a later explicit entrant.
+    final retryable = method == 'GET';
     for (var attempt = 0; ; attempt++) {
       try {
         return await _requestOnce(method, path, body);
@@ -463,6 +486,7 @@ class ApiClient {
     );
     request.followRedirects = false;
     request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+    request.headers.set('x-unavo-device', deviceId);
     final token = tokenStore.token;
     if (token != null)
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
@@ -483,6 +507,7 @@ class ApiClient {
         .timeout(_timeout, onTimeout: _onTimeout);
     request.followRedirects = false;
     request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+    request.headers.set('x-unavo-device', deviceId);
     final token = tokenStore.token;
     if (token != null)
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
@@ -527,6 +552,9 @@ class ApiClient {
       'follow-response',
       'follow-cancelled',
       'trail',
+      'ready-changed',
+      'device-replaced',
+      'member-device-changed',
     }.contains(event.name))
       return null;
     JsonMap data;
@@ -543,6 +571,12 @@ class ApiClient {
       return null;
     }
     switch (event.name) {
+      case 'ready-changed':
+        return ReadyChanged.fromJson(data);
+      case 'device-replaced':
+        return const DeviceReplaced();
+      case 'member-device-changed':
+        return MemberDeviceChanged(data['handle'] as String);
       case 'member-updated':
         return MemberUpdated(
           data['handle'] as String,

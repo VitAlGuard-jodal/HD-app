@@ -292,4 +292,14 @@ export class RoomLocationStore {
   }
 
   clear(code: string): void { this.#rooms.delete(code); }
+
+  resetDevice(code: string, handle: string): void {
+    const room = this.#rooms.get(code);
+    if (!room) return;
+    room.lastReceivedAt.delete(handle);
+    room.lastFollowAt.delete(handle);
+    for (const key of room.lastSeq.keys()) {
+      if ((JSON.parse(key) as string[])[0] === handle) room.lastSeq.delete(key);
+    }
+  }
 }

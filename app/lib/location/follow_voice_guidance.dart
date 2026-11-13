@@ -8,6 +8,66 @@ abstract class FollowSpeechOutput {
   Future<void> stop();
 }
 
+/// The native channel accepts one utterance. Stopping follow must not stop a
+/// readiness announcement, although both guidance queues share that channel.
+class SpeechOutputCoordinator {
+  SpeechOutputCoordinator({
+    FollowSpeechOutput? output,
+    DateTime Function()? now,
+  }) : output = output ?? PleosSpeechOutput(),
+       now = now ?? DateTime.now;
+  final FollowSpeechOutput output;
+  final DateTime Function() now;
+  Future<void> _queue = Future<void>.value(), _stopping = Future<void>.value();
+  _ScopedSpeechOutput? _active;
+  FollowSpeechOutput scope() => _ScopedSpeechOutput(this);
+
+  Future<void> _speak(
+    _ScopedSpeechOutput scope,
+    String text,
+    DateTime expiresAt,
+  ) {
+    final generation = scope.generation;
+    final operation = _queue.then((_) async {
+      while (true) {
+        final stopping = _stopping;
+        await stopping;
+        if (identical(stopping, _stopping)) break;
+      }
+      if (generation != scope.generation || !now().isBefore(expiresAt)) return;
+      _active = scope;
+      try {
+        await output.speak(text, expiresAt);
+      } finally {
+        if (identical(_active, scope)) _active = null;
+      }
+    });
+    _queue = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  Future<void> _stop(_ScopedSpeechOutput scope) {
+    ++scope.generation;
+    if (!identical(_active, scope)) return Future<void>.value();
+    return _stopping = _stopping.then((_) => output.stop()).catchError((
+      Object error,
+    ) {
+      debugPrint('unavo-tts: scoped stop failed (${error.runtimeType})');
+    });
+  }
+}
+
+class _ScopedSpeechOutput implements FollowSpeechOutput {
+  _ScopedSpeechOutput(this.coordinator);
+  final SpeechOutputCoordinator coordinator;
+  int generation = 0;
+  @override
+  Future<void> speak(String text, DateTime expiresAt) =>
+      coordinator._speak(this, text, expiresAt);
+  @override
+  Future<void> stop() => coordinator._stop(this);
+}
+
 class PleosSpeechOutput implements FollowSpeechOutput {
   PleosSpeechOutput({this.channel = const MethodChannel('unavo/tts')});
   final MethodChannel channel;
@@ -57,6 +117,7 @@ class FollowVoiceGuidance {
   final FollowSpeechOutput output;
   final DateTime Function() now;
   final _queue = <_Announcement>[];
+  final _announced = <String>{};
   String? _room, _target;
   String _name = '';
   DateTime? _measurement;
@@ -66,6 +127,23 @@ class FollowVoiceGuidance {
   bool _terminal = false, _draining = false, _disposed = false;
   int _generation = 0;
   Future<void> _stopping = Future<void>.value();
+
+  // Vehicle notices use the same serialized, expiring, generation-scoped queue
+  // as follow guidance. Call clear when the readiness cycle/room ends.
+  void announceOnce({
+    required String room,
+    required String key,
+    required String text,
+  }) {
+    if (_disposed || !enabled()) return;
+    if (_room != room) clear();
+    _room = room;
+    if (!_announced.add(key)) return;
+    _queue.add(
+      _Announcement(text, now().add(announcementLifetime), _generation),
+    );
+    unawaited(_drain());
+  }
 
   void update({
     required String? room,
@@ -147,7 +225,7 @@ class FollowVoiceGuidance {
     // Only the latest state of this peer is relevant when speech is backed up.
     _queue.clear();
     final text = next == _FollowVoiceState.stopped
-        ? '$_name 님이 위치 공유를 끝냈습니다'
+        ? '$_name 님이 위치 공유를 중지했습니다'
         : '$_name 님 위치가 잠시 갱신되지 않고 있습니다';
     _queue.add(
       _Announcement(text, now().add(announcementLifetime), _generation),
@@ -185,6 +263,7 @@ class FollowVoiceGuidance {
     _timer?.cancel();
     _timer = null;
     _queue.clear();
+    _announced.clear();
     _room = _target = null;
     _measurement = null;
     _lastAt = null;

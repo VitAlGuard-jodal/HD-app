@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/app_services.dart';
 import '../../core/device_mode.dart';
+import '../../core/vehicle_state.dart';
 import '../../core/errors.dart';
 import '../../ui/control_scale.dart';
 import '../../ui/theme.dart';
@@ -343,6 +344,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
       onRoom: widget.onRoom ?? (_) {},
     ),
     _CarSetting.mic => MicScreen(router: widget.services.mic),
+    _CarSetting.exit => ListenableBuilder(
+      listenable: widget.services.store,
+      builder: (context, _) => PanelScroll(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('내릴 때 이 차량에서 적용할 동작을 고르세요.', style: UnavoType.body),
+            const Text('다시 켤 때는 차량 화면에서 직접 눌러 주세요.', style: UnavoType.body),
+            for (final action in ExitProtection.values) ...[
+              SizedBox(height: ControlScale.gap(context)),
+              Row(
+                children: [
+                  PanelButton(
+                    key: ValueKey('settings-exit-${action.name}'),
+                    label: action.notice,
+                    icon: action.icon,
+                    selected: widget.services.store.exitProtection == action,
+                    style: widget.services.store.exitProtection == action
+                        ? PanelButtonStyle.gold
+                        : PanelButtonStyle.neutral,
+                    onPressed: _busy
+                        ? null
+                        : () async {
+                            try {
+                              await widget.services.store.setExitProtection(
+                                action,
+                              );
+                            } catch (error) {
+                              if (mounted)
+                                setState(() => _error = errorMessage(error));
+                            }
+                          },
+                  ),
+                  SizedBox(width: ControlScale.gap(context)),
+                  Expanded(child: Text(action.notice, style: UnavoType.body)),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    ),
     _CarSetting.volume => ListenableBuilder(
       listenable: widget.services.rooms,
       builder: (context, _) {
@@ -423,6 +466,7 @@ enum _CarSetting {
   friends('친구', 'friends'),
   mic('마이크', 'mic', 'settings-mic'),
   volume('통화 음량', 'volume2'),
+  exit('내릴 때', 'exit'),
   server('서버 주소', 'server', 'settings-server'),
   terms('약관', 'check', 'settings-legal'),
   consent('동의 문서', 'location'),

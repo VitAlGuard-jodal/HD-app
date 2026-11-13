@@ -16,6 +16,7 @@ import '../../ui/icons.dart';
 import '../../ui/theme.dart';
 import '../../ui/widgets/floating_bar.dart';
 import '../../ui/widgets/member_tile.dart';
+import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/unavo_dialog.dart';
 import '../car/car_shell.dart';
 import '../../ui/widgets/member_avatar.dart';
@@ -410,6 +411,7 @@ class _RoomScreenState extends State<RoomScreen> {
                     (member.handle == widget.services.store.handle &&
                             !session.locationShare.sharing) ||
                         _busy ||
+                        session.deviceReplaced ||
                         state.isLeaving
                     ? null
                     : () => _run(() => _tapMember(context, member)),
@@ -520,7 +522,10 @@ class _RoomScreenState extends State<RoomScreen> {
               label: session.muted ? '음소거 해제' : '음소거',
               icon: session.muted ? 'micoff' : 'mic',
               selected: session.muted,
-              onPressed: inCall ? () => session.setMuted(!session.muted) : null,
+              onPressed:
+                  inCall && !session.exitProtected && !session.deviceReplaced
+                  ? () => session.setMuted(!session.muted)
+                  : null,
             ),
             if (reconnect && !automotive)
               FloatingBarButton(
@@ -681,6 +686,78 @@ class _RoomScreenState extends State<RoomScreen> {
                             const SizedBox(height: 12),
                           ],
                           statusRow,
+                          Row(
+                            key: const ValueKey('room-ready-summary'),
+                            children: [
+                              Semantics(
+                                label:
+                                    '출발 준비 ${session.readyCount}/${state.members.length}',
+                                child: Row(
+                                  children: [
+                                    const UnavoIcon('check'),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      '${session.readyCount}/${state.members.length}',
+                                      style: UnavoType.body,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const Spacer(),
+                              PanelButton(
+                                key: const ValueKey('room-ready-toggle'),
+                                label: session.selfReady ? '출발 준비 취소' : '출발 준비',
+                                icon: 'check',
+                                selected: session.selfReady,
+                                style: session.selfReady
+                                    ? PanelButtonStyle.call
+                                    : PanelButtonStyle.neutral,
+                                onPressed:
+                                    _busy ||
+                                        session.readyBusy ||
+                                        !state.isConnected ||
+                                        state.isLeaving ||
+                                        session.deviceReplaced
+                                    ? null
+                                    : () => _run(session.toggleReady),
+                              ),
+                            ],
+                          ),
+                          if (session.vehicleNotice != null ||
+                              session.deviceReplaced ||
+                              session.exitProtected)
+                            Row(
+                              key: const ValueKey('room-vehicle-notice'),
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    session.vehicleNotice ?? '',
+                                    style: UnavoType.body,
+                                  ),
+                                ),
+                                if (session.deviceReplaced)
+                                  PanelButton(
+                                    key: const ValueKey('room-take-back'),
+                                    label: '이 기기에서 다시 참여',
+                                    icon: 'login',
+                                    onPressed:
+                                        _busy ||
+                                            state.isLeaving ||
+                                            session.takingBack
+                                        ? null
+                                        : () => _run(session.takeBack),
+                                  )
+                                else if (session.exitProtected)
+                                  PanelButton(
+                                    key: const ValueKey('room-exit-resume'),
+                                    label: '차량 마이크와 이전 위치 공유 다시 켜기',
+                                    icon: 'refresh',
+                                    onPressed: _busy || state.isLeaving
+                                        ? null
+                                        : () => _run(session.resumeAfterExit),
+                                  ),
+                              ],
+                            ),
                           ErrorText(error),
                           if (session.locationShare.deletionStatus
                               case final deletion?)

@@ -310,14 +310,15 @@ class LocationShare extends ChangeNotifier {
     }
   }
 
-  Future<void> stop() {
+  Future<void> stop({bool notifyServer = true}) {
     // 진행 중인 DELETE를 기다리는 start도 뒤이은 stop으로 취소할 수 있다.
     ++_generation;
+    if (!notifyServer) _cancelDeletion();
     if (_stopping != null) return _stopping!;
     final stopped = Completer<void>();
     _stopping = stopped.future;
     unawaited(
-      _stop().then<void>(
+      _stop(notifyServer: notifyServer).then<void>(
         (_) {
           _stopping = null;
           stopped.complete();
@@ -331,10 +332,12 @@ class LocationShare extends ChangeNotifier {
     return stopped.future;
   }
 
-  Future<void> _stop() async {
+  Future<void> _stop({required bool notifyServer}) async {
     final code = _activeCode;
     final handle = _activeHandle;
-    final job = code != null && handle != null
+    final job = !notifyServer
+        ? null
+        : code != null && handle != null
         ? _LocationDeletion(code, handle, _generation)
         : _deletion;
     if (job != null) {
@@ -386,7 +389,9 @@ class LocationShare extends ChangeNotifier {
       if (_disposed ||
           roomCode() != job.code ||
           selfHandle() != job.handle ||
-          error is ApiException && {401, 403, 404}.contains(error.status)) {
+          error is ApiException &&
+              ({401, 403, 404}.contains(error.status) ||
+                  error.code == 'DEVICE_REPLACED')) {
         _cancelDeletion();
         return;
       }

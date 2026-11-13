@@ -13,6 +13,7 @@ import 'package:unavo/call/media_engine.dart';
 import 'package:unavo/core/app_services.dart';
 import 'package:unavo/core/device_mode.dart';
 import 'package:unavo/core/driving_state.dart';
+import 'package:unavo/core/vehicle_state.dart';
 import 'package:unavo/location/location_share.dart';
 import 'package:unavo/map/map_provider.dart';
 import 'package:unavo/net/api_client.dart';
@@ -70,6 +71,7 @@ class ConsentTestServices implements AppServices {
     this.store, {
     DeviceMode mode = DeviceMode.phone,
     Stream<Object?>? drivingEvents,
+    Stream<Object?>? vehicleEvents,
     DateTime Function()? locationNow,
   }) {
     _api = ConsentTestApi(store);
@@ -89,6 +91,10 @@ class ConsentTestServices implements AppServices {
       locationNow: locationNow,
       deviceMode: mode,
       driving: driving,
+      vehicle: VehicleState(
+        mode: mode,
+        events: vehicleEvents ?? const Stream<Object?>.empty(),
+      ),
     );
   }
 
@@ -99,6 +105,7 @@ class ConsentTestServices implements AppServices {
     String? serverVersion,
     DeviceMode mode = DeviceMode.phone,
     Stream<Object?>? drivingEvents,
+    Stream<Object?>? vehicleEvents,
     String handle = 'bob',
   }) async {
     SharedPreferences.setMockInitialValues({
@@ -117,6 +124,7 @@ class ConsentTestServices implements AppServices {
       SessionStore(preferences, defaultBaseUrl: 'https://example.invalid'),
       mode: mode,
       drivingEvents: drivingEvents,
+      vehicleEvents: vehicleEvents,
       locationNow: tester.binding.clock.now,
     );
     if (serverVersion != null) {
@@ -259,6 +267,20 @@ class ConsentTestApi extends ApiClient {
   }
 
   int revision = 0;
+  final readyWrites = <bool>[];
+  @override
+  Future<ReadyChanged> setReady(String code, bool ready) async {
+    readyWrites.add(ready);
+    final result = ReadyChanged(store.handle!, ready, readyWrites.length);
+    members = [
+      for (final member in members)
+        member.handle == store.handle
+            ? member.withReady(ready, result.revision)
+            : member,
+    ];
+    return result;
+  }
+
   bool followAccepted = true;
   Future<void>? roomGate, locationGate;
   bool roomFails = false;

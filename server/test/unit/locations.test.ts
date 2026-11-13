@@ -6,7 +6,7 @@ import { Writable } from "node:stream";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { createApp } from "../../src/app.ts";
-import { issueToken, revokeToken } from "../../src/auth.ts";
+import { issueToken, revokeToken, tokenHash } from "../../src/auth.ts";
 import { openDb } from "../../src/db.ts";
 import { LOCATION_TRAIL_LIMIT, LOCATION_DISCONNECT_GRACE_MS, LOCATION_STALE_MS, RoomLocationStore } from "../../src/locations.ts";
 import { RoomEventHub } from "../../src/rooms.ts";
@@ -49,6 +49,11 @@ function fixture(t: TestContext, withFollow = true) {
   const tokens = new Map(users.map((user) => [user.handle, issueToken(db, user.id)]));
   const room = createRoom(db, { code: "ABC234", name: "위치 공유", createdBy: users[0].id })!;
   joinRoom(db, room.id, users[1].id);
+  // The fixture inserts membership directly; mirror explicit initial entry.
+  for (const handle of ["alice", "bob"]) {
+    const hash = tokenHash(tokens.get(handle)!);
+    hub.claim(room.code, handle, hash, hash);
+  }
   if (withFollow) {
     const request = locations.requestFollow(room.code, "bob", "alice");
     locations.respondFollow(room.code, "alice", request.requestId, true);
@@ -247,6 +252,10 @@ test("다른 토큰 SSE가 남은 로그아웃은 공유·팔로워 관계·궤�
   const otherToken = issueToken(db, users[0].id);
   tokens.set("alice", otherToken);
   const survivor = send("GET", "/v1/rooms/ABC234/events", "alice");
+  // Device replacement clears the old consent relationship. Recreate the
+  // survivor's relationship explicitly before testing the old token's logout.
+  const renewed = locations.requestFollow("ABC234", "bob", "alice");
+  locations.respondFollow("ABC234", "alice", renewed.requestId, true);
   const bob = send("GET", "/v1/rooms/ABC234/events", "bob");
   await api("POST", "/location", "alice", sample);
   const before = locations.snapshot("ABC234");
@@ -270,7 +279,7 @@ test("다른 토큰 SSE가 남은 로그아웃은 공유·팔로워 관계·궤�
 });
 
 for (const hadSse of [false, true]) {
-  test(`다른 유효 토큰만 남은 로그아웃은 ${hadSse ? "마지막 SSE를 닫고" : "SSE 없이도"} 위치 POST를 보존하다 stale로 정리한다`, async (t) => {
+  test(`송신 기기 로그아웃은 ${hadSse ? "SSE를 닫고" : "SSE 없이도"} 즉시 정리하며 다른 토큰은 빈 자리 resume으로 복구한다`, async (t) => {
     t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
     const { api, send, hub, locations, db, room, users, tokens } = fixture(t);
     const otherToken = issueToken(db, users[0].id);
@@ -283,31 +292,31 @@ for (const hadSse of [false, true]) {
     assert.equal(response.statusCode, 204);
     if (original) assert.equal(original.writableEnded, true);
     assert.equal(hub.subscriberCount(room.code, "alice"), 0);
-    assert.equal(locations.disconnectedAt(room.code, "alice"), Date.now());
-    tokens.set("alice", otherToken);
-    for (let seq = 1; seq <= 4; seq++) {
-      t.mock.timers.tick(LOCATION_DISCONNECT_GRACE_MS - 1000);
-      assert.equal((await api("POST", "/location", "alice", { ...sample, seq })).status, 202);
-      t.mock.timers.tick(1000);
-      assert.equal(locations.targetOf(room.code, "bob"), "alice");
-      assert.equal(locations.position(room.code, "alice")?.seq, seq);
-      assert.equal(locations.snapshot(room.code).trails.alice.length, seq + 1);
-    }
-    assert.equal(bob.events().some((event) => event.name === "location-stopped" || event.name === "follow-response"), false);
-    t.mock.timers.tick(LOCATION_STALE_MS);
     assert.equal(locations.targetOf(room.code, "bob"), null);
     assert.deepEqual(locations.snapshot(room.code), { positions: [], trails: {} });
     assert.equal(locations.disconnectedAt(room.code, "alice"), undefined);
     assert.equal(isRoomMember(db, room.id, users[0].id), true);
     assert.deepEqual(bob.events().filter((event) => event.name === "follow-response").map((event) => event.data), [{
-      requestId, requester: "bob", target: "alice", accepted: false, revision: locations.revision(room.code), reason: "stale",
+      requestId, requester: "bob", target: "alice", accepted: false, revision: locations.revision(room.code), reason: "stopped",
     }]);
+    tokens.set("alice", otherToken);
+    const pending = await api("POST", "/location", "alice", sample);
+    assert.equal(pending.status, 503);
+    assert.equal(pending.body.error.code, "SENDER_UNAVAILABLE");
+    assert.equal(hub.hasSender(room.code, "alice"), false);
+    const resumed = send("GET", "/v1/rooms/ABC234/events?resume=1", "alice");
+    assert.equal(resumed.statusCode, 200);
+    assert.equal(resumed.events()[0].name, "hello");
+    assert.equal(hub.isSender(room.code, "alice", tokenHash(otherToken)), true);
+    assert.equal((await api("POST", "/location", "alice", sample)).status, 202);
+    assert.equal(locations.targetOf(room.code, "bob"), null); // no implicit consent restoration
     t.mock.timers.tick(LOCATION_STALE_MS);
-    assert.deepEqual(bob.events().filter((event) => event.name === "location-stopped").map((event) => event.data.reason), ["stale"]);
+    assert.equal(locations.position(room.code, "alice"), undefined);
+    assert.deepEqual(bob.events().filter((event) => event.name === "location-stopped").map((event) => event.data.reason), ["stopped", "stale"]);
   });
 }
 
-test("다른 유효 토큰이 있어도 위치 표본이 없는 로그아웃은 30초 유예 뒤 관계를 정리한다", async (t) => {
+test("다른 유효 토큰이 있어도 송신 기기 로그아웃은 표본 없는 관계도 즉시 정리한다", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
   const { send, locations, db, room, users } = fixture(t);
   issueToken(db, users[0].id);
@@ -315,12 +324,10 @@ test("다른 유효 토큰이 있어도 위치 표본이 없는 로그아웃은 
   const response = send("POST", "/v1/auth/logout", "alice");
   await new Promise<void>((resolve) => response.once("finish", resolve));
   assert.equal(response.statusCode, 204);
-  t.mock.timers.tick(LOCATION_DISCONNECT_GRACE_MS - 1);
-  assert.equal(locations.targetOf(room.code, "bob"), "alice");
-  t.mock.timers.tick(1);
   assert.equal(locations.targetOf(room.code, "bob"), null);
   assert.equal(isRoomMember(db, room.id, users[0].id), true);
-  assert.deepEqual(bob.events().filter((event) => event.name === "follow-response").map((event) => event.data.reason), ["left"]);
+  t.mock.timers.tick(LOCATION_DISCONNECT_GRACE_MS);
+  assert.deepEqual(bob.events().filter((event) => event.name === "follow-response").map((event) => event.data.reason), ["stopped"]);
 });
 
 test("M7 SSE와 위치가 모두 끊기면 유예가 아닌 기존 sweep이 stale로 정리한다", async (t) => {
@@ -535,7 +542,10 @@ for (const action of ["leave", "stop", "logout"]) {
 }
 
 test("F4 비멤버 leave 403, 현재·전 멤버 반복 leave 204와 빈 방 삭제", async (t) => {
-  const { api, db, room, users, locations } = fixture(t);
+  const { api, db, room, users, locations, hub, send } = fixture(t);
+  send("GET", "/v1/rooms/ABC234/events", "alice");
+  await api("POST", "/location", "alice", sample);
+  await api("PUT", "/ready", "alice", { ready: true });
   assert.equal((await api("POST", "/leave", "outsider")).status, 403);
   assert.equal((await api("POST", "/leave", "bob")).status, 204);
   assert.equal((await api("POST", "/leave", "bob")).status, 204);
@@ -545,6 +555,9 @@ test("F4 비멤버 leave 403, 현재·전 멤버 반복 leave 204와 빈 방 삭
   assert.equal((await api("POST", "/leave", "alice")).status, 204);
   assert.equal(findRoomByCode(db, room.code), undefined);
   assert.deepEqual(locations.snapshot(room.code), { positions: [], trails: {} });
+  assert.equal(hub.subscriberCount(room.code), 0);
+  assert.equal(hub.hasSender(room.code, "alice"), false);
+  assert.equal(hub.hasSender(room.code, "bob"), false);
 });
 
 test("생성·조회·me의 leader는 같은 handle이다", async (t) => {
@@ -623,8 +636,9 @@ test("pending 재요청은 방송 0, 공유 시작 뒤 같은 ID의 수락 전�
 
 test("대상 전환·취소 후 재요청은 새 ID이며 이전 응답은 404다", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 100000 });
-  const { api, locations, db, room, users } = fixture(t, false);
-  joinRoom(db, room.id, users[2].id);
+  const { api, locations, room } = fixture(t, false);
+  // Use the actual entry path: a DB-only insert omits the sender registration.
+  assert.equal((await api("POST", "/join", "outsider")).status, 200);
   const first = await api("POST", "/follow", "bob", { target: "alice" });
   t.mock.timers.tick(1000);
   const switched = await api("POST", "/follow", "bob", { target: "outsider" });

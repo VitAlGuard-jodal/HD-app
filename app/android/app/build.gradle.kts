@@ -85,6 +85,7 @@ flutter {
 
 // 기존 Kotlin 마이크 라우터/서비스에 이미 사용하던 네이티브 의존성.
 dependencies {
+    implementation("ai.pleos.playground:Vehicle:2.3.2")
     implementation("ai.pleos.playground:TextToSpeech:3.3.1")
     implementation("ai.pleos.playground:FusedLocation:1.1.3")
     compileOnly(files("${android.sdkDirectory}/platforms/android-37.0/optional/android.car.jar"))

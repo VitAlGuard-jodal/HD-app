@@ -1,24 +1,31 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
-import type { IncomingMessage } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { createApp } from "../../src/app.ts";
-import { issueToken } from "../../src/auth.ts";
+import { issueToken, tokenHash } from "../../src/auth.ts";
 import { openDb } from "../../src/db.ts";
 import { RoomLocationStore, LOCATION_DISCONNECT_GRACE_MS, LOCATION_STALE_MS } from "../../src/locations.ts";
 import { RoomEventHub } from "../../src/rooms.ts";
+import { RoomReadyStore } from "../../src/ready.ts";
 import { createRoom, findRoomMembership, findUserByHandle } from "../../src/store.ts";
 
 // 이 파일은 루프백 소켓을 열 수 있는 환경에서만 실행한다.
-async function fixture(t: TestContext) {
-  const db = openDb(":memory:");
+async function fixture(t: TestContext, dbPath = ":memory:") {
+  const db = openDb(dbPath);
   const hub = new RoomEventHub();
   const locations = new RoomLocationStore();
-  const server = createServer(createApp({ db, hub, locations }));
+  const readiness = new RoomReadyStore();
+  const server = createServer(createApp({ db, hub, locations, readiness }));
   const controllers = new Set<AbortController>();
-  t.after(async () => {
+  let closed = false;
+  async function close() {
+    if (closed) return;
+    closed = true;
     for (const controller of controllers) controller.abort();
     hub.close();
     await new Promise<void>((resolve) => {
@@ -26,7 +33,8 @@ async function fixture(t: TestContext) {
       server.closeAllConnections();
     });
     db.close();
-  });
+  }
+  t.after(close);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
@@ -38,9 +46,10 @@ async function fixture(t: TestContext) {
   assert.ok(address && typeof address !== "string");
   const base = `http://127.0.0.1:${address.port}`;
 
-  async function api(method: string, path: string, token?: string, body?: unknown) {
+  async function api(method: string, path: string, token?: string, body?: unknown, device?: string) {
     const headers: Record<string, string> = {};
     if (token) headers.authorization = `Bearer ${token}`;
+    if (device) headers["x-unavo-device"] = device;
     if (body !== undefined) headers["content-type"] = "application/json";
     const response = await fetch(`${base}${path}`, {
       method, headers,
@@ -63,14 +72,14 @@ async function fixture(t: TestContext) {
     return result.body.token as string;
   }
 
-  async function events(code: string, token: string) {
+  async function events(code: string, token: string, device?: string, resume = false) {
     const controller = new AbortController();
     controllers.add(controller);
     const connecting = setTimeout(() => controller.abort(), 5000);
     let response: Response;
     try {
-      response = await fetch(`${base}/v1/rooms/${code}/events`, {
-        headers: { authorization: `Bearer ${token}` }, signal: controller.signal,
+      response = await fetch(`${base}/v1/rooms/${code}/events${resume ? "?resume=1" : ""}`, {
+        headers: { authorization: `Bearer ${token}`, ...(device ? { "x-unavo-device": device } : {}) }, signal: controller.signal,
       });
     } finally {
       clearTimeout(connecting);
@@ -115,7 +124,7 @@ async function fixture(t: TestContext) {
     return { next, close };
   }
 
-  return { db, hub, locations, base, api, signup, events };
+  return { db, hub, locations, readiness, server, base, api, signup, events, close };
 }
 
 function assertError(result: { status: number; body: unknown }, status: number): void {
@@ -346,7 +355,6 @@ test("회원가입부터 친구·방·다중 SSE·시그널·재연결·나가�
     const sent = await api("POST", `/v1/rooms/${code}/signal`, alice, { to: "bob", ...signal });
     assert.equal(sent.status, 202);
     assert.deepEqual(sent.body, { delivered: true });
-    assert.deepEqual(await bobFirst.next("signal"), { from: "alice", ...signal });
     assert.deepEqual(await bobSecond.next("signal"), { from: "alice", ...signal });
   }
 
@@ -416,7 +424,7 @@ test("SSE가 없는 수신자의 시그널을 보관하고 연결 시 hello 다�
 });
 
 test("로그아웃은 해당 토큰 SSE만 끝내고 다른 기기의 공유·관계를 보존하며 마지막 토큰은 즉시 정리한다", { timeout: 15_000 }, async (t) => {
-  const { base, api, signup, events, hub, locations } = await fixture(t);
+  const { api, signup, events, hub, locations } = await fixture(t);
   const token = await signup("alice", "앨리스");
   const bob = await signup("bob", "보비");
   const login = await api("POST", "/v1/auth/login", undefined, { handle: "alice", password: "password123!" });
@@ -427,6 +435,7 @@ test("로그아웃은 해당 토큰 SSE만 끝내고 다른 기기의 공유·�
   assert.equal(firstRoom.status, 201);
   const code = firstRoom.body.room.code as string;
   assert.equal((await api("POST", `/v1/rooms/${code}/join`, bob)).status, 200);
+  assert.equal((await api("POST", `/v1/rooms/${code}/join`, otherToken)).status, 200);
   assert.equal((await api("POST", `/v1/rooms/${code}/location`, otherToken, {
     stream: "0123456789abcdef", lat: 37, lng: 127, at: 0, seq: 0,
   })).status, 202);
@@ -437,37 +446,13 @@ test("로그아웃은 해당 토큰 SSE만 끝내고 다른 기기의 공유·�
   const follower = await events(code, bob);
   assert.equal((await follower.next("hello")).followRequestId, followed.body.requestId);
 
-  const responses: IncomingMessage[] = [];
-  for (const roomCode of [code, code]) {
-    const response = await new Promise<IncomingMessage>((resolve, reject) => {
-      const request = httpRequest(`${base}/v1/rooms/${roomCode}/events`, {
-        headers: { authorization: `Bearer ${token}` },
-      }, resolve);
-      request.once("error", reject);
-      request.setTimeout(5000, () => request.destroy(new Error("SSE 종료 대기 시간 초과")));
-      t.after(() => request.destroy());
-      request.end();
-    });
-    assert.equal(response.statusCode, 200);
-    assert.match(response.headers["content-type"] ?? "", /^text\/event-stream/);
-    assert.equal(response.readableEnded, false);
-    responses.push(response);
-  }
-  assert.equal(hub.subscriberCount(code, "alice"), 3);
+  // The old token has already lost ownership; logging it out cannot disturb
+  // the explicitly entered device's media/location state.
+  assert.equal(hub.subscriberCount(code, "alice"), 1);
   const snapshot = locations.snapshot(code);
   const revision = locations.revision(code);
-  // 클라이언트에서 중단하지 않고 서버가 응답 스트림을 끝내는지 확인한다.
-  const ended = responses.map((response) => {
-    const result = once(response, "end", { signal: AbortSignal.timeout(5000) });
-    response.resume();
-    return result;
-  });
-  const [logout] = await Promise.all([
-    api("POST", "/v1/auth/logout", token),
-    Promise.all(ended),
-  ]);
+  const logout = await api("POST", "/v1/auth/logout", token);
   assert.equal(logout.status, 204);
-  for (const response of responses) assert.equal(response.readableEnded, true);
   assert.equal(hub.subscriberCount(code, "alice"), 1);
   assert.equal(locations.disconnectedAt(code, "alice"), undefined);
   assert.equal(locations.targetOf(code, "bob"), "alice");
@@ -784,4 +769,253 @@ test("HTTP 잘못된 seq·stale·leave 권한 경계", { timeout: 15_000 }, asyn
   assertError(await api("POST", `${path}/leave`, outsider), 403);
   assert.equal((await api("POST", `${path}/leave`, bob)).status, 204);
   assert.equal((await api("POST", `${path}/leave`, bob)).status, 204);
+});
+
+test("준비 PUT·조회·hello·SSE·퇴장·방 제거는 메모리 상태와 일치한다", { timeout: 15_000 }, async (t) => {
+  const { api, signup, events, readiness } = await fixture(t);
+  const alice = await signup("alice", "앨리스"), bob = await signup("bob", "보비");
+  const code = (await api("POST", "/v1/rooms", alice, {})).body.room.code;
+  const path = `/v1/rooms/${code}`;
+  assert.equal((await api("GET", path, alice)).body.members[0].ready, false);
+  assertError(await api("PUT", `${path}/ready`, undefined, { ready: true }), 401);
+  assertError(await api("PUT", `${path}/ready`, bob, { ready: true }), 403);
+  for (const body of [{}, { ready: "true" }, { ready: null }, { ready: 1 }, { ready: true, other: 1 }]) {
+    assertError(await api("PUT", `${path}/ready`, alice, body), 400);
+  }
+  const a = await events(code, alice);
+  assert.equal((await a.next("hello")).members[0].ready, false);
+  const result = await api("PUT", `${path}/ready`, alice, { ready: true });
+  assert.equal(result.status, 200);
+  assert.deepEqual(await a.next("ready-changed"), result.body);
+  assert.equal((await api("GET", path, alice)).body.members[0].ready, true);
+  assert.equal((await api("GET", "/v1/me", alice)).body.room.members[0].ready, true);
+  await api("POST", `${path}/join`, bob);
+  await a.next("member-joined");
+  const b = await events(code, bob);
+  assert.equal((await b.next("hello")).members.find((m: { handle: string }) => m.handle === "alice").ready, true);
+  await api("POST", `${path}/leave`, alice);
+  assert.equal((await b.next("ready-changed")).ready, false);
+  await b.next("member-left");
+  assert.equal(readiness.isReady(code, "alice"), false);
+  await api("POST", `${path}/join`, alice);
+  await b.next("member-joined");
+  assert.equal((await api("GET", path, alice)).body.members.find((m: { handle: string }) => m.handle === "alice").ready, false);
+  await api("PUT", `${path}/ready`, bob, { ready: true });
+  await b.next("ready-changed");
+  await api("POST", `${path}/leave`, alice);
+  await b.next("member-left");
+  await api("POST", `${path}/leave`, bob);
+  assert.equal(readiness.isReady(code, "bob"), false);
+  assert.equal(readiness.revision(code), 0);
+  assertError(await api("GET", path, bob), 404);
+});
+
+test("같은 DB로 서버를 새로 띄우면 resume이 빈 송신 자리를 얻고 통화 신호를 복구한다", { timeout: 15_000 }, async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "unavo-restart-"));
+  const dbPath = join(directory, "rooms.sqlite");
+  let before: Awaited<ReturnType<typeof fixture>> | undefined;
+  let after: Awaited<ReturnType<typeof fixture>> | undefined;
+  try {
+    before = await fixture(t, dbPath);
+    const alice = await before.signup("alice", "앨리스"), bob = await before.signup("bob", "보비");
+    const device = "a".repeat(32);
+    const code = (await before.api("POST", "/v1/rooms", alice, {}, device)).body.room.code;
+    const path = `/v1/rooms/${code}`;
+    await before.api("POST", `${path}/join`, bob);
+    const original = await before.events(code, alice, device);
+    await original.next("hello");
+    await before.api("PUT", `${path}/ready`, alice, { ready: true }, device);
+    const fix = { stream: "0123456789abcdef", lat: 37, lng: 127, at: 0, seq: 0 };
+    await before.api("POST", `${path}/location`, alice, fix, device);
+    assert.equal((await before.api("POST", `${path}/follow`, bob, { target: "alice" })).body.accepted, true);
+    assert.equal(before.readiness.isReady(code, "alice"), true);
+    assert.equal(before.locations.targetOf(code, "bob"), "alice");
+    await before.close();
+
+    // Reopen the persisted SQLite database with a new HTTP server and all-new
+    // hubs/stores, rather than just dropping sockets on the old server.
+    after = await fixture(t, dbPath);
+    assert.equal(after.hub.hasSender(code, "alice"), false);
+    assert.equal(after.hub.hasSender(code, "bob"), false);
+    assert.deepEqual(after.locations.snapshot(code), { positions: [], trails: {} });
+    assert.equal(after.readiness.isReady(code, "alice"), false);
+    assert.equal((await after.api("GET", path, alice)).body.members.length, 2);
+
+    // An HTTP mutation can beat SSE to the restarted server. This is temporary
+    // unavailability, not evidence that another device replaced the caller.
+    for (const [method, action, body] of [
+      ["POST", "signal", { to: "bob", kind: "offer", payload: "too-early" }],
+      ["PUT", "ready", { ready: true }], ["POST", "location", fix],
+    ] as const) {
+      const pending = await after.api(method, `${path}/${action}`, alice, body, device);
+      assertError(pending, 503);
+      assert.equal(pending.body.error.code, "SENDER_UNAVAILABLE");
+      assert.equal(after.hub.hasSender(code, "alice"), false);
+    }
+
+    const peer = await after.events(code, bob, undefined, true);
+    const peerHello = await peer.next("hello");
+    assert.equal(peerHello.followTarget, null);
+    assert.deepEqual(peerHello.trails, {});
+    const queued = await after.api("POST", `${path}/signal`, bob, { to: "alice", kind: "offer", payload: "queued-after-restart" });
+    assert.deepEqual(queued, { status: 202, body: { delivered: false } });
+    const restored = await after.events(code, alice, device, true);
+    const hello = await restored.next("hello");
+    assert.equal(hello.members.length, 2);
+    assert.equal(hello.members.find((m: { handle: string }) => m.handle === "alice").ready, false);
+    assert.deepEqual(hello.positions, []);
+    assert.equal(after.hub.isSender(code, "alice", `${tokenHash(alice)}:${device}`), true);
+    assert.equal(after.hub.subscriberCount(code, "alice"), 1);
+    assert.equal((await restored.next("signal")).payload, "queued-after-restart");
+    const answered = await after.api("POST", `${path}/signal`, alice, { to: "bob", kind: "answer", payload: "restored-answer" }, device);
+    assert.deepEqual(answered, { status: 202, body: { delivered: true } });
+    assert.equal((await peer.next("signal")).payload, "restored-answer");
+    await after.api("POST", `${path}/signal`, bob, { to: "alice", kind: "ice", payload: "live-after-restart" });
+    assert.equal((await restored.next("signal")).payload, "live-after-restart");
+  } finally {
+    await after?.close();
+    await before?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("resume은 같은 기기의 상태를 보존하고 다른 송신자가 떠난 빈 자리만 얻는다", { timeout: 15_000 }, async (t) => {
+  const { api, signup, events, hub, locations } = await fixture(t);
+  const carToken = await signup("alice", "앨리스"), bob = await signup("bob", "보비");
+  const phoneToken = (await api("POST", "/v1/auth/login", undefined, { handle: "alice", password: "password123!" })).body.token;
+  const code = (await api("POST", "/v1/rooms", carToken, {})).body.room.code;
+  const path = `/v1/rooms/${code}`;
+  await api("POST", `${path}/join`, bob);
+  const car = await events(code, carToken);
+  await car.next("hello");
+  await api("PUT", `${path}/ready`, carToken, { ready: true });
+  await api("POST", `${path}/location`, carToken, { stream: "0123456789abcdef", lat: 37, lng: 127, at: 0, seq: 0 });
+  await api("POST", `${path}/follow`, bob, { target: "alice" });
+  await car.close();
+  assert.equal(hub.isSender(code, "alice", tokenHash(carToken)), true);
+  const rejected = await api("GET", `${path}/events?resume=1`, phoneToken);
+  assertError(rejected, 409);
+  assert.equal(rejected.body.error.code, "DEVICE_REPLACED");
+  const resumed = await events(code, carToken, undefined, true);
+  const hello = await resumed.next("hello");
+  assert.equal(hello.members.find((m: { handle: string }) => m.handle === "alice").ready, true);
+  assert.equal(hello.positions[0].handle, "alice");
+  assert.equal(locations.targetOf(code, "bob"), "alice");
+
+  assert.equal((await api("POST", "/v1/auth/logout", carToken)).status, 204);
+  assert.equal(hub.hasSender(code, "alice"), false);
+  const phone = await events(code, phoneToken, undefined, true);
+  assert.equal((await phone.next("hello")).members.length, 2);
+  assert.equal(hub.isSender(code, "alice", tokenHash(phoneToken)), true);
+  await api("POST", `${path}/signal`, bob, { to: "alice", kind: "offer", payload: "vacant-sender" });
+  assert.equal((await phone.next("signal")).payload, "vacant-sender");
+});
+
+test("나중에 직접 입장한 계정 기기만 송수신하며 이전 기기는 재시도로 되찾지 않는다", { timeout: 15_000 }, async (t) => {
+  const { api, signup, events, hub, locations, readiness } = await fixture(t);
+  const carToken = await signup("alice", "앨리스"), bob = await signup("bob", "보비");
+  const phoneToken = (await api("POST", "/v1/auth/login", undefined, { handle: "alice", password: "password123!" })).body.token;
+  const code = (await api("POST", "/v1/rooms", carToken, {})).body.room.code;
+  const path = `/v1/rooms/${code}`;
+  await api("POST", `${path}/join`, bob);
+  const car = await events(code, carToken), peer = await events(code, bob);
+  await car.next("hello"); await peer.next("hello");
+  await api("PUT", `${path}/ready`, carToken, { ready: true });
+  await car.next("ready-changed"); await peer.next("ready-changed");
+  const fix = { stream: "0123456789abcdef", lat: 37, lng: 127, at: 0, seq: 0 };
+  await api("POST", `${path}/location`, carToken, fix);
+  await peer.next("location");
+  await api("POST", `${path}/signal`, bob, { to: "alice", kind: "offer", payload: "old" });
+  await car.next("signal");
+  assert.equal((await api("POST", `${path}/join`, phoneToken)).status, 200);
+  await car.next("device-replaced");
+  await peer.next("ready-changed"); await peer.next("location-stopped");
+  await peer.next("member-device-changed");
+  assert.equal(readiness.isReady(code, "alice"), false);
+  assert.equal(locations.position(code, "alice"), undefined);
+  for (const [method, action, body] of [
+    ["POST", "location", fix], ["POST", "signal", { to: "bob", kind: "offer", payload: "old" }],
+    ["PUT", "ready", { ready: true }], ["DELETE", "location", undefined],
+    ["POST", "leave", undefined], ["GET", "events?resume=1", undefined],
+  ] as const) {
+    const rejected = await api(method, `${path}/${action}`, carToken, body);
+    assertError(rejected, 409);
+    assert.equal(rejected.body.error.code, "DEVICE_REPLACED");
+  }
+  const phone = await events(code, phoneToken);
+  const hello = await phone.next("hello");
+  assert.equal(hello.members.length, 2);
+  assert.equal(hello.members.filter((m: { handle: string }) => m.handle === "alice").length, 1);
+  assert.equal(hub.subscriberCount(code, "alice"), 1);
+  await api("POST", `${path}/signal`, bob, { to: "alice", kind: "offer", payload: "new" });
+  // If an old backlog leaked, the next signal would have payload "old".
+  assert.equal((await phone.next("signal")).payload, "new");
+  assert.equal((await api("POST", `${path}/location`, phoneToken, { ...fix, stream: "fedcba9876543210" })).status, 202);
+  await peer.next("location");
+  await api("POST", `${path}/join`, carToken);
+  await phone.next("device-replaced");
+  await peer.next("location-stopped"); await peer.next("member-device-changed");
+  const restored = await events(code, carToken);
+  await restored.next("hello");
+  await api("POST", `${path}/signal`, bob, { to: "alice", kind: "offer", payload: "back-in-car" });
+  assert.equal((await restored.next("signal")).payload, "back-in-car");
+  assertError(await api("POST", `${path}/signal`, phoneToken, { to: "bob", kind: "offer", payload: null }), 409);
+  assert.equal(hub.subscriberCount(code, "alice"), 1);
+});
+
+test("같은 인증 토큰이어도 앱 기기 ID가 다르면 명시적 스트림 입장이 교체한다", { timeout: 15_000 }, async (t) => {
+  const { api, signup, events, hub } = await fixture(t);
+  const token = await signup("alice", "앨리스");
+  const first = "a".repeat(32), second = "b".repeat(32);
+  const code = (await api("POST", "/v1/rooms", token, {}, first)).body.room.code;
+  const path = `/v1/rooms/${code}`;
+  const a = await events(code, token, first); await a.next("hello");
+  const b = await events(code, token, second); await b.next("hello");
+  await a.next("device-replaced");
+  assertError(await api("PUT", `${path}/ready`, token, { ready: true }, first), 409);
+  assert.equal((await api("PUT", `${path}/ready`, token, { ready: true }, second)).status, 200);
+  assert.equal((await b.next("ready-changed")).ready, true);
+  assert.equal(hub.subscriberCount(code, "alice"), 1);
+});
+
+test("이전 기기의 본문을 받는 동안 교체돼도 ready·위치·signal을 되살리지 않는다", { timeout: 15_000 }, async (t) => {
+  const { server, base, api, signup, readiness, locations, hub } = await fixture(t);
+  const car = await signup("alice", "앨리스"), bob = await signup("bob", "보비");
+  const phone = (await api("POST", "/v1/auth/login", undefined, { handle: "alice", password: "password123!" })).body.token;
+  const code = (await api("POST", "/v1/rooms", car, {})).body.room.code;
+  const path = `/v1/rooms/${code}`;
+  await api("POST", `${path}/join`, bob);
+  for (const [method, action, body] of [
+    ["PUT", "ready", { ready: true }],
+    ["POST", "location", { stream: "0123456789abcdef", lat: 37, lng: 127, at: 0, seq: 0 }],
+    ["POST", "signal", { to: "bob", kind: "offer", payload: "late-car" }],
+  ] as const) {
+    await api("POST", `${path}/join`, car);
+    const started = once(server, "request");
+    let request: ReturnType<typeof httpRequest>;
+    const result = new Promise<{ status: number; body: { error: { code: string } } }>((resolve, reject) => {
+      request = httpRequest(`${base}${path}/${action}`, {
+        method, headers: { authorization: `Bearer ${car}`, "content-type": "application/json" },
+      }, (response) => {
+        let received = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => { received += chunk; });
+        response.on("end", () => resolve({ status: response.statusCode!, body: JSON.parse(received) }));
+        response.on("error", reject);
+      });
+      request.on("error", reject);
+      request.setTimeout(5000, () => request.destroy(new Error("body timeout")));
+      t.after(() => request.destroy());
+      request.write("{");
+    });
+    await started;
+    await api("POST", `${path}/join`, phone);
+    request!.end(JSON.stringify(body).slice(1));
+    const rejected = await result;
+    assert.equal(rejected.status, 409);
+    assert.equal(rejected.body.error.code, "DEVICE_REPLACED");
+    assert.equal(readiness.isReady(code, "alice"), false);
+    assert.equal(locations.position(code, "alice"), undefined);
+    assert.equal(hub.replaySignals(code, "bob", () => assert.fail("late signal")), 0);
+  }
 });

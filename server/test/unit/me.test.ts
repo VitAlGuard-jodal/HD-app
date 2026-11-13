@@ -56,7 +56,7 @@ function fixture(t: TestContext) {
   return { db, alice, bob, get, getRaw };
 }
 
-test("방 조회 JSON은 기존 요약 분해 방식과 바이트 단위로 같다", async (t) => {
+test("방 조회 JSON은 기존 요약에 메모리 준비 상태를 더한다", async (t) => {
   const { db, alice, bob, getRaw } = fixture(t);
   const room = createRoom(db, {
     code: "ABC234", name: '한글 "통화방"\n둘째 줄', createdBy: alice.id,
@@ -69,7 +69,9 @@ test("방 조회 JSON은 기존 요약 분해 방식과 바이트 단위로 같�
       leaveRoom(db, room.id, bob.id);
     }
     const { members, ...summary } = publicRoomDetails(db, room);
-    const expected = Buffer.from(JSON.stringify({ room: summary, members }));
+    const expected = Buffer.from(JSON.stringify({ room: summary,
+      members: members.map((member) => ({ ...member, ready: false, readyRevision: 0 })),
+    }));
     const response = await getRaw(`/v1/rooms/${room.code.toLowerCase()}`);
     assert.equal(response.status, 200);
     assert.deepEqual(response.bytes, expected);
