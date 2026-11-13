@@ -9,11 +9,12 @@ import '../theme.dart';
 
 /// Shared pill surface. Cars use it as a permanently visible dock.
 class FloatingBar extends StatelessWidget {
-  const FloatingBar({super.key, required this.child});
+  const FloatingBar({super.key, required this.child, this.height});
   final Widget child;
+  final double? height;
   @override
   Widget build(BuildContext context) => Container(
-    height: ControlScale.isCar(context) ? 96 : 64,
+    height: height ?? (ControlScale.isCar(context) ? 96 : 64),
     // 테두리 1px 을 빼야 차량 버튼이 정확히 80dp 가 된다(96 - 7*2 - 1*2).
     padding: EdgeInsets.all(ControlScale.isCar(context) ? 7 : 3),
     decoration: BoxDecoration(
@@ -48,7 +49,9 @@ class FloatingBarButton extends StatelessWidget {
   final bool danger;
   @override
   Widget build(BuildContext context) {
-    final size = ControlScale.isCar(context) ? 80.0 : 48.0;
+    final size = ControlScale.isCar(context)
+        ? ControlScale.target(context)
+        : 48.0;
     final disabledColor = UnavoColors.text.withValues(alpha: 0.4);
     return Semantics(
       label: label,

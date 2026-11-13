@@ -238,10 +238,12 @@ void main() {
       expect(find.byTooltip('방 나가기'), findsOneWidget);
       final home = find.byKey(const ValueKey('room-home'));
       expect(tester.widget<FloatingBarButton>(home).icon, 'home');
-      expect(
-        tester.getCenter(home).dx,
-        closeTo(tester.getCenter(controls).dx, .01),
-      );
+      if (!car) {
+        expect(
+          tester.getCenter(home).dx,
+          closeTo(tester.getCenter(controls).dx, .01),
+        );
+      }
       await tester.tap(home);
       expect(homeTaps, 1);
       expect(services.rooms.state.code, 'ABC123');
@@ -494,56 +496,61 @@ void main() {
     }
   });
 
-  testWidgets('차량 1320×940의 두 패널은 IME에도 열과 폭을 유지하며 키보드 위에 놓인다', (tester) async {
-    tester.view.physicalSize = const Size(1320, 940);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    addTearDown(tester.view.resetViewInsets);
-    final appearance = AppearanceController();
-    addTearDown(appearance.dispose);
-    await tester.pumpWidget(
-      UnavoAppearance(
-        controller: appearance,
-        child: MaterialApp(
-          theme: unavoTheme(Brightness.dark),
-          home: CarShell(
-            primary: Column(
-              children: [
-                const Expanded(
-                  child: SingleChildScrollView(child: Text('방 ABC123')),
-                ),
-                PanelButton(label: '음소거', icon: 'phone', onPressed: () {}),
-              ],
-            ),
-            secondary: const Column(
-              children: [
-                TextField(),
-                Expanded(child: SizedBox()),
-              ],
+  for (final size in [const Size(1706, 1206), const Size(1320, 940)]) {
+    testWidgets('차량 $size 단일 패널은 전체 폭과 IME 위 80dp 조작부를 유지한다', (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetViewInsets);
+      final appearance = AppearanceController();
+      addTearDown(appearance.dispose);
+      var settingsTaps = 0;
+      await tester.pumpWidget(
+        UnavoAppearance(
+          controller: appearance,
+          child: MaterialApp(
+            builder: testIconBuilder,
+            theme: unavoTheme(Brightness.dark),
+            home: CarShell(
+              onSettings: () => settingsTaps++,
+              primary: Column(
+                children: [
+                  const Expanded(
+                    child: SingleChildScrollView(child: TextField()),
+                  ),
+                  PanelButton(label: '음소거', icon: 'phone', onPressed: () {}),
+                ],
+              ),
             ),
           ),
         ),
-      ),
-    );
-    await pumpConsentUi(tester);
-    final primary = find.byKey(const ValueKey('car-primary'));
-    final secondary = find.byKey(const ValueKey('car-secondary'));
-    final beforeLeft = tester.getRect(primary);
-    final beforeRight = tester.getRect(secondary);
-    expect(beforeLeft.right, lessThan(beforeRight.left));
-    expect(beforeLeft.width, greaterThan(beforeRight.width));
-    await tester.tap(find.byType(TextField));
-    tester.view.viewInsets = const FakeViewPadding(bottom: 360);
-    await pumpConsentUi(tester);
-    expect(tester.getRect(primary).width, beforeLeft.width);
-    expect(tester.getRect(secondary).left, beforeRight.left);
-    expect(tester.getRect(primary).bottom, lessThanOrEqualTo(580));
-    expect(tester.getRect(secondary).bottom, lessThanOrEqualTo(580));
-    expect(
-      tester.getRect(find.byTooltip('음소거')).bottom,
-      lessThanOrEqualTo(580),
-    );
-    expect(tester.takeException(), isNull);
-  });
+      );
+      await pumpConsentUi(tester);
+      final primary = find.byKey(const ValueKey('car-primary'));
+      final before = tester.getRect(primary);
+      expect(find.byKey(const ValueKey('car-secondary')), findsNothing);
+      expect(before.left, 24);
+      expect(before.right, size.width - 24);
+      final settings = find.byKey(const ValueKey('open-settings'));
+      expect(tester.getRect(settings).right, before.right);
+      expect(tester.getSize(settings), const Size(80, 80));
+      await tester.tap(settings);
+      expect(settingsTaps, 1);
+      await tester.tap(find.byType(TextField));
+      tester.view.viewInsets = FakeViewPadding(bottom: size.height * .45);
+      await pumpConsentUi(tester);
+      expect(tester.getRect(primary).width, before.width);
+      expect(
+        tester.getRect(primary).bottom,
+        lessThanOrEqualTo(size.height * .55),
+      );
+      expect(
+        tester.getRect(find.byTooltip('음소거')).bottom,
+        lessThanOrEqualTo(size.height * .55),
+      );
+      expect(tester.getSize(find.byTooltip('음소거')), const Size(80, 80));
+      expect(tester.takeException(), isNull);
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
 }

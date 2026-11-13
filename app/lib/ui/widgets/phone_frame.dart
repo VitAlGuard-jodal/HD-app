@@ -18,15 +18,18 @@ class PhoneFrame extends StatelessWidget {
     required this.child,
     this.bottomNav,
     this.keepControlsVisible = false,
+    this.onCarSettings,
   });
   final DeviceMode mode;
   final Widget child;
   final Widget? bottomNav;
   final bool keepControlsVisible;
+  final VoidCallback? onCarSettings;
 
   @override
   Widget build(BuildContext context) {
-    if (mode == DeviceMode.car) return CarShell(primary: child);
+    if (mode == DeviceMode.car)
+      return CarShell(primary: child, onSettings: onCarSettings);
     final appearance = UnavoAppearance.of(context);
     final brightness = appearance.resolve(context);
     final media = MediaQuery.of(context);

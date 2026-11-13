@@ -7,6 +7,7 @@ import '../../audio/mic_router.dart';
 import '../../core/errors.dart';
 import '../../ui/widgets/mic_level.dart';
 import '../../ui/theme.dart';
+import '../../ui/control_scale.dart';
 import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/panel_scroll.dart';
 import '../../ui/widgets/status_chip.dart';
@@ -111,18 +112,18 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
               alignment: Alignment.centerLeft,
               child: StatusChip('마이크', icon: 'mic'),
             ),
-            const SizedBox(height: 12),
+            SizedBox(height: ControlScale.gap(context)),
             if (!widget.router.supported)
               const Text('이 기기의 오디오 연결은 아직 지원하지 않습니다.', style: UnavoType.body)
             else if (devices.isEmpty)
               const Text('사용 가능한 마이크가 없습니다.', style: UnavoType.body),
             for (final device in devices)
               Padding(
-                padding: const EdgeInsets.only(bottom: 12),
+                padding: EdgeInsets.only(bottom: ControlScale.gap(context)),
                 child: Row(
                   children: [
                     Expanded(child: Text(device.name, style: UnavoType.body)),
-                    const SizedBox(width: 12),
+                    SizedBox(width: ControlScale.gap(context)),
                     PanelButton(
                       label: '${device.name} 선택',
                       icon: _icon(device.type),
@@ -139,7 +140,7 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
               ),
             const SizedBox(height: 4),
             if (widget.showLevel) MicLevel(router: widget.router),
-            const SizedBox(height: 12),
+            SizedBox(height: ControlScale.gap(context)),
             Row(
               children: [
                 Expanded(
@@ -155,7 +156,7 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
                         : () => _run(() => widget.router.choose(null)),
                   ),
                 ),
-                const SizedBox(width: 12),
+                SizedBox(width: ControlScale.gap(context)),
                 Expanded(
                   child: PanelButton(
                     label: state.isPreviewing ? '시험 종료' : '입력 시험',
@@ -180,14 +181,14 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
             if (widget.router.supported &&
                 (!widget.router.permissions.microphone ||
                     !widget.router.permissions.notifications)) ...[
-              const SizedBox(height: 12),
+              SizedBox(height: ControlScale.gap(context)),
               Text(
                 !widget.router.permissions.microphone
                     ? '마이크 권한 필요'
                     : '알림 권한 필요',
                 style: UnavoType.body,
               ),
-              const SizedBox(height: 12),
+              SizedBox(height: ControlScale.gap(context)),
               PanelButton(
                 label: '마이크·알림 권한 요청',
                 icon: 'lock',
@@ -197,7 +198,7 @@ class _MicScreenState extends State<MicScreen> with WidgetsBindingObserver {
                         await widget.router.requestPermissions();
                       }),
               ),
-              const SizedBox(height: 12),
+              SizedBox(height: ControlScale.gap(context)),
               PanelButton(
                 label: '앱 권한 설정 열기',
                 icon: 'server',

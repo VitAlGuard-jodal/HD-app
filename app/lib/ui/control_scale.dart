@@ -8,6 +8,7 @@ class ControlScale extends InheritedWidget {
       context.dependOnInheritedWidgetOfExactType<ControlScale>()?.car ?? false;
   static double target(BuildContext context) => isCar(context) ? 80 : 56;
   static double icon(BuildContext context) => isCar(context) ? 36 : 24;
+  static double gap(BuildContext context) => isCar(context) ? 24 : 12;
   @override
   bool updateShouldNotify(ControlScale oldWidget) => car != oldWidget.car;
 }

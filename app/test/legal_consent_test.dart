@@ -381,11 +381,24 @@ void main() {
       );
       expect(
         tester.getRect(find.byKey(const ValueKey('legal-accept'))).bottom,
-        moreOrLessEquals(tester.getRect(primary).bottom - 20, epsilon: 1),
+        moreOrLessEquals(tester.getRect(primary).bottom - 24, epsilon: 1),
       );
       expect(
         tester.getSize(find.byKey(const ValueKey('legal-accept'))),
         const Size(80, 80),
+      );
+      final privacy = tester.getRect(
+        find.byKey(const ValueKey('car-consent-document-0')),
+      );
+      final location = tester.getRect(
+        find.byKey(const ValueKey('car-consent-document-1')),
+      );
+      expect(privacy.top, location.top);
+      expect(privacy.right + 24, closeTo(location.left, .01));
+      expect(privacy.width, location.width);
+      expect(
+        tester.getRect(find.byKey(const ValueKey('legal-check-0'))).top,
+        tester.getRect(find.byKey(const ValueKey('legal-check-1'))).top,
       );
       _expectAcceptButtonState(tester, enabled: false);
       await _tapKey(tester, 'legal-check-0');

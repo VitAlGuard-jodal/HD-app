@@ -2,11 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../../core/app_services.dart';
 import '../../core/device_mode.dart';
-import '../../ui/widgets/mic_level.dart';
-import '../../ui/widgets/floating_bar.dart';
-import '../../ui/widgets/panel_button.dart';
-import '../phone/friends.dart';
-import '../phone/mic.dart';
 import '../phone/room.dart';
 import '../phone/rooms.dart';
 import '../phone/settings.dart';
@@ -73,6 +68,7 @@ class _CarDashboardState extends State<CarDashboard> {
           !_settingsVisible;
       return CarShell(
         room: roomVisible,
+        onSettings: _openSettings,
         primary: NavigatorPopHandler<void>(
           onPopWithResult: (_) => _primaryNavigator.currentState?.maybePop(),
           child: Navigator(
@@ -100,80 +96,19 @@ class _CarDashboardState extends State<CarDashboard> {
                 MaterialPage<void>(
                   key: const ValueKey('car-settings'),
                   name: 'settings',
-                  child: SettingsScreen(services: widget.services, car: true),
+                  child: SettingsScreen(
+                    services: widget.services,
+                    car: true,
+                    onRoom: (code) {
+                      setState(() => _settingsVisible = false);
+                      widget.onRoom?.call(code);
+                    },
+                  ),
                 ),
             ],
           ),
         ),
-        secondary: _Companion(
-          services: widget.services,
-          onRoom: widget.onRoom ?? (_) {},
-          onSettings: _openSettings,
-          onInteraction: widget.onInteraction,
-        ),
       );
     },
-  );
-}
-
-class _Companion extends StatefulWidget {
-  const _Companion({
-    required this.services,
-    required this.onRoom,
-    required this.onSettings,
-    this.onInteraction,
-  });
-  final AppServices services;
-  final ValueChanged<String> onRoom;
-  final VoidCallback onSettings;
-  final VoidCallback? onInteraction;
-  @override
-  State<_Companion> createState() => _CompanionState();
-}
-
-class _CompanionState extends State<_Companion> {
-  bool _microphone = false;
-  @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      Row(
-        children: [
-          Expanded(child: MicLevel(router: widget.services.mic)),
-          const SizedBox(width: 12),
-          PanelButton(
-            key: const ValueKey('open-settings'),
-            label: '설정',
-            icon: 'settings',
-            onPressed: widget.onSettings,
-          ),
-        ],
-      ),
-      const SizedBox(height: 20),
-      Expanded(
-        child: _microphone
-            ? MicScreen(router: widget.services.mic, showLevel: false)
-            : FriendsScreen(services: widget.services, onRoom: widget.onRoom),
-      ),
-      const SizedBox(height: 16),
-      FloatingBar(
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-          children: [
-            for (final microphone in [false, true])
-              FloatingBarButton(
-                label: microphone ? '마이크' : '친구',
-                icon: microphone ? 'mic' : 'friends',
-                selected: _microphone == microphone,
-                onPressed: () {
-                  widget.onInteraction?.call();
-                  FocusScope.of(context).unfocus();
-                  setState(() => _microphone = microphone);
-                },
-              ),
-          ],
-        ),
-      ),
-    ],
   );
 }

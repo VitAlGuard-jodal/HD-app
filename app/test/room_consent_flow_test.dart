@@ -641,6 +641,7 @@ void main() {
     (false, const Size(412, 915)),
     (false, const Size(915, 412)),
     (true, const Size(1320, 940)),
+    (true, const Size(1706, 1206)),
   ]) {
     testWidgets('$car $size 지도:통화 7:3·워터마크 경계·원형 버튼·전체 화면·speaking', (
       tester,
@@ -675,6 +676,32 @@ void main() {
         } else {
           expect(mapSize.height / panelSize.height, closeTo(7 / 3, .001));
           expect(mapSize.width, panelSize.width);
+        }
+        if (car) {
+          final controls = find.byKey(const ValueKey('room-controls'));
+          final buttons = find.descendant(
+            of: controls,
+            matching: find.byType(FloatingBarButton),
+          );
+          expect(buttons, findsNWidgets(4));
+          expect(
+            find.descendant(of: controls, matching: find.byType(Scrollable)),
+            findsNothing,
+          );
+          final panelRect = tester.getRect(panel);
+          final controlsRect = tester.getRect(controls);
+          final tops = <double>[];
+          for (var i = 0; i < 4; i++) {
+            final rect = tester.getRect(buttons.at(i));
+            expect(rect.size, const Size(80, 80));
+            expect(panelRect.contains(rect.topLeft), isTrue);
+            expect(panelRect.contains(rect.bottomRight), isTrue);
+            expect(controlsRect.contains(rect.topLeft), isTrue);
+            expect(controlsRect.contains(rect.bottomRight), isTrue);
+            tops.add(rect.top);
+          }
+          if (size.width == 1706) expect(tops.toSet(), hasLength(1));
+          expect(find.byTooltip('방 나가기').hitTestable(), findsOneWidget);
         }
         _expectWatermarkBounds(tester);
         expect(

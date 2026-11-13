@@ -98,6 +98,165 @@ class _RoomsScreenState extends State<RoomsScreen> {
       final roomCode = current.code ?? restorable?.code;
       final roomName = current.room?.name ?? restorable?.name;
       final canEnter = !_busy && roomCode == null;
+      final creation = <Widget>[
+        Row(
+          children: [
+            Expanded(
+              child: PanelField(
+                controller: _name,
+                label: '새 방 이름',
+                icon: 'rooms',
+                enabled: canEnter,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _enter(create: true),
+              ),
+            ),
+            SizedBox(width: ControlScale.gap(context)),
+            PanelButton(
+              label: '방 만들기',
+              icon: 'plus',
+              iconOnly: true,
+              style: PanelButtonStyle.gold,
+              onPressed: canEnter ? () => _enter(create: true) : null,
+            ),
+          ],
+        ),
+        SizedBox(height: ControlScale.gap(context)),
+        Row(
+          children: [
+            Expanded(
+              child: PanelField(
+                controller: _code,
+                label: '방 코드',
+                icon: 'rooms',
+                enabled: canEnter,
+                textCapitalization: TextCapitalization.characters,
+                // Flutter iOS maps visiblePassword to UIKeyboardTypeASCIICapable.
+                keyboardType: TextInputType.visiblePassword,
+                enableSuggestions: false,
+                inputFormatters: const [RoomCodeFormatter()],
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _enter(create: false),
+              ),
+            ),
+            SizedBox(width: ControlScale.gap(context)),
+            PanelButton(
+              label: '코드로 참여',
+              icon: 'arrow',
+              iconOnly: true,
+              style: PanelButtonStyle.gold,
+              onPressed: canEnter ? () => _enter(create: false) : null,
+            ),
+          ],
+        ),
+        if (roomCode != null) ...[
+          SizedBox(height: ControlScale.gap(context)),
+          const Text(
+            joinedRoomReason,
+            style: TextStyle(fontSize: 16, color: UnavoColors.muted),
+          ),
+        ],
+        ErrorText(_error),
+      ];
+      final active = <Widget>[
+        if (roomCode == null)
+          const StatusChip('참여 중인 방이 없습니다.', icon: 'rooms')
+        else
+          FocusRing(
+            child: Semantics(
+              button: true,
+              label: '참여 중인 방 $roomCode',
+              child: GestureDetector(
+                onTap: _busy ? null : () => _openRoom(roomCode),
+                child: Material(
+                  color: UnavoColors.input,
+                  child: InkWell(
+                    onTap: _busy ? null : () => _openRoom(roomCode),
+                    child: Container(
+                      key: const ValueKey('current-room-card'),
+                      constraints: const BoxConstraints(minHeight: 88),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: UnavoColors.line),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  roomName ?? '함께 가는 길',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: UnavoType.body,
+                                ),
+                                RoomCode(roomCode, fontSize: 40),
+                              ],
+                            ),
+                          ),
+                          SizedBox(width: ControlScale.gap(context)),
+                          PanelButton(
+                            label: '방 입장',
+                            icon: 'login',
+                            iconOnly: true,
+                            style: PanelButtonStyle.gold,
+                            onPressed: _busy ? null : () => _openRoom(roomCode),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        if (current.code != null) ...[
+          SizedBox(height: ControlScale.gap(context)),
+          StatusChip(
+            widget.services.rooms.call.isActive ? '통화 중' : '참여 중',
+            icon: widget.services.rooms.call.isActive ? 'phone' : 'rooms',
+            active: true,
+          ),
+        ],
+      ];
+      if (ControlScale.isCar(context)) {
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: PanelScroll(
+                key: const ValueKey('car-lobby-create'),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text('새 방 만들기 · 방 코드 입장', style: UnavoType.title),
+                    SizedBox(height: ControlScale.gap(context)),
+                    ...creation,
+                  ],
+                ),
+              ),
+            ),
+            SizedBox(width: ControlScale.gap(context)),
+            Expanded(
+              child: PanelScroll(
+                key: const ValueKey('car-lobby-active'),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text('참여 중인 방', style: UnavoType.title),
+                    SizedBox(height: ControlScale.gap(context)),
+                    ...active,
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+      }
       return PanelScroll(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -121,130 +280,9 @@ class _RoomsScreenState extends State<RoomsScreen> {
               ],
             ),
             const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: PanelField(
-                    controller: _name,
-                    label: '새 방 이름',
-                    icon: 'rooms',
-                    enabled: canEnter,
-                    textInputAction: TextInputAction.done,
-                    onSubmitted: (_) => _enter(create: true),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                PanelButton(
-                  label: '방 만들기',
-                  icon: 'plus',
-                  iconOnly: true,
-                  style: PanelButtonStyle.gold,
-                  onPressed: canEnter ? () => _enter(create: true) : null,
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: PanelField(
-                    controller: _code,
-                    label: '방 코드',
-                    icon: 'rooms',
-                    enabled: canEnter,
-                    textCapitalization: TextCapitalization.characters,
-                    // Flutter iOS maps visiblePassword to UIKeyboardTypeASCIICapable.
-                    keyboardType: TextInputType.visiblePassword,
-                    enableSuggestions: false,
-                    inputFormatters: const [RoomCodeFormatter()],
-                    textInputAction: TextInputAction.done,
-                    onSubmitted: (_) => _enter(create: false),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                PanelButton(
-                  label: '코드로 참여',
-                  icon: 'arrow',
-                  iconOnly: true,
-                  style: PanelButtonStyle.gold,
-                  onPressed: canEnter ? () => _enter(create: false) : null,
-                ),
-              ],
-            ),
-            if (roomCode != null) ...[
-              const SizedBox(height: 12),
-              const Text(
-                joinedRoomReason,
-                style: TextStyle(fontSize: 16, color: UnavoColors.muted),
-              ),
-            ],
-            ErrorText(_error),
+            ...creation,
             const SizedBox(height: 18),
-            if (roomCode == null)
-              const StatusChip('참여 중인 방이 없습니다.', icon: 'rooms')
-            else
-              FocusRing(
-                child: Semantics(
-                  button: true,
-                  label: '참여 중인 방 $roomCode',
-                  child: GestureDetector(
-                    onTap: _busy ? null : () => _openRoom(roomCode),
-                    child: Material(
-                      color: UnavoColors.input,
-                      child: InkWell(
-                        onTap: _busy ? null : () => _openRoom(roomCode),
-                        child: Container(
-                          key: const ValueKey('current-room-card'),
-                          constraints: const BoxConstraints(minHeight: 88),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 10,
-                          ),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: UnavoColors.line),
-                          ),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      roomName ?? '함께 가는 길',
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: UnavoType.body,
-                                    ),
-                                    RoomCode(roomCode, fontSize: 40),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              PanelButton(
-                                label: '방 입장',
-                                icon: 'login',
-                                iconOnly: true,
-                                style: PanelButtonStyle.gold,
-                                onPressed: _busy
-                                    ? null
-                                    : () => _openRoom(roomCode),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            if (current.code != null) ...[
-              const SizedBox(height: 12),
-              StatusChip(
-                widget.services.rooms.call.isActive ? '통화 중' : '참여 중',
-                icon: widget.services.rooms.call.isActive ? 'phone' : 'rooms',
-                active: true,
-              ),
-            ],
+            ...active,
           ],
         ),
       );

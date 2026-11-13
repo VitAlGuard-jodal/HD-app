@@ -163,8 +163,11 @@ class _AuthScreenState extends State<AuthScreen> {
   );
 
   @override
-  Widget build(BuildContext context) =>
-      widget.serverSettingsOnly ? _serverSettings(context) : _authentication();
+  Widget build(BuildContext context) => widget.serverSettingsOnly
+      ? _serverSettings(context)
+      : widget.mode == DeviceMode.car
+      ? _carAuthentication()
+      : _authentication();
 
   Widget _serverSettings(BuildContext context) => ControlScale(
     car: widget.mode == DeviceMode.car,
@@ -172,41 +175,75 @@ class _AuthScreenState extends State<AuthScreen> {
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Align(
-                alignment: Alignment.centerLeft,
-                child: PanelButton(
-                  key: const ValueKey('server-settings-back'),
-                  label: '뒤로',
-                  icon: 'back',
-                  onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          child: widget.mode == DeviceMode.car
+              ? Builder(builder: _carServerSettings)
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: PanelButton(
+                        key: const ValueKey('server-settings-back'),
+                        label: '뒤로',
+                        icon: 'back',
+                        onPressed: _busy
+                            ? null
+                            : () => Navigator.of(context).pop(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Expanded(
+                      child: PanelScroll(
+                        controller: _scroll,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [_serverField(), ErrorText(_error)],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    PanelButton(
+                      key: const ValueKey('server-settings-save'),
+                      label: '서버 주소 저장',
+                      icon: 'check',
+                      style: PanelButtonStyle.gold,
+                      onPressed: _busy ? null : _submit,
+                    ),
+                  ],
                 ),
-              ),
-              const SizedBox(height: 16),
-              Expanded(
-                child: PanelScroll(
-                  controller: _scroll,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [_serverField(), ErrorText(_error)],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              PanelButton(
-                key: const ValueKey('server-settings-save'),
-                label: '서버 주소 저장',
-                icon: 'check',
-                style: PanelButtonStyle.gold,
-                onPressed: _busy ? null : _submit,
-              ),
-            ],
-          ),
         ),
       ),
     ),
+  );
+
+  Widget _carServerSettings(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Row(
+        children: [
+          PanelButton(
+            key: const ValueKey('server-settings-back'),
+            label: '뒤로',
+            icon: 'back',
+            onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          ),
+          SizedBox(width: ControlScale.gap(context)),
+          Expanded(child: _serverField()),
+          SizedBox(width: ControlScale.gap(context)),
+          PanelButton(
+            key: const ValueKey('server-settings-save'),
+            label: '서버 주소 저장',
+            icon: 'check',
+            style: PanelButtonStyle.gold,
+            onPressed: _busy ? null : _submit,
+          ),
+        ],
+      ),
+      SizedBox(height: ControlScale.gap(context)),
+      Expanded(
+        child: PanelScroll(controller: _scroll, child: ErrorText(_error)),
+      ),
+    ],
   );
 
   Widget _authentication() => PhoneFrame(
@@ -349,6 +386,159 @@ class _AuthScreenState extends State<AuthScreen> {
           onPressed: _busy ? null : _submit,
         ),
       ],
+    ),
+  );
+
+  Widget _carAuthentication() => PhoneFrame(
+    mode: widget.mode,
+    onCarSettings: _busy
+        ? null
+        : () => setState(() => _serverExpanded = !_serverExpanded),
+    child: Builder(
+      builder: (context) {
+        final gap = ControlScale.gap(context);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const StatusChip('로그인·가입', icon: 'user'),
+                SizedBox(width: gap),
+                for (var i = 0; i < 2; i++) ...[
+                  if (i > 0) SizedBox(width: gap),
+                  PanelButton(
+                    key: ValueKey(
+                      i == 0 ? 'car-auth-login' : 'car-auth-signup',
+                    ),
+                    label: i == 0 ? '로그인' : '가입',
+                    icon: i == 0 ? 'login' : 'userplus',
+                    selected: _signup == (i == 1),
+                    style: _signup == (i == 1)
+                        ? PanelButtonStyle.gold
+                        : PanelButtonStyle.neutral,
+                    onPressed: _busy
+                        ? null
+                        : () => setState(() {
+                            _signup = i == 1;
+                            _error = null;
+                          }),
+                  ),
+                ],
+                const Spacer(),
+                PanelButton(
+                  key: const ValueKey('car-auth-server-toggle'),
+                  label: _serverExpanded ? '서버 주소 접기' : '서버 주소 설정',
+                  icon: 'server',
+                  selected: _serverExpanded,
+                  onPressed: _busy
+                      ? null
+                      : () => setState(() {
+                          _serverExpanded = !_serverExpanded;
+                        }),
+                ),
+              ],
+            ),
+            SizedBox(height: gap),
+            // IME가 높이를 줄여도 입력과 제출은 함께 고정한다.
+            // 서버 주소·오류만 아래 영역에서 별도로 스크롤한다.
+            AutofillGroup(
+              child: Row(
+                key: const ValueKey('car-auth-form'),
+                children: [
+                  Expanded(
+                    child: PanelField(
+                      controller: _handle,
+                      label: '아이디',
+                      icon: 'user',
+                      enabled: !_busy,
+                      keyboardType: TextInputType.visiblePassword,
+                      autofillHints: const [AutofillHints.username],
+                    ),
+                  ),
+                  SizedBox(width: gap),
+                  Expanded(
+                    child: PanelField(
+                      controller: _password,
+                      label: '비밀번호',
+                      icon: 'lock',
+                      enabled: !_busy,
+                      obscureText: true,
+                      autofillHints: [
+                        _signup
+                            ? AutofillHints.newPassword
+                            : AutofillHints.password,
+                      ],
+                      textInputAction: _signup
+                          ? TextInputAction.next
+                          : TextInputAction.done,
+                      onSubmitted: (_) => _submit(),
+                    ),
+                  ),
+                  if (_signup) ...[
+                    SizedBox(width: gap),
+                    Expanded(
+                      child: PanelField(
+                        controller: _displayName,
+                        label: '표시 이름',
+                        icon: 'user',
+                        enabled: !_busy,
+                        autofillHints: const [AutofillHints.nickname],
+                        textInputAction: TextInputAction.done,
+                        onSubmitted: (_) => _submit(),
+                      ),
+                    ),
+                    SizedBox(width: gap),
+                    SizedBox(
+                      width: ControlScale.target(context) * 3,
+                      child: Row(
+                        children: [
+                          PanelButton(
+                            key: const ValueKey('signup-age-check'),
+                            label: '만 14세 이상 확인',
+                            icon: 'check',
+                            selected: _over14,
+                            style: _over14
+                                ? PanelButtonStyle.gold
+                                : PanelButtonStyle.neutral,
+                            onPressed: _busy
+                                ? null
+                                : () => setState(() => _over14 = !_over14),
+                          ),
+                          SizedBox(width: gap),
+                          const Expanded(
+                            child: Text('만 14세 이상입니다', style: UnavoType.body),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  SizedBox(width: gap),
+                  PanelButton(
+                    key: const ValueKey('car-auth-submit'),
+                    label: _busy ? '연결 중' : (_signup ? '가입하고 시작' : '시작'),
+                    icon: 'arrow',
+                    style: PanelButtonStyle.gold,
+                    onPressed: _busy ? null : _submit,
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(height: gap),
+            Expanded(
+              child: PanelScroll(
+                controller: _scroll,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (_serverExpanded) _serverField(),
+                    ErrorText(_error ?? _validationMessage),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+      },
     ),
   );
 }

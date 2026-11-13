@@ -8,6 +8,7 @@ import '../../core/errors.dart';
 import '../../net/models.dart';
 import '../../room/room_session.dart';
 import '../../ui/theme.dart';
+import '../../ui/control_scale.dart';
 import '../../ui/widgets/floating_bar.dart';
 import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/panel_field.dart';
@@ -130,7 +131,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
                   onSubmitted: (_) => _run(_add),
                 ),
               ),
-              const SizedBox(width: 12),
+              SizedBox(width: ControlScale.gap(context)),
               PanelButton(
                 label: '친구 추가',
                 icon: 'plus',
@@ -144,7 +145,9 @@ class _FriendsScreenState extends State<FriendsScreen> {
             child: PanelViewport(
               child: ListView(
                 padding: EdgeInsets.only(
-                  top: 18,
+                  top: ControlScale.isCar(context)
+                      ? ControlScale.gap(context)
+                      : 18,
                   bottom: 9 + FloatingBarInset.of(context),
                 ),
                 clipBehavior: Clip.none,
@@ -168,7 +171,9 @@ class _FriendsScreenState extends State<FriendsScreen> {
                     ),
                   for (final (index, contact) in _contacts.indexed)
                     Padding(
-                      padding: const EdgeInsets.only(bottom: 12),
+                      padding: EdgeInsets.only(
+                        bottom: ControlScale.gap(context),
+                      ),
                       child: ConstrainedBox(
                         constraints: const BoxConstraints(minHeight: 84),
                         child: Row(
@@ -180,7 +185,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
                                 style: UnavoType.western.copyWith(fontSize: 23),
                               ),
                             ),
-                            const SizedBox(width: 12),
+                            SizedBox(width: ControlScale.gap(context)),
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -223,7 +228,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
                                 ],
                               ),
                             ),
-                            const SizedBox(width: 12),
+                            SizedBox(width: ControlScale.gap(context)),
                             PanelButton(
                               label: '${contact.displayName} 통화방 이동',
                               icon: 'phone',
@@ -232,7 +237,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
                                   ? null
                                   : () => _run(() => _room(contact)),
                             ),
-                            const SizedBox(width: 12),
+                            SizedBox(width: ControlScale.gap(context)),
                             PanelButton(
                               label: '${contact.displayName} 삭제',
                               icon: 'trash',
@@ -251,7 +256,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
                         ),
                       ),
                     ),
-                  const SizedBox(height: 12),
+                  SizedBox(height: ControlScale.gap(context)),
                   PanelButton(
                     label: '목록 새로고침',
                     icon: 'refresh',

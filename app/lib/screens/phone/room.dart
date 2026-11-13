@@ -531,63 +531,104 @@ class _RoomScreenState extends State<RoomScreen> {
               ),
             exit,
           ];
-          final controls = FloatingBar(
-            key: const ValueKey('room-controls'),
-            child: _volumeExpanded
-                ? LayoutBuilder(
-                    builder: (context, constraints) => SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: SizedBox(
-                        width: constraints.maxWidth < (car ? 320 : 200)
-                            ? (car ? 320 : 200)
-                            : constraints.maxWidth,
-                        child: Row(children: volumeButtons),
-                      ),
-                    ),
-                  )
-                : LayoutBuilder(
-                    builder: (context, constraints) {
-                      // 재연결/출력 유무가 달라도 좌우 폭은 같게 확보한다.
-                      final sideCount = leftButtons.length > rightButtons.length
-                          ? leftButtons.length
-                          : rightButtons.length;
-                      final minWidth =
-                          (sideCount * 2 + 1) * (car ? 80.0 : 48.0);
-                      return SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: SizedBox(
-                          width: constraints.maxWidth < minWidth
-                              ? minWidth
-                              : constraints.maxWidth,
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceEvenly,
-                                  children: leftButtons,
-                                ),
-                              ),
-                              FloatingBarButton(
-                                key: const ValueKey('room-home'),
-                                label: '홈',
-                                icon: 'home',
-                                onPressed: widget.onHome,
-                              ),
-                              Expanded(
-                                child: Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceEvenly,
-                                  children: rightButtons,
-                                ),
-                              ),
-                            ],
+          final carButtons = <Widget>[
+            leftButtons.first,
+            volume,
+            FloatingBarButton(
+              key: const ValueKey('room-home'),
+              label: '홈',
+              icon: 'home',
+              onPressed: widget.onHome,
+            ),
+            exit,
+          ];
+          double carControlHeight(double width) {
+            if (_volumeExpanded) return ControlScale.target(context) + 16;
+            final target = ControlScale.target(context);
+            final gap = ControlScale.gap(context);
+            final columns = ((width - 16 + gap) / (target + gap)).floor().clamp(
+              1,
+              carButtons.length,
+            );
+            final rows = (carButtons.length / columns).ceil();
+            return rows * target + (rows - 1) * gap + 16;
+          }
+
+          final controls = car
+              ? LayoutBuilder(
+                  builder: (context, constraints) => FloatingBar(
+                    key: const ValueKey('room-controls'),
+                    height: carControlHeight(constraints.maxWidth),
+                    child: _volumeExpanded
+                        ? Row(children: volumeButtons)
+                        : Wrap(
+                            alignment: WrapAlignment.spaceBetween,
+                            spacing: ControlScale.gap(context),
+                            runSpacing: ControlScale.gap(context),
+                            children: carButtons,
                           ),
-                        ),
-                      );
-                    },
                   ),
-          );
+                )
+              : FloatingBar(
+                  key: const ValueKey('room-controls'),
+                  child: _volumeExpanded
+                      ? LayoutBuilder(
+                          builder: (context, constraints) =>
+                              SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: SizedBox(
+                                  width:
+                                      constraints.maxWidth < (car ? 320 : 200)
+                                      ? (car ? 320 : 200)
+                                      : constraints.maxWidth,
+                                  child: Row(children: volumeButtons),
+                                ),
+                              ),
+                        )
+                      : LayoutBuilder(
+                          builder: (context, constraints) {
+                            // 재연결/출력 유무가 달라도 좌우 폭은 같게 확보한다.
+                            final sideCount =
+                                leftButtons.length > rightButtons.length
+                                ? leftButtons.length
+                                : rightButtons.length;
+                            final minWidth =
+                                (sideCount * 2 + 1) * (car ? 80.0 : 48.0);
+                            return SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: SizedBox(
+                                width: constraints.maxWidth < minWidth
+                                    ? minWidth
+                                    : constraints.maxWidth,
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.spaceEvenly,
+                                        children: leftButtons,
+                                      ),
+                                    ),
+                                    FloatingBarButton(
+                                      key: const ValueKey('room-home'),
+                                      label: '홈',
+                                      icon: 'home',
+                                      onPressed: widget.onHome,
+                                    ),
+                                    Expanded(
+                                      child: Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.spaceEvenly,
+                                        children: rightButtons,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                );
           Widget dock(Widget child) => Stack(
             fit: StackFit.expand,
             children: [
@@ -595,69 +636,100 @@ class _RoomScreenState extends State<RoomScreen> {
               Positioned(left: 8, right: 8, bottom: 8, child: controls),
             ],
           );
-          Widget callPanel({required bool compact, required bool horizontal}) =>
-              Container(
-                key: const ValueKey('room-call-panel'),
-                color: UnavoColors.ink,
-                child: dock(
-                  Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      const UnavoWatermark(),
-                      SingleChildScrollView(
-                        padding: EdgeInsets.fromLTRB(12, 8, 12, car ? 120 : 88),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            if (!compact) ...[
-                              Text(
-                                state.room?.name ?? '함께 가는 길',
-                                style: UnavoType.title,
-                              ),
-                              RoomCode(state.code ?? ''),
-                              const SizedBox(height: 12),
-                            ],
-                            statusRow,
-                            ErrorText(error),
-                            if (session.locationShare.deletionStatus
-                                case final deletion?)
-                              Text(deletion, style: UnavoType.caption),
-                            if (session.pendingFollow != null)
-                              const Text(
-                                '따라가기 응답 대기 중',
-                                style: UnavoType.caption,
-                              ),
-                            const SizedBox(height: 8),
-                            if (horizontal)
-                              SizedBox(
-                                key: const ValueKey('room-member-strip'),
-                                height: 104,
-                                child: ListView.separated(
-                                  scrollDirection: Axis.horizontal,
-                                  itemCount: state.members.length,
-                                  separatorBuilder: (_, _) =>
-                                      const SizedBox(width: 8),
-                                  itemBuilder: (_, index) => SizedBox(
-                                    width: 272,
-                                    child: SingleChildScrollView(
-                                      child: memberTile(state.members[index]),
-                                    ),
+          Widget callPanel({
+            required bool compact,
+            required bool horizontal,
+          }) => Container(
+            key: const ValueKey('room-call-panel'),
+            color: UnavoColors.ink,
+            child: LayoutBuilder(
+              builder: (context, constraints) => dock(
+                Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    const UnavoWatermark(),
+                    SingleChildScrollView(
+                      padding: EdgeInsets.fromLTRB(
+                        12,
+                        8,
+                        12,
+                        car
+                            ? carControlHeight(constraints.maxWidth - 16) + 24
+                            : 88,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (!compact) ...[
+                            Text(
+                              state.room?.name ?? '함께 가는 길',
+                              style: UnavoType.title,
+                            ),
+                            RoomCode(state.code ?? ''),
+                            const SizedBox(height: 12),
+                          ],
+                          statusRow,
+                          ErrorText(error),
+                          if (session.locationShare.deletionStatus
+                              case final deletion?)
+                            Text(deletion, style: UnavoType.caption),
+                          if (session.pendingFollow != null)
+                            const Text(
+                              '따라가기 응답 대기 중',
+                              style: UnavoType.caption,
+                            ),
+                          const SizedBox(height: 8),
+                          if (horizontal)
+                            SizedBox(
+                              key: const ValueKey('room-member-strip'),
+                              height: 104,
+                              child: ListView.separated(
+                                scrollDirection: Axis.horizontal,
+                                itemCount: state.members.length,
+                                separatorBuilder: (_, _) =>
+                                    const SizedBox(width: 8),
+                                itemBuilder: (_, index) => SizedBox(
+                                  width: 272,
+                                  child: SingleChildScrollView(
+                                    child: memberTile(state.members[index]),
                                   ),
                                 ),
-                              )
-                            else
-                              for (final member in state.members)
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 8),
-                                  child: memberTile(member, compact: compact),
-                                ),
-                          ],
-                        ),
+                              ),
+                            )
+                          else if (car && !compact)
+                            LayoutBuilder(
+                              builder: (context, constraints) {
+                                final gap = ControlScale.gap(context);
+                                return Wrap(
+                                  key: const ValueKey('car-room-members'),
+                                  spacing: gap,
+                                  runSpacing: gap,
+                                  children: [
+                                    for (final member in state.members)
+                                      SizedBox(
+                                        width: constraints.maxWidth >= 800
+                                            ? (constraints.maxWidth - gap) / 2
+                                            : constraints.maxWidth,
+                                        child: memberTile(member),
+                                      ),
+                                  ],
+                                );
+                              },
+                            )
+                          else
+                            for (final member in state.members)
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 8),
+                                child: memberTile(member, compact: compact),
+                              ),
+                        ],
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-              );
+              ),
+            ),
+          );
           final content = LayoutBuilder(
             builder: (context, constraints) {
               final showingMap = session.followTarget != null;

@@ -179,4 +179,141 @@ void main() {
     store.dispose();
     appearance.dispose();
   });
+  for (final size in [const Size(1706, 1206), const Size(1320, 940)]) {
+    for (final signup in [false, true]) {
+      testWidgets(
+        '차량 $size ${signup ? '가입' : '로그인'} 입력·시작은 가로 한 줄이며 45% IME에도 보인다',
+        (tester) async {
+          tester.view.physicalSize = size;
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          addTearDown(tester.view.resetViewInsets);
+          SharedPreferences.setMockInitialValues({});
+          final store = SessionStore(await SharedPreferences.getInstance());
+          final appearance = AppearanceController();
+          final http = AvatarTestHttp()
+            ..jsonResponse = (_) => {
+              'user': {'handle': 'alice', 'displayName': '앨리스'},
+              'token': 'car-auth-token',
+            };
+          final api = http.api(store);
+          try {
+            await tester.pumpWidget(
+              UnavoAppearance(
+                controller: appearance,
+                child: MaterialApp(
+                  builder: testIconBuilder,
+                  theme: unavoTheme(Brightness.dark),
+                  home: AuthScreen(
+                    api: api,
+                    store: store,
+                    mode: DeviceMode.car,
+                  ),
+                ),
+              ),
+            );
+            await pumpConsentUi(tester);
+            if (signup) {
+              await tester.tap(find.byTooltip('가입'));
+              await pumpConsentUi(tester);
+            }
+            final form = find.byKey(const ValueKey('car-auth-form'));
+            final inputs = find.descendant(
+              of: form,
+              matching: find.byType(TextField),
+            );
+            final submit = find.byKey(const ValueKey('car-auth-submit'));
+            expect(inputs, findsNWidgets(signup ? 3 : 2));
+            final before = [
+              for (var i = 0; i < (signup ? 3 : 2); i++)
+                tester.getRect(inputs.at(i)),
+            ];
+            for (var i = 0; i < before.length; i++) {
+              expect(
+                before[i].center.dy,
+                closeTo(tester.getCenter(submit).dy, .01),
+              );
+              if (i > 0)
+                expect(before[i].left - before[i - 1].right, closeTo(24, .01));
+            }
+            expect(tester.getRect(submit).left, greaterThan(before.last.right));
+            await tester.enterText(inputs.at(0), 'alice');
+            await tester.enterText(inputs.at(1), 'password123');
+            if (signup) await tester.enterText(inputs.at(2), '앨리스');
+            await tester.tap(
+              find.byKey(const ValueKey('car-auth-server-toggle')),
+            );
+            await pumpConsentUi(tester);
+            final server = find.byWidgetPredicate(
+              (w) => w is TextField && w.decoration?.hintText == 'https://…',
+            );
+            await tester.enterText(server, 'https://example.invalid');
+            final keyboardHeight = size.width == 1706
+                ? 648.0
+                : size.height * .45;
+            tester.view.viewInsets = FakeViewPadding(bottom: keyboardHeight);
+            await pumpConsentUi(tester);
+            final keyboardTop = size.height - keyboardHeight;
+            for (var i = 0; i < before.length; i++) {
+              // 탭 뒤에는 커서 손잡이가 칸 가운데를 덮을 수 있어 가림 여부는 탭 전에 본다.
+              expect(inputs.at(i).hitTestable(), findsOneWidget);
+              await tester.tap(inputs.at(i));
+              await pumpConsentUi(tester);
+              expect(tester.getRect(inputs.at(i)), before[i]);
+              expect(
+                tester.getRect(inputs.at(i)).bottom,
+                lessThan(keyboardTop),
+              );
+            }
+            expect(tester.getRect(server).bottom, lessThan(keyboardTop));
+            expect(tester.getRect(submit).bottom, lessThan(keyboardTop));
+            expect(tester.getSize(submit), const Size(80, 80));
+            expect(submit.hitTestable(), findsOneWidget);
+            expect(
+              find.descendant(of: submit, matching: find.byType(Text)),
+              findsNothing,
+            );
+            if (signup) {
+              final age = find.byKey(const ValueKey('signup-age-check'));
+              expect(tester.getCenter(age).dy, tester.getCenter(submit).dy);
+              await tester.tap(submit);
+              await pumpConsentUi(tester);
+              expect(http.requests, isEmpty);
+              expect(store.session, isNull);
+              await tester.tap(age);
+              await pumpConsentUi(tester);
+            }
+            await tester.tap(submit);
+            await pumpConsentUi(tester);
+            expect(http.requests, hasLength(1));
+            expect(
+              http.requests.single.uri.path,
+              signup ? '/v1/auth/signup' : '/v1/auth/login',
+            );
+            if (signup)
+              expect(
+                jsonDecode(utf8.decode(http.requests.single.body))['over14'],
+                isTrue,
+              );
+            expect(store.token, 'car-auth-token');
+            expect(store.baseUrl, 'https://example.invalid');
+            await tester.tap(find.byTooltip(signup ? '로그인' : '가입'));
+            await pumpConsentUi(tester);
+            expect(
+              find.byKey(const ValueKey('signup-age-check')),
+              signup ? findsNothing : findsOneWidget,
+            );
+            expect(tester.takeException(), isNull);
+          } finally {
+            await tester.pumpWidget(const SizedBox.shrink());
+            api.close();
+            store.dispose();
+            appearance.dispose();
+          }
+        },
+        timeout: const Timeout(Duration(seconds: 30)),
+      );
+    }
+  }
 }

@@ -134,107 +134,49 @@ class _LegalConsentScreenState extends State<LegalConsentScreen> {
           children: [
             const Text('서비스 이용 동의', style: UnavoType.title),
             const SizedBox(height: 16),
+            if (widget.mode == DeviceMode.car && !snapshot.hasData)
+              snapshot.hasError
+                  ? const ErrorText('동의 문서를 불러오지 못했습니다. 다시 시작해 주세요.')
+                  : const Text('문서를 불러오는 중입니다', style: UnavoType.body),
             Expanded(
-              child: PanelScroll(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (!snapshot.hasData && !snapshot.hasError)
-                      const Text('문서를 불러오는 중입니다', style: UnavoType.body),
-                    if (snapshot.hasError)
-                      const ErrorText('동의 문서를 불러오지 못했습니다. 다시 시작해 주세요.'),
-                    for (var index = 0; index < _documents.length; index++) ...[
-                      Row(
-                        children: [
-                          Semantics(
-                            checked: _checked[index],
-                            child: PanelButton(
-                              key: ValueKey('legal-check-$index'),
-                              label: '${_documents[index].title} 동의',
-                              icon: 'check',
-                              selected: _checked[index],
-                              style: _checked[index]
-                                  ? PanelButtonStyle.gold
-                                  : PanelButtonStyle.neutral,
-                              onPressed: _busy || !snapshot.hasData
-                                  ? null
-                                  : () => setState(
-                                      () => _checked[index] = !_checked[index],
-                                    ),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
+              child: widget.mode == DeviceMode.car
+                  ? Row(
+                      key: const ValueKey('car-consent-columns'),
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (
+                          var index = 0;
+                          index < _documents.length;
+                          index++
+                        ) ...[
+                          if (index > 0)
+                            SizedBox(width: ControlScale.gap(context)),
                           Expanded(
-                            child: Text(
-                              '${_documents[index].title} (${index == 0 ? '필수' : '선택'})',
-                              style: UnavoType.body,
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          PanelButton(
-                            key: ValueKey('legal-expand-$index'),
-                            label:
-                                '${_documents[index].title} 전문 ${_expanded[index] ? '접기' : '펼치기'}',
-                            icon: 'chevron',
-                            selected: _expanded[index],
-                            onPressed: _busy || !snapshot.hasData
-                                ? null
-                                : () => setState(
-                                    () => _expanded[index] = !_expanded[index],
-                                  ),
-                            child: RotatedBox(
-                              quarterTurns: _expanded[index] ? 2 : 0,
-                              child: UnavoIcon(
-                                'chevron',
-                                size: ControlScale.icon(context),
-                              ),
+                            child: PanelScroll(
+                              key: ValueKey('car-consent-document-$index'),
+                              child: _consentDocument(context, snapshot, index),
                             ),
                           ),
                         ],
+                      ],
+                    )
+                  : PanelScroll(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (!snapshot.hasData && !snapshot.hasError)
+                            const Text('문서를 불러오는 중입니다', style: UnavoType.body),
+                          if (snapshot.hasError)
+                            const ErrorText('동의 문서를 불러오지 못했습니다. 다시 시작해 주세요.'),
+                          for (
+                            var index = 0;
+                            index < _documents.length;
+                            index++
+                          )
+                            _consentDocument(context, snapshot, index),
+                        ],
                       ),
-                      for (
-                        var line = 0;
-                        line < _documents[index].summary.length;
-                        line++
-                      ) ...[
-                        if (line > 0) const SizedBox(height: 4),
-                        Text.rich(
-                          key: ValueKey('legal-summary-$index-$line'),
-                          TextSpan(
-                            children: [
-                              TextSpan(
-                                text: '${_documents[index].summary[line].$1}: ',
-                                style: UnavoType.body.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                  color: UnavoColors.gold,
-                                ),
-                              ),
-                              TextSpan(
-                                text: _documents[index].summary[line].$2,
-                              ),
-                            ],
-                          ),
-                          style: UnavoType.body,
-                        ),
-                      ],
-                      const SizedBox(height: 8),
-                      if (_expanded[index] && snapshot.hasData) ...[
-                        const SizedBox(height: 12),
-                        Container(
-                          key: ValueKey('legal-detail-$index'),
-                          height: ControlScale.isCar(context) ? 280 : 220,
-                          decoration: panelDecoration(opaque: true),
-                          child: SingleChildScrollView(
-                            padding: const EdgeInsets.all(12),
-                            child: _legalText(snapshot.data![index]),
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 16),
-                    ],
-                  ],
-                ),
-              ),
+                    ),
             ),
             ErrorText(_error),
             const SizedBox(height: 16),
@@ -247,7 +189,7 @@ class _LegalConsentScreenState extends State<LegalConsentScreen> {
                   icon: 'back',
                   onPressed: _busy ? null : () => _decline(context),
                 ),
-                const SizedBox(width: 12),
+                SizedBox(width: ControlScale.gap(context)),
                 PanelButton(
                   key: const ValueKey('legal-accept'),
                   label: '동의',
@@ -264,18 +206,103 @@ class _LegalConsentScreenState extends State<LegalConsentScreen> {
       ),
     ),
   );
+  Widget _consentDocument(
+    BuildContext context,
+    AsyncSnapshot<List<String>> snapshot,
+    int index,
+  ) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Row(
+        children: [
+          Semantics(
+            checked: _checked[index],
+            child: PanelButton(
+              key: ValueKey('legal-check-$index'),
+              label: '${_documents[index].title} 동의',
+              icon: 'check',
+              selected: _checked[index],
+              style: _checked[index]
+                  ? PanelButtonStyle.gold
+                  : PanelButtonStyle.neutral,
+              onPressed: _busy || !snapshot.hasData
+                  ? null
+                  : () => setState(() => _checked[index] = !_checked[index]),
+            ),
+          ),
+          SizedBox(width: ControlScale.gap(context)),
+          Expanded(
+            child: Text(
+              '${_documents[index].title} (${index == 0 ? '필수' : '선택'})',
+              style: UnavoType.body,
+            ),
+          ),
+          SizedBox(width: ControlScale.gap(context)),
+          PanelButton(
+            key: ValueKey('legal-expand-$index'),
+            label:
+                '${_documents[index].title} 전문 ${_expanded[index] ? '접기' : '펼치기'}',
+            icon: 'chevron',
+            selected: _expanded[index],
+            onPressed: _busy || !snapshot.hasData
+                ? null
+                : () => setState(() => _expanded[index] = !_expanded[index]),
+            child: RotatedBox(
+              quarterTurns: _expanded[index] ? 2 : 0,
+              child: UnavoIcon('chevron', size: ControlScale.icon(context)),
+            ),
+          ),
+        ],
+      ),
+      for (var line = 0; line < _documents[index].summary.length; line++) ...[
+        if (line > 0) const SizedBox(height: 4),
+        Text.rich(
+          key: ValueKey('legal-summary-$index-$line'),
+          TextSpan(
+            children: [
+              TextSpan(
+                text: '${_documents[index].summary[line].$1}: ',
+                style: UnavoType.body.copyWith(
+                  fontWeight: FontWeight.bold,
+                  color: UnavoColors.gold,
+                ),
+              ),
+              TextSpan(text: _documents[index].summary[line].$2),
+            ],
+          ),
+          style: UnavoType.body,
+        ),
+      ],
+      const SizedBox(height: 8),
+      if (_expanded[index] && snapshot.hasData) ...[
+        const SizedBox(height: 12),
+        Container(
+          key: ValueKey('legal-detail-$index'),
+          height: ControlScale.isCar(context) ? 280 : 220,
+          decoration: panelDecoration(opaque: true),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(12),
+            child: _legalText(snapshot.data![index]),
+          ),
+        ),
+      ],
+      const SizedBox(height: 16),
+    ],
+  );
 }
 
 /// 설정에서는 저장된 동의 여부를 바꾸지 않고 같은 원문 렌더러만 사용한다.
 class LegalDocumentsScreen extends StatefulWidget {
-  const LegalDocumentsScreen({super.key});
+  const LegalDocumentsScreen({super.key, this.initialIndex = 0})
+    : assert(initialIndex >= 0 && initialIndex < 2);
+  final int initialIndex;
 
   @override
   State<LegalDocumentsScreen> createState() => _LegalDocumentsScreenState();
 }
 
 class _LegalDocumentsScreenState extends State<LegalDocumentsScreen> {
-  int _index = 0;
+  late int _index = widget.initialIndex;
   late final _texts = Future.wait([
     for (final document in _documents) rootBundle.loadString(document.asset),
   ]);
@@ -298,7 +325,7 @@ class _LegalDocumentsScreenState extends State<LegalDocumentsScreen> {
                 ),
                 const Spacer(),
                 for (var index = 0; index < _documents.length; index++) ...[
-                  if (index > 0) const SizedBox(width: 12),
+                  if (index > 0) SizedBox(width: ControlScale.gap(context)),
                   PanelButton(
                     key: ValueKey('legal-document-$index'),
                     label: _documents[index].title,

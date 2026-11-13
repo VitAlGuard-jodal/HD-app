@@ -9,6 +9,7 @@ import 'package:unavo/main.dart';
 import 'package:unavo/net/models.dart';
 import 'package:unavo/room/room_session.dart';
 import 'package:unavo/screens/phone/auth.dart';
+import 'package:unavo/screens/phone/friends.dart';
 import 'package:unavo/screens/phone/legal_consent.dart';
 import 'package:unavo/screens/phone/map_credits.dart';
 import 'package:unavo/screens/phone/mic.dart';
@@ -36,11 +37,12 @@ const _settingKeys = [
 
 void main() {
   for (final car in [false, true]) {
-    testWidgets('${car ? '차량' : '폰'} 바 가운데 홈과 좁은 바의 가로 스크롤', (tester) async {
+    testWidgets('${car ? '차량은 모든 버튼을 표시' : '폰은 가운데 홈과 좁은 바 스크롤'}', (
+      tester,
+    ) async {
       final services = await ConsentTestServices.create(tester);
       var homeTaps = 0;
       services.rooms.state = const RoomState(code: 'ABC123', isConnected: true);
-      // 폰은 재연결 버튼 때문에 좌우 버튼 수가 다른 경우도 확인한다.
       services.rooms.mediaConnection = MediaConnectionState.failed;
       try {
         for (final width in [600.0, 200.0]) {
@@ -65,18 +67,38 @@ void main() {
           await pumpConsentUi(tester);
           final bar = find.byKey(const ValueKey('room-controls'));
           final home = find.byKey(const ValueKey('room-home'));
-          final scrollable = tester.state<ScrollableState>(
-            find.descendant(of: bar, matching: find.byType(Scrollable)),
+          final scrollables = find.descendant(
+            of: bar,
+            matching: find.byType(Scrollable),
           );
           expect(tester.widget<FloatingBarButton>(home).icon, 'home');
-          if (width == 600) {
-            expect(scrollable.position.maxScrollExtent, 0);
-            expect(
-              tester.getCenter(home).dx,
-              closeTo(tester.getCenter(bar).dx, .01),
+          if (car) {
+            expect(scrollables, findsNothing);
+            final buttons = find.descendant(
+              of: bar,
+              matching: find.byType(FloatingBarButton),
             );
+            expect(buttons, findsNWidgets(4));
+            final bounds = tester.getRect(bar);
+            for (var i = 0; i < 4; i++) {
+              final rect = tester.getRect(buttons.at(i));
+              expect(tester.getSize(buttons.at(i)), const Size(80, 80));
+              expect(bounds.contains(rect.topLeft), isTrue);
+              expect(bounds.contains(rect.bottomRight), isTrue);
+              expect(buttons.at(i).hitTestable(), findsOneWidget);
+            }
           } else {
-            expect(scrollable.position.maxScrollExtent, greaterThan(0));
+            final scrollable = tester.state<ScrollableState>(scrollables);
+            expect(
+              scrollable.position.maxScrollExtent,
+              width == 600 ? 0 : greaterThan(0),
+            );
+            if (width == 600) {
+              expect(
+                tester.getCenter(home).dx,
+                closeTo(tester.getCenter(bar).dx, .01),
+              );
+            }
           }
           await tester.ensureVisible(home);
           await tester.tap(home);
@@ -98,46 +120,52 @@ void main() {
         expect(find.byType(RoomScreen), findsOneWidget);
         final room = services.rooms.state;
         final call = services.calls.state;
-        Element? companion;
-        State? microphone;
-        if (car) {
-          companion = tester.element(_secondary);
-          await tester.tap(
-            find.descendant(of: _secondary, matching: find.byTooltip('마이크')),
-          );
-          await _pumpNavigation(tester);
-          microphone = tester.state(_companionMic);
-        }
-
+        if (car)
+          expect(find.byKey(const ValueKey('open-settings')), findsNothing);
         await _tapKey(tester, 'room-home');
+        _expectLobbyOnly();
         expect(find.byType(RoomScreen), findsNothing);
-        expect(find.byType(RoomsScreen), findsOneWidget);
         expect(find.byKey(const ValueKey('current-room-card')), findsOneWidget);
         expect(find.byTooltip('통화 중'), findsOneWidget);
         expect(services.rooms.state, same(room));
         expect(services.calls.state, same(call));
-        _expectLobbyOnly();
+        expect(_secondary, findsNothing);
         if (car) {
-          expect(tester.element(_secondary), same(companion));
-          expect(tester.state(_companionMic), same(microphone));
-          expect(
-            find.descendant(of: _secondary, matching: find.byType(FloatingBar)),
-            findsOneWidget,
+          final create = tester.getRect(
+            find.byKey(const ValueKey('car-lobby-create')),
           );
+          final active = tester.getRect(
+            find.byKey(const ValueKey('car-lobby-active')),
+          );
+          expect(create.right + 24, closeTo(active.left, .01));
+          expect(create.top, active.top);
+          expect(find.text(joinedRoomReason), findsOneWidget);
+          final primary = tester.getRect(
+            find.byKey(const ValueKey('car-primary')),
+          );
+          expect(primary.width, closeTo(1706 - 48, .01));
+          final settings = tester.getRect(
+            find.byKey(const ValueKey('open-settings')),
+          );
+          expect(settings.right, primary.right);
+          expect(settings.bottom, lessThan(primary.top));
+          expect(find.byType(FriendsScreen), findsNothing);
+          expect(find.byType(MicLevel), findsNothing);
         }
-
         await _tapKey(tester, 'current-room-card');
         expect(find.byType(RoomScreen), findsOneWidget);
         expect(services.rooms.state.code, 'ABC123');
         expect(services.calls.state, same(call));
-        if (car) expect(tester.state(_companionMic), same(microphone));
+        expect(_secondary, findsNothing);
         expect(tester.takeException(), isNull);
       } finally {
         await _finish(tester, services);
       }
     }, timeout: _timeout);
 
-    testWidgets('${car ? '차량' : '폰'} 설정 7항목과 프로필·마이크·문서·출처 왕복', (tester) async {
+    testWidgets('${car ? '차량 설정 2단·9항목' : '폰 설정 7항목'}과 프로필·마이크·문서·출처', (
+      tester,
+    ) async {
       final services = await _mountApp(tester, car: car);
       try {
         final room = services.rooms.state;
@@ -145,33 +173,33 @@ void main() {
         final consent = services.store.preferences.getString(
           'legal.consent.v1',
         );
-        Element? companion;
-        State? microphone;
-        if (car) {
-          // 통화방에서 바로 톱니바퀴를 열어도 보조 패널은 살아 있어야 한다.
-          expect(find.byType(RoomScreen), findsOneWidget);
-          companion = tester.element(_secondary);
-          await tester.tap(
-            find.descendant(of: _secondary, matching: find.byTooltip('마이크')),
-          );
-          await _pumpNavigation(tester);
-          microphone = tester.state(_companionMic);
-        } else {
-          _expectLobbyOnly();
-        }
-
-        await _tapKey(tester, 'open-settings');
+        await _openSettings(tester);
         expect(find.byType(SettingsScreen), findsOneWidget);
         expect(find.byType(RoomScreen), findsNothing);
         var previousY = double.negativeInfinity;
-        for (final key in _settingKeys) {
+        final keys = car
+            ? [
+                for (final name in [
+                  'profile',
+                  'friends',
+                  'mic',
+                  'volume',
+                  'server',
+                  'terms',
+                  'consent',
+                  'map',
+                  'logout',
+                ])
+                  'car-settings-menu-$name',
+              ]
+            : _settingKeys;
+        for (final key in keys) {
           final item = find.byKey(ValueKey(key));
           expect(item, findsOneWidget);
           final y = tester.getTopLeft(item).dy;
           expect(y, greaterThan(previousY));
           previousY = y;
         }
-        expect(find.text(services.store.baseUrl), findsOneWidget);
         for (final button in tester.widgetList<PanelButton>(
           find.descendant(
             of: find.byType(SettingsScreen),
@@ -180,37 +208,26 @@ void main() {
         )) {
           expect(button.iconOnly, isTrue);
         }
-
-        void expectCompanion() {
-          if (!car) return;
-          expect(tester.element(_secondary), same(companion));
-          expect(tester.state(_companionMic), same(microphone));
+        if (car) {
+          final menu = find.byKey(const ValueKey('car-settings-menu-profile'));
           expect(
-            find.descendant(of: _secondary, matching: find.byType(MicLevel)),
-            findsOneWidget,
+            tester
+                .widget<PanelButton>(
+                  find.descendant(of: menu, matching: find.byType(PanelButton)),
+                )
+                .selected,
+            isTrue,
           );
+          expect(find.byType(ProfileScreen), findsOneWidget);
           expect(
-            find.descendant(of: _secondary, matching: find.byType(FloatingBar)),
-            findsOneWidget,
+            tester.getRect(menu).right,
+            lessThan(tester.getRect(_detail).left),
           );
+        } else {
+          expect(find.text(services.store.baseUrl), findsOneWidget);
+          await _tapKey(tester, 'settings-profile');
         }
-
-        void expectPrimary(Type screen) {
-          if (!car) return;
-          expect(
-            find.descendant(
-              of: find.byKey(const ValueKey('car-primary')),
-              matching: find.byType(screen),
-            ),
-            findsOneWidget,
-          );
-          expectCompanion();
-        }
-
-        expectPrimary(SettingsScreen);
-        await _tapKey(tester, 'settings-profile');
         expect(find.byType(ProfileScreen), findsOneWidget);
-        expectPrimary(ProfileScreen);
         expect(
           tester.getSize(find.byKey(const ValueKey('profile-back'))).height,
           car ? 80 : 56,
@@ -240,13 +257,10 @@ void main() {
           final dialogCard = find
               .descendant(of: dialog, matching: find.byType(Material))
               .first;
-          final centerX = tester.getCenter(dialogCard).dx;
           expect(
-            centerX,
-            inInclusiveRange(primaryRect.left, primaryRect.right),
+            tester.getCenter(dialogCard).dx,
+            closeTo(primaryRect.center.dx, .01),
           );
-          expect(centerX, closeTo(primaryRect.center.dx, .01));
-          // 페이지 라우트의 투명 배리어는 제외하고 모달의 색 있는 배리어만 본다.
           final barrier = find.descendant(
             of: primaryNavigator,
             matching: find.byWidgetPredicate(
@@ -255,20 +269,17 @@ void main() {
           );
           expect(barrier, findsOneWidget);
           expect(tester.getRect(barrier), primaryRect);
-          expect(
-            tester.getSize(barrier).width,
-            lessThan(
-              tester.view.physicalSize.width / tester.view.devicePixelRatio,
-            ),
-          );
-          expect(
-            find.ancestor(of: dialog, matching: find.byType(Navigator)),
-            findsNWidgets(2),
-          );
           expect(Navigator.of(tester.element(dialog)), same(profileNavigator));
-          expectPrimary(ProfileScreen);
           await tester.tap(find.byTooltip('닫기'));
           await _pumpNavigation(tester);
+          await _tapKey(tester, 'car-settings-menu-friends');
+          expect(find.byType(FriendsScreen), findsOneWidget);
+          expect(
+            find.descendant(of: _detail, matching: find.byType(FriendsScreen)),
+            findsOneWidget,
+          );
+          expect(find.byTooltip('친구 추가'), findsOneWidget);
+          expect(find.byTooltip('목록 새로고침'), findsOneWidget);
         } else {
           expect(sourcePage, findsOneWidget);
           expect(dialog, findsNothing);
@@ -283,34 +294,37 @@ void main() {
             56,
           );
           await _tapKey(tester, 'profile-source-back');
+          await _tapKey(tester, 'profile-back');
         }
-        expect(dialog, findsNothing);
-        expect(sourcePage, findsNothing);
-        expect(find.byType(ProfileScreen), findsOneWidget);
-        expectPrimary(ProfileScreen);
-        await _tapKey(tester, 'profile-back');
-        expect(find.byType(SettingsScreen), findsOneWidget);
-
         await _tapKey(tester, 'settings-mic');
-        expect(find.byType(MicScreen), car ? findsNWidgets(2) : findsOneWidget);
-        expectPrimary(MicScreen);
-        await _tapKey(tester, 'settings-mic-back');
-
+        expect(find.byType(MicScreen), findsOneWidget);
+        expect(find.byType(MicLevel), findsOneWidget);
+        if (car) {
+          expect(
+            find.descendant(of: _detail, matching: find.byType(MicScreen)),
+            findsOneWidget,
+          );
+        } else {
+          await _tapKey(tester, 'settings-mic-back');
+        }
         await _tapKey(tester, 'settings-legal');
-        expectPrimary(LegalDocumentsScreen);
+        expect(find.byType(LegalDocumentsScreen), findsOneWidget);
         expect(find.text('우나보 개인정보 처리방침'), findsOneWidget);
         await _tapKey(tester, 'legal-document-1');
         expect(find.text('위치정보 수집·이용 동의'), findsOneWidget);
         expect(find.byKey(const ValueKey('legal-accept')), findsNothing);
-        await _tapKey(tester, 'legal-documents-back');
+        if (car) {
+          await _tapKey(tester, 'car-settings-menu-consent');
+          expect(find.text('위치정보 수집·이용 동의'), findsOneWidget);
+        } else {
+          await _tapKey(tester, 'legal-documents-back');
+        }
         expect(
           services.store.preferences.getString('legal.consent.v1'),
           consent,
         );
-
         await _tapKey(tester, 'settings-map');
         expect(find.byType(MapCreditsScreen), findsOneWidget);
-        expectPrimary(MapCreditsScreen);
         await tester.tap(
           find.descendant(
             of: find.byType(MapCreditsScreen),
@@ -318,20 +332,16 @@ void main() {
           ),
         );
         await _pumpNavigation(tester);
+        if (car) await _openSettings(tester);
         await _tapKey(tester, 'settings-back');
         expect(find.byType(SettingsScreen), findsNothing);
-        expect(find.byType(RoomsScreen), findsOneWidget);
-        expect(find.byType(RoomScreen), findsNothing);
-        expectCompanion();
         _expectLobbyOnly();
+        expect(_secondary, findsNothing);
         expect(services.rooms.state, same(room));
         expect(services.calls.state, same(call));
-
         await _tapKey(tester, 'current-room-card');
         expect(find.byType(RoomScreen), findsOneWidget);
-        expect(services.rooms.state.code, 'ABC123');
         expect(services.calls.state.isActive, isTrue);
-        expectCompanion();
         expect(tester.takeException(), isNull);
       } finally {
         await _finish(tester, services);
@@ -341,7 +351,8 @@ void main() {
     testWidgets('${car ? '차량' : '폰'} 설정 음량은 방 슬라이더와 저장값을 공유한다', (tester) async {
       final services = await _mountApp(tester, car: car);
       try {
-        await _tapKey(tester, 'open-settings');
+        await _openSettings(tester);
+        if (car) await _tapKey(tester, 'car-settings-menu-volume');
         final slider = find.byKey(
           const ValueKey('settings-call-volume-slider'),
         );
@@ -377,7 +388,7 @@ void main() {
           services.api.httpLogout = true;
           services.api.http.requests.clear();
           services.api.http.jsonResponse = (_) => <String, Object?>{};
-          await _tapKey(tester, 'open-settings');
+          await _openSettings(tester);
           final server = find.descendant(
             of: find.byKey(const ValueKey('settings-server')),
             matching: find.byType(PanelButton),
@@ -391,7 +402,6 @@ void main() {
                 .serverSettingsOnly,
             isTrue,
           );
-          // 차량은 보조 패널의 친구 아이디 입력칸이 함께 보이므로 인증 화면 안으로 좁힌다.
           final serverField = find.descendant(
             of: find.byType(AuthScreen),
             matching: find.byType(TextField),
@@ -409,7 +419,17 @@ void main() {
               ),
               findsOneWidget,
             );
-            expect(_secondary, findsOneWidget);
+            expect(_secondary, findsNothing);
+            addTearDown(tester.view.resetViewInsets);
+            tester.view.viewInsets = const FakeViewPadding(bottom: 648);
+            await _pumpNavigation(tester);
+            for (final target in [
+              serverField,
+              find.byKey(const ValueKey('server-settings-save')),
+            ]) {
+              expect(tester.getRect(target).bottom, lessThan(1206 - 648));
+              expect(target.hitTestable(), findsOneWidget);
+            }
           }
           await tester.enterText(serverField, 'ftp://example.invalid');
           await _tapKey(tester, 'server-settings-save');
@@ -419,7 +439,8 @@ void main() {
           await _tapKey(tester, 'server-settings-save');
           expect(find.byType(SettingsScreen), findsOneWidget);
           expect(services.store.baseUrl, 'https://example.invalid:443');
-          expect(find.text(services.store.baseUrl), findsOneWidget);
+          if (!car) expect(find.text(services.store.baseUrl), findsOneWidget);
+          expect(find.byType(AuthScreen), car ? findsOneWidget : findsNothing);
           expect(services.api.logouts, 0);
           expect(services.api.logins, 0);
           expect(services.api.signups, 0);
@@ -485,7 +506,7 @@ void main() {
           final session = services.store.session;
           final call = services.calls.state;
           services.api.logoutFails = true;
-          await _tapKey(tester, 'open-settings');
+          await _openSettings(tester);
           final server = find.descendant(
             of: find.byKey(const ValueKey('settings-server')),
             matching: find.byType(PanelButton),
@@ -526,7 +547,23 @@ void main() {
     ) async {
       final services = await _mountApp(tester, car: car);
       try {
-        await _tapKey(tester, 'open-settings');
+        await _openSettings(tester);
+        if (car) {
+          expect(find.byKey(const ValueKey('settings-logout')), findsNothing);
+          await _tapKey(tester, 'car-settings-menu-logout');
+          expect(services.api.logouts, 0);
+          expect(services.store.session, isNotNull);
+          expect(
+            find.descendant(
+              of: _detail,
+              matching: find.byKey(const ValueKey('settings-logout')),
+            ),
+            findsOneWidget,
+          );
+          await _tapKey(tester, 'car-settings-menu-profile');
+          expect(services.api.logouts, 0);
+          await _tapKey(tester, 'car-settings-menu-logout');
+        }
         services.api.logoutFails = true;
         await _tapKey(tester, 'settings-logout');
         expect(services.api.logouts, 1);
@@ -549,12 +586,40 @@ void main() {
     }, timeout: _timeout);
   }
 
-  testWidgets('차량 시스템 뒤로는 선택 모달·프로필·설정·로비 순으로 주 패널만 바꾼다', (tester) async {
+  testWidgets('차량 빈 로비도 만들기·참여 중인 방을 가로로 나누고 빈 상태를 표시한다', (tester) async {
     final services = await _mountApp(tester, car: true);
     try {
-      final companion = tester.element(_secondary);
-      await _tapKey(tester, 'open-settings');
-      await _tapKey(tester, 'settings-profile');
+      await _tapKey(tester, 'room-home');
+      await completeConsentFuture(tester, services.rooms.forget());
+      await _pumpNavigation(tester);
+      expect(find.byKey(const ValueKey('car-lobby-create')), findsOneWidget);
+      final active = find.byKey(const ValueKey('car-lobby-active'));
+      expect(
+        find.descendant(of: active, matching: find.byTooltip('참여 중인 방이 없습니다.')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('current-room-card')), findsNothing);
+      expect(find.text(joinedRoomReason), findsNothing);
+      expect(
+        tester
+            .widget<PanelButton>(
+              find.byWidgetPredicate(
+                (w) => w is PanelButton && w.label == '방 만들기',
+              ),
+            )
+            .onPressed,
+        isNotNull,
+      );
+      expect(tester.takeException(), isNull);
+    } finally {
+      await _finish(tester, services);
+    }
+  }, timeout: _timeout);
+
+  testWidgets('차량 시스템 뒤로는 선택 모달을 닫고 설정에서 로비로 복귀한다', (tester) async {
+    final services = await _mountApp(tester, car: true);
+    try {
+      await _openSettings(tester);
       await _tapKey(tester, 'profile-edit');
       expect(
         find.byKey(const ValueKey('profile-source-dialog')),
@@ -563,6 +628,7 @@ void main() {
       await tester.binding.handlePopRoute();
       await _pumpNavigation(tester);
       expect(find.byKey(const ValueKey('profile-source-dialog')), findsNothing);
+      expect(find.byType(SettingsScreen), findsOneWidget);
       expect(find.byType(ProfileScreen), findsOneWidget);
       expect(
         tester
@@ -570,16 +636,11 @@ void main() {
             .onPressed,
         isNull,
       );
-      expect(tester.element(_secondary), same(companion));
-      await tester.binding.handlePopRoute();
-      await _pumpNavigation(tester);
-      expect(find.byType(SettingsScreen), findsOneWidget);
-      expect(find.byType(ProfileScreen), findsNothing);
       await tester.binding.handlePopRoute();
       await _pumpNavigation(tester);
       expect(find.byType(RoomsScreen), findsOneWidget);
       expect(find.byType(SettingsScreen), findsNothing);
-      expect(tester.element(_secondary), same(companion));
+      expect(_secondary, findsNothing);
       expect(services.rooms.state.code, 'ABC123');
       expect(services.calls.state.isActive, isTrue);
       expect(tester.takeException(), isNull);
@@ -595,7 +656,7 @@ void main() {
       final services = await _mountApp(tester);
       try {
         if (fromSettings) {
-          await _tapKey(tester, 'open-settings');
+          await _openSettings(tester);
           await _tapKey(tester, 'settings-profile');
         } else {
           await tester.tap(find.byTooltip('친구'));
@@ -619,8 +680,14 @@ void main() {
 }
 
 Finder get _secondary => find.byKey(const ValueKey('car-secondary'));
-Finder get _companionMic =>
-    find.descendant(of: _secondary, matching: find.byType(MicScreen));
+Finder get _detail => find.byKey(const ValueKey('car-settings-detail'));
+
+Future<void> _openSettings(WidgetTester tester) async {
+  if (find.byType(RoomScreen).evaluate().isNotEmpty) {
+    await _tapKey(tester, 'room-home');
+  }
+  await _tapKey(tester, 'open-settings');
+}
 
 void _expectLobbyOnly() {
   expect(find.byType(RoomsScreen), findsOneWidget);
@@ -647,7 +714,9 @@ Future<ConsentTestServices> _mountApp(
   WidgetTester tester, {
   bool car = false,
 }) async {
-  tester.view.physicalSize = car ? const Size(1320, 940) : const Size(412, 915);
+  tester.view.physicalSize = car
+      ? const Size(1706, 1206)
+      : const Size(412, 915);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
