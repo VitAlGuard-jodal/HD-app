@@ -41,6 +41,7 @@ class AppServices {
       micRouter: mic,
       locationSource: this.locationSource,
       deviceMode: deviceMode,
+      driving: driving,
     );
   }
   final SessionStore store;

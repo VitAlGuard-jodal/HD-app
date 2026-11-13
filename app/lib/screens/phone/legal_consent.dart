@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -42,6 +40,44 @@ const _documents = [
   ),
 ];
 
+class LegalConsentCheckScreen extends StatelessWidget {
+  const LegalConsentCheckScreen({
+    super.key,
+    required this.mode,
+    required this.checking,
+    required this.onRetry,
+  });
+  final DeviceMode mode;
+  final bool checking;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) => PhoneFrame(
+    mode: mode,
+    child: Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            checking ? '동의 내역을 확인하는 중입니다' : '동의 내역을 확인하지 못했습니다. 다시 시도해 주세요.',
+            style: UnavoType.body,
+            textAlign: TextAlign.center,
+          ),
+          if (!checking) ...[
+            const SizedBox(height: 16),
+            PanelButton(
+              key: const ValueKey('legal-retry'),
+              label: '다시 시도',
+              icon: 'refresh',
+              onPressed: onRetry,
+            ),
+          ],
+        ],
+      ),
+    ),
+  );
+}
+
 class LegalConsentScreen extends StatefulWidget {
   const LegalConsentScreen({
     super.key,
@@ -68,30 +104,24 @@ class _LegalConsentScreenState extends State<LegalConsentScreen> {
 
   Future<void> _accept() async {
     if (_busy || !_checked[0]) return;
+    final store = widget.services.store;
+    final revision = store.sessionRevision;
+    if (store.session == null) return;
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      await saveLegalConsent(
-        widget.services.store.preferences,
-        privacy: _checked[0],
-        location: _checked[1],
+      final consent = await widget.services.api.recordConsent(
+        privacyVersion: legalVersion,
+        locationVersion: _checked[1] ? locationLegalVersion : null,
       );
-      unawaited(
-        widget.services.api
-            .recordConsent(
-              privacyVersion: legalVersion,
-              locationVersion: _checked[1] ? locationLegalVersion : null,
-            )
-            .then<void>(
-              (_) {},
-              onError: (Object error, StackTrace stack) {
-                debugPrint('동의 기록 전송 실패: $error');
-              },
-            ),
-      );
-      if (mounted) widget.onAccepted();
+      if (!hasPrivacyConsent(consent) ||
+          (_checked[1] && !hasLocationConsent(consent))) {
+        throw const FormatException('동의 내역을 저장하지 못했습니다. 다시 시도해 주세요.');
+      }
+      if (mounted && store.updateConsent(consent, sessionRevision: revision))
+        widget.onAccepted();
     } catch (error) {
       if (mounted) setState(() => _error = errorMessage(error));
     } finally {

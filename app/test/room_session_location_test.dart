@@ -10,6 +10,7 @@ import 'package:unavo/call/call_service.dart';
 import 'package:unavo/call/media_engine.dart';
 import 'package:unavo/core/app_services.dart';
 import 'package:unavo/core/device_mode.dart';
+import 'package:unavo/core/driving_state.dart';
 import 'package:unavo/location/location_share.dart';
 import 'package:unavo/location/location_source.dart';
 import 'package:unavo/net/api_client.dart';
@@ -949,177 +950,123 @@ void main() {
     });
   }, timeout: _timeout);
 
-  test('차량은 moving만 차단하고 stationary에서 시작한 따라가기와 중지는 허용한다', () {
-    fakeAsync((clock) {
-      final f = _Fixture.create(clock, mode: DeviceMode.car);
-      f.open();
-      f.startSharing();
-      f.sample(speed: .5);
-      expect(f.session.locationShare.motionState, LocationMotionState.moving);
-      expect(f.session.followNeedsStop, isTrue);
-      var notifications = 0;
-      f.session.addListener(() => notifications++);
-      _finish(clock, f.session.startFollowing('alice'));
-      expect(f.session.followTarget, isNull);
-      expect(f.session.followError, '정차 후 설정할 수 있습니다');
-      expect(f.api.follows, isEmpty);
-      expect(notifications, 1);
-      _finish(clock, f.session.startFollowing('alice'));
-      expect(notifications, 1);
-      for (var second = 0; second <= 3; second++) {
-        if (second > 0) clock.elapse(const Duration(seconds: 1));
-        f.sample(lat: 37 + second * .001, speed: 3);
-      }
-      _finish(clock, f.session.startFollowing('alice'));
-      expect(f.session.followTarget, isNull);
-      for (var second = 0; second < 4; second++) {
-        clock.elapse(const Duration(seconds: 1));
-        f.sample(lat: 37.003, speed: 0);
-      }
-      expect(f.session.locationShare.isStationary, isTrue);
-      expect(f.session.followNeedsStop, isFalse);
-      _finish(clock, f.session.startFollowing('alice'));
-      expect(f.session.followTarget, 'alice');
-      expect(f.session.followError, isNull);
-      final enabledNotifications = notifications;
-      _finish(clock, f.session.startFollowing('alice'));
-      expect(notifications, enabledNotifications);
-      clock.elapse(const Duration(seconds: 1));
-      f.sample(lat: 38, speed: 5);
-      expect(f.session.locationShare.isStationary, isFalse);
-      expect(f.session.followTarget, 'alice'); // 이미 켠 따라가기는 이동 중에도 유지한다.
-      final movingNotifications = notifications;
-      _finish(clock, f.session.startFollowing('alice'));
-      expect(f.session.followError, isNull);
-      expect(notifications, movingNotifications);
-      _finish(clock, f.session.stopFollowing());
-      expect(f.session.followTarget, isNull);
-      expect(f.session.followError, isNull);
-      f.dispose();
-    });
-  }, timeout: _timeout);
-
-  test('동의 후 start가 돌려주기 전에 moving이면 followTarget과 POST를 거부한다', () {
-    fakeAsync((clock) {
-      final f = _Fixture.create(clock, mode: DeviceMode.car);
-      f.open();
-      expect(f.session.checkFollowAllowed('alice'), isTrue);
-      f.source.initialSample = LocationSample(
-        lat: 37,
-        lng: 127,
-        speed: .5,
-        at: f.now(),
-      );
-      f.startSharing();
-      _finish(clock, f.session.startFollowing('alice'));
-      expect(f.session.followTarget, isNull);
-      expect(f.session.followError, '정차 후 설정할 수 있습니다');
-      expect(f.api.follows, isEmpty);
-      expect(f.session.locationShare.sharing, isTrue);
-      expect(f.source.cancellations, 0);
-      f.dispose();
-    });
-  }, timeout: _timeout);
-
-  for (final pendingPost in [false, true]) {
-    test(
-      'unknown 따라가기의 첫 moving 판정은 공유를 유지하고 follow를 정리한다 (POST 대기 $pendingPost)',
-      () {
+  for (final restricted in [false, true]) {
+    for (final motion in LocationMotionState.values) {
+      test('차량 주행 제한 $restricted·GPS $motion은 주행 제한만으로 시작을 판정한다', () {
         fakeAsync((clock) {
           final f = _Fixture.create(clock, mode: DeviceMode.car);
           f.open();
           f.startSharing();
-          final gate = Completer<void>();
-          if (pendingPost) f.api.followGate = gate.future;
-          final following = f.session.startFollowing('alice');
-          clock.flushMicrotasks();
-          expect(f.api.follows, ['alice']);
-          expect(f.session.followIntent, 'alice');
-          final locationGate = Completer<void>();
-          f.http.sendGate = locationGate.future;
-          f.sample(speed: .5);
-          expect(f.session.locationShare.lastSent, isNull);
-          expect(f.session.followTarget, isNull);
-          expect(f.session.followError, '정차 후 설정할 수 있습니다');
-          expect(f.session.locationShare.sharing, isTrue);
-          expect(f.source.cancellations, 0);
-          expect(f.http.deletes, isEmpty);
-          expect(f.api.unfollows, pendingPost ? 0 : 1);
-          gate.complete();
-          _finish(clock, following);
-          expect(f.api.unfollows, 1);
-          f.event(
-            const FollowResponse('alice', true, requestId: 'alice-request'),
+          if (motion == LocationMotionState.moving) f.sample(speed: 3);
+          if (motion == LocationMotionState.stationary) {
+            for (var second = 0; second <= 3; second++) {
+              if (second > 0) clock.elapse(const Duration(seconds: 1));
+              f.sample(speed: 0);
+            }
+          }
+          expect(f.session.locationShare.motionState, motion);
+          f.drive(restricted);
+          expect(f.session.followNeedsStop, restricted);
+          expect(f.session.checkFollowAllowed('alice'), !restricted);
+          _finish(clock, f.session.startFollowing('alice'));
+          expect(f.api.follows, restricted ? isEmpty : ['alice']);
+          expect(f.session.followTarget, restricted ? isNull : 'alice');
+          expect(
+            f.session.followError,
+            restricted ? '정차 후 설정할 수 있습니다' : isNull,
           );
-          expect(f.session.followTarget, isNull);
-          f.sample(speed: 2);
-          expect(f.api.unfollows, 1); // 최초 판정 때 한 번만 취소한다.
-          locationGate.complete();
-          clock.flushMicrotasks();
+          expect(f.session.locationShare.sharing, isTrue);
+          if (restricted) {
+            f.drive(false);
+            _finish(clock, f.session.startFollowing('alice'));
+            expect(f.session.followTarget, 'alice');
+            expect(f.session.followError, isNull);
+          }
           f.dispose();
         });
-      },
-      timeout: _timeout,
-    );
+      }, timeout: _timeout);
+    }
   }
 
-  test('같은 대상의 hello를 받아도 unknown 따라가기의 첫 이동 검사는 유지한다', () {
+  test('동의·공유 시작 사이 주행 제한이 켜지면 follow POST를 거부한다', () {
     fakeAsync((clock) {
       final f = _Fixture.create(clock, mode: DeviceMode.car);
       f.open();
+      f.drive(false);
+      expect(f.session.checkFollowAllowed('alice'), isTrue);
       f.startSharing();
+      f.drive(true);
       _finish(clock, f.session.startFollowing('alice'));
-      f.event(
-        Hello(
-          'bob',
-          f.api.members,
-          'alice',
-          const [],
-          const {},
-          'alice',
-          const [],
-          2,
-          null,
-          'alice-request',
-        ),
-      );
-      f.sample(speed: .5);
+      expect(f.api.follows, isEmpty);
       expect(f.session.followTarget, isNull);
       expect(f.session.followError, '정차 후 설정할 수 있습니다');
       expect(f.session.locationShare.sharing, isTrue);
-      expect(f.api.unfollows, 1);
       f.dispose();
     });
   }, timeout: _timeout);
 
-  test('unknown에서 시작해 첫 stationary 판정을 마치면 이후 이동 중에도 따라간다', () {
-    fakeAsync((clock) {
-      final f = _Fixture.create(clock, mode: DeviceMode.car);
-      f.open();
-      f.startSharing();
-      _finish(clock, f.session.startFollowing('alice'));
-      for (var second = 0; second <= 3; second++) {
-        if (second > 0) clock.elapse(const Duration(seconds: 1));
-        f.sample(speed: 0);
+  for (final failure in ['unavailable', 'invalid', 'error', 'done']) {
+    test('차량 주행 상태 $failure는 화면 잠금처럼 제한을 해제하고 GPS moving도 허용한다', () {
+      fakeAsync((clock) {
+        final f = _Fixture.create(clock, mode: DeviceMode.car);
+        f.open();
+        f.startSharing();
+        f.sample(speed: 3);
+        f.drive(true);
+        switch (failure) {
+          case 'unavailable':
+            f.drivingEvents.add({'restricted': true, 'available': false});
+          case 'invalid':
+            f.drivingEvents.add('invalid');
+          case 'error':
+            f.drivingEvents.addError(StateError('unavailable'));
+          case 'done':
+            _finish(clock, f.drivingEvents.close());
+        }
+        clock.flushMicrotasks();
+        expect(f.driving.available, isFalse);
+        expect(f.driving.restricted, isFalse);
+        expect(f.session.followNeedsStop, isFalse);
+        _finish(clock, f.session.startFollowing('alice'));
         expect(f.session.followTarget, 'alice');
-      }
-      expect(
-        f.session.locationShare.motionState,
-        LocationMotionState.stationary,
-      );
-      f.sample(speed: 3);
-      expect(f.session.locationShare.motionState, LocationMotionState.moving);
-      expect(f.session.followTarget, 'alice');
-      expect(f.session.followError, isNull);
-      expect(f.api.unfollows, 0);
-      f.dispose();
-    });
-  }, timeout: _timeout);
+        f.dispose();
+      });
+    }, timeout: _timeout);
+  }
+
+  for (final pendingPost in [false, true]) {
+    test('첫 GPS moving 표본은 시작한 follow를 취소하지 않는다 (POST 대기 $pendingPost)', () {
+      fakeAsync((clock) {
+        final f = _Fixture.create(clock, mode: DeviceMode.car);
+        f.open();
+        f.startSharing();
+        final gate = Completer<void>();
+        if (pendingPost) f.api.followGate = gate.future;
+        final following = f.session.startFollowing('alice');
+        clock.flushMicrotasks();
+        f.sample(speed: 3);
+        expect(f.session.followIntent, 'alice');
+        expect(f.session.followError, isNull);
+        gate.complete();
+        _finish(clock, following);
+        f.drive(true);
+        f.sample(speed: 5);
+        expect(f.session.followTarget, 'alice');
+        expect(f.session.locationShare.sharing, isTrue);
+        expect(f.api.unfollows, 0);
+        _finish(clock, f.session.stopFollowing());
+        expect(f.session.followTarget, isNull);
+        expect(f.api.unfollows, 1);
+        f.dispose();
+      });
+    }, timeout: _timeout);
+  }
 
   test('폰은 정차 제한이 없고 그룹장 자신은 no-op이다', () {
     fakeAsync((clock) {
       final phone = _Fixture.create(clock);
       phone.open();
+      phone.drive(true);
       phone.startSharing();
       _finish(clock, phone.session.startFollowing('alice'));
       expect(phone.session.followTarget, 'alice');
@@ -1600,6 +1547,8 @@ class _Fixture {
   _Fixture(this.clock, this.store, DeviceMode mode) {
     api = _Api(store, http);
     mic = MicRouter(store);
+    unawaited(drivingEvents.done);
+    driving = DrivingState(mode: mode, events: drivingEvents.stream);
     session = RoomSession(
       api: api,
       mediaEngine: media,
@@ -1607,6 +1556,7 @@ class _Fixture {
       callService: calls,
       micRouter: mic,
       deviceMode: mode,
+      driving: driving,
       locationSource: source,
       locationNow: now,
     );
@@ -1633,6 +1583,14 @@ class _Fixture {
   late final _Api api;
   late final MicRouter mic;
   late final RoomSession session;
+  final drivingEvents = StreamController<Object?>.broadcast(sync: true);
+  late final DrivingState driving;
+
+  void drive(bool restricted) {
+    drivingEvents.add({'restricted': restricted, 'available': true});
+    clock.flushMicrotasks();
+  }
+
   DateTime now() => DateTime.utc(2026).add(clock.elapsed);
   void open({
     List<LocationFix> positions = const [],
@@ -1666,6 +1624,8 @@ class _Fixture {
   void dispose() {
     _finish(clock, session.locationShare.stop());
     session.dispose();
+    driving.dispose();
+    _finish(clock, drivingEvents.close());
     _finish(clock, api.close());
     _finish(clock, source.close());
     unawaited(http.events.stream.drain<void>());

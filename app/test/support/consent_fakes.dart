@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unavo/audio/mic_router.dart';
+import 'package:unavo/auth/legal_consent_store.dart';
 import 'package:unavo/auth/session_store.dart';
 import 'package:unavo/call/call_service.dart';
 import 'package:unavo/call/call_state.dart';
@@ -20,6 +21,11 @@ import 'package:unavo/room/room_session.dart';
 
 import 'location_fakes.dart';
 import 'avatar_fakes.dart';
+
+ConsentRecord testConsent({String version = legalVersion}) => ConsentRecord(
+  privacy: (version: version, at: '2026-11-13T00:00:00.000Z'),
+  location: (version: version, at: '2026-11-13T00:00:00.000Z'),
+);
 
 // 메모리 응답의 완료와 root-zone microtask만 기다린다. 네트워크·타이머 대기 없음.
 Future<T> completeConsentFuture<T>(
@@ -82,6 +88,7 @@ class ConsentTestServices implements AppServices {
       locationSource: locationSource,
       locationNow: locationNow,
       deviceMode: mode,
+      driving: driving,
     );
   }
 
@@ -89,6 +96,7 @@ class ConsentTestServices implements AppServices {
     WidgetTester tester, {
     bool signedIn = true,
     String? savedVersion,
+    String? serverVersion,
     DeviceMode mode = DeviceMode.phone,
     Stream<Object?>? drivingEvents,
     String handle = 'bob',
@@ -105,12 +113,16 @@ class ConsentTestServices implements AppServices {
       tester,
       SharedPreferences.getInstance(),
     );
-    return ConsentTestServices(
+    final services = ConsentTestServices(
       SessionStore(preferences, defaultBaseUrl: 'https://example.invalid'),
       mode: mode,
       drivingEvents: drivingEvents,
       locationNow: tester.binding.clock.now,
     );
+    if (serverVersion != null) {
+      services.api.consent = testConsent(version: serverVersion);
+    }
+    return services;
   }
 
   @override
@@ -189,7 +201,8 @@ class ConsentTestServices implements AppServices {
 class ConsentTestApi extends ApiClient {
   ConsentTestApi(SessionStore store) : this._(store, AvatarTestHttp());
   ConsentTestApi._(SessionStore store, this.http)
-    : super(tokenStore: store, clientFactory: http.createClient) {
+    : store = store,
+      super(tokenStore: store, clientFactory: http.createClient) {
     unawaited(events.done);
     http.jsonResponse = (request) {
       final body = jsonDecode(utf8.decode(request.body)) as JsonMap;
@@ -221,7 +234,12 @@ class ConsentTestApi extends ApiClient {
     };
   }
   final AvatarTestHttp http;
-  ConsentRecord? consent;
+  final SessionStore store;
+  final consents = <String, ConsentRecord?>{};
+  ConsentRecord? get consent => consents[store.handle ?? 'bob'];
+  set consent(ConsentRecord? value) => consents[store.handle ?? 'bob'] = value;
+  Future<void>? meGate, consentGate;
+  Object? meError;
   final events = StreamController<RoomEvent>.broadcast();
   List<Member> members = const [
     Member('alice', '앨리스', '1'),
@@ -285,7 +303,23 @@ class ConsentTestApi extends ApiClient {
   @override
   Future<MeResult> me() async {
     meReads++;
-    return MeResult(const User('bob', '보비'), null, consent: consent);
+    final result = MeResult(User(store.handle!, '보비'), null, consent: consent);
+    await meGate;
+    if (meError case final error?) throw error;
+    return result;
+  }
+
+  @override
+  Future<ConsentRecord> recordConsent({
+    String? privacyVersion,
+    String? locationVersion,
+  }) async {
+    final result = await super.recordConsent(
+      privacyVersion: privacyVersion,
+      locationVersion: locationVersion,
+    );
+    await consentGate;
+    return result;
   }
 
   @override

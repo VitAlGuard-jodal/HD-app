@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -5,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:unavo/core/device_mode.dart';
 import 'package:unavo/main.dart';
+import 'package:unavo/net/models.dart';
 import 'package:unavo/screens/car/car_shell.dart';
 import 'package:unavo/screens/phone/auth.dart';
 import 'package:unavo/screens/phone/legal_consent.dart';
@@ -71,7 +73,7 @@ void main() {
   for (final location in [false, true]) {
     for (final serverFails in [false, true]) {
       testWidgets(
-        '동의는 PUT 1회로 개인정보 3·위치 ${location ? "3" : "생략"}을 보내고 ${serverFails ? "서버 500에도 " : ""}onAccepted를 호출한다',
+        '동의는 PUT 1회로 개인정보 3·위치 ${location ? "3" : "생략"}을 보내고 ${serverFails ? "서버 500이면 재시도하고 " : ""}성공 후에만 onAccepted를 호출한다',
         (tester) async {
           final services = await ConsentTestServices.create(tester);
           services.api.http.status = serverFails ? 500 : 200;
@@ -89,9 +91,26 @@ void main() {
               'privacy': {'version': '3'},
               if (location) 'location': {'version': '3'},
             });
-            expect(accepted, 1);
-            expect(hasPrivacyConsent(services.store.preferences), isTrue);
-            expect(hasLocationConsent(services.store.preferences), location);
+            expect(accepted, serverFails ? 0 : 1);
+            expect(hasPrivacyConsent(services.store.consent), !serverFails);
+            expect(
+              hasLocationConsent(services.store.consent),
+              !serverFails && location,
+            );
+            expect(
+              services.store.preferences.getString('legal.consent.v1'),
+              isNull,
+            );
+            if (serverFails) {
+              expect(find.byType(LegalConsentScreen), findsOneWidget);
+              expect(find.text('프로필 저장 오류'), findsOneWidget);
+              _expectAcceptButtonState(tester, enabled: true);
+              services.api.http.status = 200;
+              await _tapKey(tester, 'legal-accept');
+              expect(accepted, 1);
+              expect(requests, hasLength(2));
+              expect(find.text('프로필 저장 오류'), findsNothing);
+            }
             expect(tester.takeException(), isNull);
           } finally {
             await _finish(tester, services);
@@ -102,82 +121,265 @@ void main() {
     }
   }
 
-  testWidgets('M10은 개인정보·위치 버전 3을 저장하고 항목별 버전 2 동의는 다시 받는다', (tester) async {
-    final services = await ConsentTestServices.create(
-      tester,
-      savedVersion: '2',
-    );
-    try {
-      expect(legalVersion, '3');
-      expect(locationLegalVersion, '3');
-      await _mount(tester, services);
-      expect(find.byType(LegalConsentScreen), findsOneWidget);
-      await _tapKey(tester, 'legal-check-0');
-      await _tapKey(tester, 'legal-accept');
-      final saved = jsonDecode(
-        services.store.preferences.getString(legalConsentKey)!,
-      );
-      expect(saved['privacy'], {'accepted': true, 'version': '3'});
-      expect(saved['location'], {'accepted': false, 'version': '3'});
-    } finally {
-      await _finish(tester, services);
-    }
-  }, timeout: const Timeout(Duration(seconds: 30)));
-
-  testWidgets('위치 버전 2 동의는 미동의로 판정하고 재동의하면 버전 3만 갱신한다', (tester) async {
-    final services = await ConsentTestServices.create(
-      tester,
-      savedVersion: legalVersion,
-    );
-    try {
-      final preferences = services.store.preferences;
-      expect(hasPrivacyConsent(preferences), isTrue);
-      expect(hasLocationConsent(preferences), isFalse);
-      await completeConsentFuture(tester, saveLocationConsent(preferences));
-      expect(hasPrivacyConsent(preferences), isTrue);
-      expect(hasLocationConsent(preferences), isTrue);
-      final saved = jsonDecode(preferences.getString(legalConsentKey)!);
-      expect(saved['privacy'], {'accepted': true, 'version': '3'});
-      expect(saved['location'], {'accepted': true, 'version': '3'});
-      expect(services.locationSource.requests, 0);
-      expect(services.locationSource.watches, 0);
-    } finally {
-      await _finish(tester, services);
-    }
-  }, timeout: const Timeout(Duration(seconds: 30)));
-
-  testWidgets('16-A 위치 미동의로도 입장하며 두 항목의 여부·문서 버전을 따로 저장한다', (tester) async {
-    final services = await ConsentTestServices.create(tester);
+  testWidgets('개인정보만 선택해 수락하면 위치 기록 없이 같은 계정 재로그인도 동의 화면을 건너뛴다', (
+    tester,
+  ) async {
+    final services = await ConsentTestServices.create(tester, signedIn: false);
     try {
       await _mount(tester, services);
+      await _login(tester);
       expect(find.text('개인정보 처리방침 (필수)'), findsOneWidget);
       expect(find.text('위치정보 수집·이용 동의 (선택)'), findsOneWidget);
       await _tapKey(tester, 'legal-check-0');
       _expectAcceptButtonState(tester, enabled: true);
       await _tapKey(tester, 'legal-accept');
       expect(find.byType(RoomsScreen), findsOneWidget);
-      expect(hasPrivacyConsent(services.store.preferences), isTrue);
-      expect(hasLocationConsent(services.store.preferences), isFalse);
-      final saved = jsonDecode(
-        services.store.preferences.getString(legalConsentKey)!,
-      );
-      expect(saved['privacy'], {'accepted': true, 'version': '3'});
-      expect(saved['location'], {'accepted': false, 'version': '3'});
+      expect(hasPrivacyConsent(services.store.consent), isTrue);
+      expect(hasLocationConsent(services.store.consent), isFalse);
+      expect(services.api.consent?.location, isNull);
+      expect(services.store.preferences.getString('legal.consent.v1'), isNull);
       expect(services.locationSource.requests, 0);
+      await completeConsentFuture(tester, services.logout());
+      await pumpConsentUi(tester);
+      expect(find.byType(AuthScreen), findsOneWidget);
+      await _login(tester);
+      expect(find.byType(LegalConsentScreen), findsNothing);
+      expect(find.byType(RoomsScreen), findsOneWidget);
+      expect(services.store.legalAccepted, isTrue);
+      expect(services.store.consent?.privacy?.version, legalVersion);
+      expect(services.store.consent?.location, isNull);
+      expect(services.api.consent?.location, isNull);
+      expect(services.api.meReads, 2);
+      expect(services.api.http.requests, hasLength(1));
+      expect(jsonDecode(utf8.decode(services.api.http.requests.single.body)), {
+        'privacy': {'version': legalVersion},
+      });
+      expect(services.locationSource.requests, 0);
+      expect(tester.takeException(), isNull);
     } finally {
       await _finish(tester, services);
     }
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  testWidgets('이전 단일 버전 문자열은 새 개인정보 동의를 건너뛰지 않는다', (tester) async {
+  for (final oldValue in [
+    '1',
+    jsonEncode({
+      'privacy': {'accepted': true, 'version': legalVersion},
+      'location': {'accepted': true, 'version': locationLegalVersion},
+    }),
+  ]) {
+    testWidgets('기기 동의 $oldValue는 서버 동의 없는 계정의 복원을 통과시키지 않는다', (tester) async {
+      final services = await ConsentTestServices.create(tester);
+      try {
+        await completeConsentFuture(
+          tester,
+          services.store.preferences.setString('legal.consent.v1', oldValue),
+        );
+        await _mount(tester, services);
+        expect(find.byType(LegalConsentScreen), findsOneWidget);
+        expect(find.byType(RoomsScreen), findsNothing);
+        expect(services.api.http.requests, isEmpty);
+        expect(services.api.consent, isNull);
+      } finally {
+        await _finish(tester, services);
+      }
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  for (final car in [false, true]) {
+    testWidgets(
+      '${car ? "차량" : "폰"} 같은 기기에서 A 동의 → B 미동의 → A 재로그인은 계정별로 판정한다',
+      (tester) async {
+        final services = await ConsentTestServices.create(
+          tester,
+          signedIn: false,
+          mode: car ? DeviceMode.car : DeviceMode.phone,
+        );
+        try {
+          await _mount(tester, services, car: car);
+          await _login(tester, handle: 'alice');
+          await _tapKey(tester, 'legal-check-0');
+          await _tapKey(tester, 'legal-check-1');
+          await _tapKey(tester, 'legal-accept');
+          expect(find.byType(RoomsScreen), findsOneWidget);
+          expect(
+            services.api.consents['alice']?.privacy?.version,
+            legalVersion,
+          );
+          final preferences = services.store.preferences;
+          await completeConsentFuture(tester, services.logout());
+          await pumpConsentUi(tester);
+          await _login(tester, handle: 'bob');
+          expect(identical(preferences, services.store.preferences), isTrue);
+          expect(find.byType(LegalConsentScreen), findsOneWidget);
+          expect(find.byType(RoomsScreen), findsNothing);
+          expect(services.api.consents['bob'], isNull);
+          expect(services.api.http.requests, hasLength(1));
+          await completeConsentFuture(tester, services.logout());
+          await pumpConsentUi(tester);
+          await _login(tester, handle: 'alice');
+          expect(find.byType(LegalConsentScreen), findsNothing);
+          expect(find.byType(RoomsScreen), findsOneWidget);
+          expect(services.api.meReads, 3);
+          expect(services.api.http.requests, hasLength(1));
+        } finally {
+          await _finish(tester, services);
+        }
+      },
+      timeout: const Timeout(Duration(seconds: 30)),
+    );
+  }
+
+  testWidgets('수락 PUT이 완료되기 전에는 동의 화면과 중복 제출 방지를 유지한다', (tester) async {
     final services = await ConsentTestServices.create(tester);
+    final gate = Completer<void>();
+    services.api.consentGate = gate.future;
     try {
-      await completeConsentFuture(
-        tester,
-        services.store.preferences.setString(legalConsentKey, '1'),
-      );
       await _mount(tester, services);
+      await _tapKey(tester, 'legal-check-0');
+      await _tapKey(tester, 'legal-check-1');
+      await _tapKey(tester, 'legal-accept');
       expect(find.byType(LegalConsentScreen), findsOneWidget);
+      expect(find.byType(RoomsScreen), findsNothing);
+      _expectAcceptButtonState(tester, enabled: false);
+      expect(services.store.legalAccepted, isFalse);
+      gate.complete();
+      await pumpConsentUi(tester);
+      expect(find.byType(RoomsScreen), findsOneWidget);
+      expect(services.api.http.requests, hasLength(1));
+    } finally {
+      if (!gate.isCompleted) gate.complete();
+      await _finish(tester, services);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('A의 늦은 동의 PUT 응답은 전환한 B를 통과시키지 않는다', (tester) async {
+    final services = await ConsentTestServices.create(tester, handle: 'alice');
+    final gate = Completer<void>();
+    services.api.consentGate = gate.future;
+    try {
+      await _mount(tester, services);
+      await _tapKey(tester, 'legal-check-0');
+      await _tapKey(tester, 'legal-check-1');
+      await _tapKey(tester, 'legal-accept');
+      await completeConsentFuture(tester, services.logout());
+      await pumpConsentUi(tester);
+      await _login(tester);
+      gate.complete();
+      await pumpConsentUi(tester);
+      expect(services.store.handle, 'bob');
+      expect(services.store.legalAccepted, isFalse);
+      expect(services.store.consent, isNull);
+      expect(find.byType(LegalConsentScreen), findsOneWidget);
+      expect(find.byType(RoomsScreen), findsNothing);
+    } finally {
+      if (!gate.isCompleted) gate.complete();
+      await _finish(tester, services);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  for (final restoring in [false, true]) {
+    for (final (consent, accepted) in <(ConsentRecord?, bool)>[
+      (const ConsentRecord(privacy: (version: legalVersion, at: 'now')), true),
+      (
+        const ConsentRecord(
+          privacy: (version: legalVersion, at: 'now'),
+          location: (version: '2', at: 'now'),
+        ),
+        true,
+      ),
+      (
+        const ConsentRecord(
+          privacy: (version: '2', at: 'now'),
+          location: (version: locationLegalVersion, at: 'now'),
+        ),
+        false,
+      ),
+      (
+        const ConsentRecord(
+          location: (version: locationLegalVersion, at: 'now'),
+        ),
+        false,
+      ),
+      (null, false),
+    ]) {
+      testWidgets(
+        '${restoring ? "복원" : "로그인"} 시 서버 개인정보 ${consent?.privacy?.version}·위치 ${consent?.location?.version}이면 ${accepted ? "동의 화면 없이 입장한다" : "동의 화면을 표시한다"}',
+        (tester) async {
+          final services = await ConsentTestServices.create(
+            tester,
+            signedIn: restoring,
+          );
+          services.api.consents['bob'] = consent;
+          try {
+            await _mount(tester, services);
+            if (!restoring) await _login(tester);
+            expect(
+              find.byType(LegalConsentScreen),
+              accepted ? findsNothing : findsOneWidget,
+            );
+            expect(
+              find.byType(RoomsScreen),
+              accepted ? findsOneWidget : findsNothing,
+            );
+            expect(services.store.consentLoaded, isTrue);
+            expect(services.store.legalAccepted, accepted);
+            expect(services.api.meReads, 1);
+            expect(services.api.http.requests, isEmpty);
+            expect(services.locationSource.requests, 0);
+            expect(tester.takeException(), isNull);
+          } finally {
+            await _finish(tester, services);
+          }
+        },
+        timeout: const Timeout(Duration(seconds: 30)),
+      );
+    }
+  }
+
+  testWidgets('로그인 뒤 GET을 기다리는 동안 입장하지 않고 현재 서버 동의 확인 후 건너뛴다', (tester) async {
+    final services = await ConsentTestServices.create(tester, signedIn: false);
+    services.api.consents['bob'] = testConsent();
+    final gate = Completer<void>();
+    services.api.meGate = gate.future;
+    try {
+      await _mount(tester, services);
+      await _login(tester);
+      expect(find.byType(LegalConsentCheckScreen), findsOneWidget);
+      expect(find.byType(RoomsScreen), findsNothing);
+      expect(find.byType(LegalConsentScreen), findsNothing);
+      gate.complete();
+      await pumpConsentUi(tester);
+      expect(find.byType(RoomsScreen), findsOneWidget);
+      expect(find.byType(LegalConsentScreen), findsNothing);
+      expect(services.api.http.requests, isEmpty);
+    } finally {
+      if (!gate.isCompleted) gate.complete();
+      await _finish(tester, services);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('오프라인 복원은 기기 동의로 입장하지 않고 조회 오류 뒤 재시도할 수 있다', (tester) async {
+    final services = await ConsentTestServices.create(
+      tester,
+      savedVersion: legalVersion,
+    );
+    services.api.meError = TimeoutException('offline');
+    try {
+      await _mount(tester, services);
+      for (final seconds in [2, 5, 15]) {
+        await tester.pump(Duration(seconds: seconds));
+        await pumpConsentUi(tester);
+      }
+      expect(find.byType(RoomsScreen), findsNothing);
+      expect(find.text('동의 내역을 확인하지 못했습니다. 다시 시도해 주세요.'), findsOneWidget);
+      expect(services.api.http.requests, isEmpty);
+      expect(services.store.token, 'test');
+      services.api.meError = null;
+      services.api.consent = testConsent();
+      await _tapKey(tester, 'legal-retry');
+      expect(find.byType(RoomsScreen), findsOneWidget);
+      expect(find.byType(LegalConsentScreen), findsNothing);
     } finally {
       await _finish(tester, services);
     }
@@ -201,7 +403,10 @@ void main() {
         expect(find.byType(RoomsScreen), findsNothing);
         expect(find.text('서비스 이용 동의'), findsOneWidget);
         _expectAcceptButtonState(tester, enabled: false);
-        expect(services.store.preferences.getString(legalConsentKey), isNull);
+        expect(
+          services.store.preferences.getString('legal.consent.v1'),
+          isNull,
+        );
         await _tapKey(tester, 'legal-check-0');
         _expectAcceptButtonState(tester, enabled: true);
         await _tapKey(tester, 'legal-check-1');
@@ -211,11 +416,11 @@ void main() {
         await _tapKey(tester, 'legal-check-0');
         _expectAcceptButtonState(tester, enabled: true);
         await _tapKey(tester, 'legal-accept');
-        expect(hasPrivacyConsent(services.store.preferences), isTrue);
+        expect(hasPrivacyConsent(services.store.consent), isTrue);
         expect(find.byType(LegalConsentScreen), findsNothing);
         expect(find.byType(RoomsScreen), findsOneWidget);
         expect(services.locationSource.requests, 0);
-        // 설치 단위 동의는 로그아웃·다음 로그인에도 보존한다.
+        // 같은 계정의 서버 동의는 다음 로그인에서 다시 조회한다.
         await completeConsentFuture(tester, services.logout());
         await pumpConsentUi(tester);
         await _login(tester);
@@ -293,7 +498,10 @@ void main() {
         expect(services.logouts, 1);
         expect(services.api.logouts, 1);
         expect(services.store.session, isNull);
-        expect(services.store.preferences.getString(legalConsentKey), isNull);
+        expect(
+          services.store.preferences.getString('legal.consent.v1'),
+          isNull,
+        );
         expect(find.byType(AuthScreen), findsOneWidget);
         expect(find.byType(LegalConsentScreen), findsNothing);
         expect(find.byType(RoomsScreen), findsNothing);
@@ -306,11 +514,11 @@ void main() {
 
   for (final current in [true, false]) {
     testWidgets(
-      current ? '현재 버전 동의를 저장한 설치는 복원 때 건너뛴다' : '문서 버전이 올라가면 다시 동의한다',
+      current ? '현재 서버 동의가 있는 계정은 복원 때 건너뛴다' : '서버 문서 버전이 오래되면 다시 동의한다',
       (tester) async {
         final services = await ConsentTestServices.create(
           tester,
-          savedVersion: current
+          serverVersion: current
               ? legalVersion
               : '${int.parse(legalVersion) - 1}',
         );
@@ -330,7 +538,7 @@ void main() {
             await _tapKey(tester, 'legal-check-0');
             await _tapKey(tester, 'legal-check-1');
             await _tapKey(tester, 'legal-accept');
-            expect(hasPrivacyConsent(services.store.preferences), isTrue);
+            expect(hasPrivacyConsent(services.store.consent), isTrue);
             expect(find.byType(RoomsScreen), findsOneWidget);
           }
           expect(services.locationSource.requests, 0);
@@ -479,18 +687,23 @@ Future<void> _tapKey(WidgetTester tester, String key) async {
   await pumpConsentUi(tester);
 }
 
-Future<void> _login(WidgetTester tester, {bool signup = false}) async {
+Future<void> _login(
+  WidgetTester tester, {
+  bool signup = false,
+  String handle = 'bob',
+}) async {
   if (signup) {
     await tester.tap(find.byTooltip('가입'));
     await tester.pump();
   }
-  await tester.enterText(find.byType(TextField).at(0), 'bob');
+  await tester.enterText(find.byType(TextField).at(0), handle);
   await tester.enterText(find.byType(TextField).at(1), 'password123');
   if (signup) {
     await tester.ensureVisible(find.byType(TextField).at(2));
     await tester.enterText(find.byType(TextField).at(2), '보비');
     await _tapKey(tester, 'signup-age-check');
   }
+  await tester.pump();
   await tester.tap(find.byTooltip(signup ? '가입하고 시작' : '시작'));
   await pumpConsentUi(tester);
 }

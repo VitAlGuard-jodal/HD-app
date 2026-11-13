@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/material.dart';
@@ -224,27 +223,14 @@ void main() {
 
   for (final serverVersion in <String?>[null, '2', '3']) {
     testWidgets(
-      '세션 복원은 로컬 동의 3·서버 ${serverVersion ?? "동의 없음"}일 때 PUT ${serverVersion == "3" ? 0 : 1}회로 동기화한다',
+      '세션 복원은 기기 동의가 있어도 서버 ${serverVersion ?? "동의 없음"}을 읽기만 하고 PUT하지 않는다',
       (tester) async {
-        final services = await ConsentTestServices.create(tester);
+        final services = await ConsentTestServices.create(
+          tester,
+          savedVersion: legalVersion,
+          serverVersion: serverVersion,
+        );
         try {
-          await completeConsentFuture(
-            tester,
-            saveLegalConsent(
-              services.store.preferences,
-              privacy: true,
-              location: true,
-            ),
-          );
-          if (serverVersion != null) {
-            services.api.consent = ConsentRecord(
-              privacy: (version: serverVersion, at: '2026-11-11T00:00:00.000Z'),
-              location: (
-                version: serverVersion,
-                at: '2026-11-11T00:00:00.000Z',
-              ),
-            );
-          }
           await completeConsentFuture(
             tester,
             restoreSession(
@@ -255,16 +241,11 @@ void main() {
             ),
           );
           await pumpConsentUi(tester);
-          final requests = services.api.http.requests;
-          expect(requests, hasLength(serverVersion == '3' ? 0 : 1));
-          if (requests.isNotEmpty) {
-            expect(requests.single.method, 'PUT');
-            expect(requests.single.uri.path, '/v1/me/consent');
-            expect(jsonDecode(utf8.decode(requests.single.body)), {
-              'privacy': {'version': '3'},
-              'location': {'version': '3'},
-            });
-          }
+          expect(services.api.http.requests, isEmpty);
+          expect(services.store.consentLoaded, isTrue);
+          expect(services.store.consent?.privacy?.version, serverVersion);
+          expect(services.store.consent?.location?.version, serverVersion);
+          expect(services.store.legalAccepted, serverVersion == legalVersion);
           expect(services.store.token, 'test');
           expect(services.store.displayName, '보비');
         } finally {
@@ -275,50 +256,111 @@ void main() {
     );
   }
 
-  for (final locallyAccepted in [false, true]) {
-    testWidgets(
-      '세션 복원은 로컬 미동의를 보내지 않고 ${locallyAccepted ? "개인정보만 동의한 경우 서버 500에도 복원한다" : "동의가 없으면 PUT을 보내지 않는다"}',
-      (tester) async {
-        final services = await ConsentTestServices.create(tester);
-        services.api.http.status = 500;
-        try {
-          if (locallyAccepted) {
-            await completeConsentFuture(
-              tester,
-              saveLegalConsent(
-                services.store.preferences,
-                privacy: true,
-                location: false,
-              ),
-            );
-          }
-          await completeConsentFuture(
-            tester,
-            restoreSession(
-              api: services.api,
-              store: services.store,
-              rooms: services.rooms,
-              isCurrent: () => true,
-            ),
-          );
-          await pumpConsentUi(tester);
-          final requests = services.api.http.requests;
-          expect(requests, hasLength(locallyAccepted ? 1 : 0));
-          if (locallyAccepted) {
-            expect(jsonDecode(utf8.decode(requests.single.body)), {
-              'privacy': {'version': '3'},
-            });
-          }
-          expect(services.store.token, 'test');
-          expect(services.store.displayName, '보비');
-          expect(tester.takeException(), isNull);
-        } finally {
-          await services.finish(tester);
-        }
-      },
-      timeout: const Timeout(Duration(seconds: 30)),
+  testWidgets('서버 개인정보가 현재 버전이면 위치 기록 없는 세션도 복원하고 PUT하지 않는다', (tester) async {
+    final services = await ConsentTestServices.create(tester);
+    const consent = ConsentRecord(privacy: (version: legalVersion, at: 'now'));
+    services.api.consent = consent;
+    try {
+      expect(services.store.consentLoaded, isFalse);
+      expect(services.store.legalAccepted, isFalse);
+      await completeConsentFuture(
+        tester,
+        restoreSession(
+          api: services.api,
+          store: services.store,
+          rooms: services.rooms,
+          isCurrent: () => true,
+        ),
+      );
+      expect(services.store.consentLoaded, isTrue);
+      expect(services.store.legalAccepted, isTrue);
+      expect(services.store.consent, same(consent));
+      expect(services.store.consent?.location, isNull);
+      expect(services.api.meReads, 1);
+      expect(services.api.http.requests, isEmpty);
+      expect(services.store.token, 'test');
+    } finally {
+      await services.finish(tester);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('이전 계정의 늦은 GET 응답은 새 계정의 동의·신원을 덮어쓰지 않는다', (tester) async {
+    final services = await ConsentTestServices.create(
+      tester,
+      handle: 'alice',
+      serverVersion: legalVersion,
     );
-  }
+    final gate = Completer<void>();
+    services.api.meGate = gate.future;
+    try {
+      final restoring = restoreSession(
+        api: services.api,
+        store: services.store,
+        rooms: services.rooms,
+        isCurrent: () => true,
+      );
+      await completeConsentFuture(tester, services.store.clear());
+      await completeConsentFuture(
+        tester,
+        services.store.save(const AuthResult(User('bob', '보비'), 'bob-token')),
+      );
+      services.api.meGate = null;
+      await completeConsentFuture(
+        tester,
+        restoreSession(
+          api: services.api,
+          store: services.store,
+          rooms: services.rooms,
+          isCurrent: () => true,
+        ),
+      );
+      gate.complete();
+      await completeConsentFuture(tester, restoring);
+      expect(services.store.handle, 'bob');
+      expect(services.store.consent, isNull);
+      expect(services.store.legalAccepted, isFalse);
+      expect(services.api.http.requests, isEmpty);
+    } finally {
+      if (!gate.isCompleted) gate.complete();
+      await services.finish(tester);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('수락 PUT보다 먼저 시작한 GET은 같은 계정의 새 동의를 되돌리지 않는다', (tester) async {
+    final services = await ConsentTestServices.create(tester);
+    final gate = Completer<void>();
+    services.api.meGate = gate.future;
+    try {
+      final restoring = restoreSession(
+        api: services.api,
+        store: services.store,
+        rooms: services.rooms,
+        isCurrent: () => true,
+      );
+      final consent = await completeConsentFuture(
+        tester,
+        services.api.recordConsent(
+          privacyVersion: legalVersion,
+          locationVersion: locationLegalVersion,
+        ),
+      );
+      services.store.updateConsent(
+        consent,
+        sessionRevision: services.store.sessionRevision,
+      );
+      gate.complete();
+      await completeConsentFuture(tester, restoring);
+      expect(services.store.legalAccepted, isTrue);
+      expect(services.store.consent, same(consent));
+      final coldStore = SessionStore(services.store.preferences);
+      expect(coldStore.consentLoaded, isFalse);
+      expect(coldStore.legalAccepted, isFalse);
+      coldStore.dispose();
+    } finally {
+      if (!gate.isCompleted) gate.complete();
+      await services.finish(tester);
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   for (final car in [false, true]) {
     testWidgets('${car ? '차' : '폰'} 새 실행 복원은 메인에 복귀 카드만 표시하고 자동으로 열지 않는다', (

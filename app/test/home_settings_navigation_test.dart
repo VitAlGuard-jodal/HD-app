@@ -968,7 +968,7 @@ Future<ConsentTestServices> _mountApp(
   );
   final services = await ConsentTestServices.create(
     tester,
-    savedVersion: legalVersion,
+    serverVersion: legalVersion,
     mode: car ? DeviceMode.car : DeviceMode.phone,
   );
   services.rooms.state = RoomState(

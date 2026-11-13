@@ -10,6 +10,7 @@ import '../call/media_engine.dart';
 import '../call/mesh_coordinator.dart';
 import '../core/errors.dart';
 import '../core/device_mode.dart';
+import '../core/driving_state.dart';
 import '../location/location_share.dart';
 import '../location/location_source.dart';
 import '../net/api_client.dart';
@@ -65,6 +66,7 @@ class RoomSession extends ChangeNotifier {
     required this.callService,
     required this.micRouter,
     this.deviceMode,
+    this.driving,
     LocationSource? locationSource,
     DateTime Function()? locationNow,
   }) {
@@ -122,6 +124,7 @@ class RoomSession extends ChangeNotifier {
   final CallService callService;
   final MicRouter micRouter;
   final DeviceMode? deviceMode;
+  final DrivingState? driving;
   late final LocationShare locationShare;
   late final StreamSubscription<Map<String, MeshPeerState>> _peerSubscription;
   Map<String, MeshPeerState> get peerStates => mediaEngine.peerStates;
@@ -246,7 +249,6 @@ class RoomSession extends ChangeNotifier {
 
   bool _followRequestSent = false;
   int _followRevision = 0;
-  int? _followMotionRevision;
   Future<void> _followQueue = Future<void>.value();
   final Map<String, FollowRequest> _followRequests = {};
   Map<String, FollowRequest> get followRequests =>
@@ -779,7 +781,6 @@ class RoomSession extends ChangeNotifier {
     _followRequestSent = followIntent != null;
     if (previousIntent != followIntent) {
       ++_followRevision;
-      _followMotionRevision = null;
     }
     _setTrails(locationShare.sharing ? trails ?? event.trails : const {});
     for (final entry in _locationStarts.entries.toList()) {
@@ -946,8 +947,7 @@ class RoomSession extends ChangeNotifier {
           (micRouter.isAutomotive ? DeviceMode.car : DeviceMode.phone)) ==
       DeviceMode.car;
 
-  bool get followNeedsStop =>
-      _carMode && locationShare.motionState == LocationMotionState.moving;
+  bool get followNeedsStop => _carMode && (driving?.restricted ?? false);
 
   bool checkFollowAllowed(String target) {
     if (_disposed ||
@@ -1019,10 +1019,6 @@ class RoomSession extends ChangeNotifier {
     final code = state.code!;
     final connectionId = _connectionId;
     final revision = ++_followRevision;
-    _followMotionRevision =
-        _carMode && locationShare.motionState == LocationMotionState.unknown
-        ? revision
-        : null;
     _followTarget = null;
     _pendingFollow = target;
     _followRequestId = null;
@@ -1189,35 +1185,20 @@ class RoomSession extends ChangeNotifier {
     final previousFix = _lastLocationState[4];
     final wasSharing = _lastLocationState[1] as bool;
     _lastLocationState = next;
-    final firstMotion =
-        followIntent != null &&
-        _followMotionRevision == _followRevision &&
-        locationShare.motionState != LocationMotionState.unknown;
-    final rejectFollow = firstMotion && followNeedsStop;
-    if (firstMotion) _followMotionRevision = null;
     final fix = locationShare.lastSent;
     if (locationShare.sharing && fix != null && fix != previousFix) {
       // 서버는 송신자에게 반사하지 않으므로 성공한 로컬 표본을 반영한다.
       _updateLocation(fix);
     }
-    if (wasSharing && !locationShare.sharing || rejectFollow) {
+    if (wasSharing && !locationShare.sharing) {
       _deferredHelloFollow = null;
-      if (!locationShare.sharing) {
-        _removePosition(store.handle);
-        _cancelStarts();
-      }
-      if (rejectFollow) {
-        _followError = '정차 후 설정할 수 있습니다';
-        // 첫 이동 판정은 따라가기만 취소하고 동의한 내 공유는 유지한다.
-        for (final entry in _locationStarts.entries.toList()) {
-          if (!entry.value.incoming) finishLocationStart(entry.key);
-        }
-      }
+      _removePosition(store.handle);
+      _cancelStarts();
       final code = state.code;
       if (_followRequestSent && code != null) {
         unawaited(
           _queueStopFollowing(code).catchError((Object error) {
-            if (!_disposed && state.code == code && !rejectFollow) {
+            if (!_disposed && state.code == code) {
               _followError = errorMessage(error);
               _notify();
             }

@@ -81,13 +81,13 @@ class _UnavoAppState extends State<UnavoApp> with WidgetsBindingObserver {
   bool _cover = true;
   bool _roomVisible = false;
   bool _carRoomVisible = false;
-  bool _restoring = false;
-  late bool _legalAccepted;
+  int? _restoringSession;
+  late int _sessionRevision;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _legalAccepted = hasPrivacyConsent(widget.services.store.preferences);
+    _sessionRevision = widget.services.store.sessionRevision;
     _carRoomVisible = widget.services.rooms.state.code != null;
     widget.services.store.addListener(_sessionChanged);
     widget.services.calls.onOpenRoom = _openRoom;
@@ -95,17 +95,22 @@ class _UnavoAppState extends State<UnavoApp> with WidgetsBindingObserver {
   }
 
   Future<void> _restore() async {
-    if (_restoring) return;
-    _restoring = true;
+    final store = widget.services.store;
+    final revision = store.sessionRevision;
+    if (store.session == null || _restoringSession == revision) return;
+    setState(() => _restoringSession = revision);
     try {
       await restoreSession(
         api: widget.services.api,
         store: widget.services.store,
         rooms: widget.services.rooms,
-        isCurrent: () => mounted,
+        isCurrent: () => mounted && store.sessionRevision == revision,
       );
     } finally {
-      _restoring = false;
+      if (mounted && _restoringSession == revision) {
+        setState(() => _restoringSession = null);
+        if (store.legalAccepted) _acceptLegal();
+      }
     }
   }
 
@@ -123,16 +128,20 @@ class _UnavoAppState extends State<UnavoApp> with WidgetsBindingObserver {
 
   void _sessionChanged() {
     if (!mounted) return;
-    if (widget.services.store.session == null) {
+    final store = widget.services.store;
+    final changed = _sessionRevision != store.sessionRevision;
+    _sessionRevision = store.sessionRevision;
+    if (changed || !store.legalAccepted) {
       _carRoomVisible = false;
       _navigator.currentState?.popUntil((route) => route.isFirst);
     }
     setState(() {});
+    if (changed) unawaited(_restore());
   }
 
   void _openRoom(String code) {
     if (_cover ||
-        !_legalAccepted ||
+        !widget.services.store.legalAccepted ||
         widget.services.store.session == null ||
         _roomVisible ||
         !mounted)
@@ -178,7 +187,6 @@ class _UnavoAppState extends State<UnavoApp> with WidgetsBindingObserver {
   }
 
   void _acceptLegal() {
-    setState(() => _legalAccepted = true);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final pending = widget.services.calls.pendingOpenRoom;
       if (mounted && pending != null) _openRoom(pending);
@@ -222,9 +230,16 @@ class _UnavoAppState extends State<UnavoApp> with WidgetsBindingObserver {
                 store: widget.services.store,
                 mode: widget.mode,
               )
-            : !_legalAccepted
+            : !widget.services.store.consentLoaded
+            ? LegalConsentCheckScreen(
+                mode: widget.mode,
+                checking:
+                    _restoringSession == widget.services.store.sessionRevision,
+                onRetry: _restore,
+              )
+            : !widget.services.store.legalAccepted
             ? LegalConsentScreen(
-                key: ValueKey(widget.services.store.token),
+                key: ValueKey(widget.services.store.sessionRevision),
                 services: widget.services,
                 mode: widget.mode,
                 onAccepted: _acceptLegal,

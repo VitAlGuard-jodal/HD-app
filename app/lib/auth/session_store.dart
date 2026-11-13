@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../net/models.dart';
+import 'legal_consent_store.dart';
 
 abstract interface class TokenStore {
   String? get token;
@@ -56,6 +57,34 @@ class SessionStore extends ChangeNotifier implements TokenStore {
   final String defaultBaseUrl;
   Session? _session;
   Session? get session => _session;
+  int _sessionRevision = 0;
+  int get sessionRevision => _sessionRevision;
+  ConsentRecord? _consent;
+  ConsentRecord? get consent => _consent;
+  int _consentRevision = 0;
+  int get consentRevision => _consentRevision;
+  bool _consentLoaded = false;
+  bool get consentLoaded => _consentLoaded;
+  // Entry requires only the account's current server privacy consent.
+  // Optional location consent does not affect login or session restoration.
+  bool get legalAccepted => hasPrivacyConsent(_consent);
+
+  void _resetConsent() {
+    ++_sessionRevision;
+    ++_consentRevision;
+    _consent = null;
+    _consentLoaded = false;
+  }
+
+  bool updateConsent(ConsentRecord consent, {required int sessionRevision}) {
+    if (_session == null || sessionRevision != _sessionRevision) return false;
+    _consent = consent;
+    ++_consentRevision;
+    _consentLoaded = true;
+    notifyListeners();
+    return true;
+  }
+
   @override
   String? get token => _session?.token;
   String? get handle => _session?.handle;
@@ -80,10 +109,18 @@ class SessionStore extends ChangeNotifier implements TokenStore {
       preferences.setInt('callVolume', value.clamp(0, 100));
 
   Future<void> setBaseUrl(String value) async {
-    await preferences.setString(
-      'baseUrl',
-      value.trim().replaceFirst(RegExp(r'/+$'), ''),
-    );
+    final normalized = value.trim().replaceFirst(RegExp(r'/+$'), '');
+    final previous = Uri.parse(baseUrl);
+    final next = Uri.parse(normalized);
+    final changed =
+        previous.scheme != next.scheme ||
+        previous.host != next.host ||
+        previous.port != next.port;
+    await preferences.setString('baseUrl', normalized);
+    if (changed) {
+      _resetConsent();
+      notifyListeners();
+    }
   }
 
   Future<void> setManualMicId(int? id) async {
@@ -94,7 +131,12 @@ class SessionStore extends ChangeNotifier implements TokenStore {
     }
   }
 
-  Future<void> save(AuthResult result) async {
+  Future<void> save(
+    AuthResult result, {
+    ConsentRecord? consent,
+    bool consentLoaded = false,
+    int? expectedConsentRevision,
+  }) async {
     // 토큰은 마지막에 쓴다. 비밀번호는 어떤 저장소에도 기록하지 않는다.
     await preferences.setString('handle', result.user.handle);
     await preferences.setString('displayName', result.user.displayName);
@@ -103,12 +145,20 @@ class SessionStore extends ChangeNotifier implements TokenStore {
       jsonEncode(result.user.avatar.toJson()),
     );
     await preferences.setString('token', result.token);
+    if (token != result.token || handle != result.user.handle) _resetConsent();
     _session = Session(
       result.token,
       result.user.handle,
       result.user.displayName,
       avatar: result.user.avatar,
     );
+    if (consentLoaded &&
+        (expectedConsentRevision == null ||
+            expectedConsentRevision == _consentRevision)) {
+      _consent = consent;
+      ++_consentRevision;
+      _consentLoaded = true;
+    }
     notifyListeners();
   }
 
@@ -131,6 +181,7 @@ class SessionStore extends ChangeNotifier implements TokenStore {
     await preferences.remove('displayName');
     await preferences.remove('avatar');
     _session = null;
+    _resetConsent();
     // 서버 주소와 마이크 선택은 다음 로그인에서도 보존한다.
     notifyListeners();
   }

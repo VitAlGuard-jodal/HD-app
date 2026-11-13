@@ -142,12 +142,18 @@ class _RoomScreenState extends State<RoomScreen> {
         return;
       }
       if (!valid()) return;
-      await saveLocationConsent(widget.services.store.preferences);
+      final consentRevision = widget.services.store.sessionRevision;
       unawaited(
         widget.services.api
             .recordConsent(locationVersion: locationLegalVersion)
             .then<void>(
-              (_) {},
+              (consent) {
+                if (!mounted) return;
+                widget.services.store.updateConsent(
+                  consent,
+                  sessionRevision: consentRevision,
+                );
+              },
               onError: (Object error, StackTrace stack) {
                 debugPrint('위치 동의 기록 전송 실패: $error');
               },
@@ -248,12 +254,18 @@ class _RoomScreenState extends State<RoomScreen> {
               }
               if (!valid()) continue;
               if (accepted) {
-                await saveLocationConsent(widget.services.store.preferences);
+                final consentRevision = widget.services.store.sessionRevision;
                 unawaited(
                   widget.services.api
                       .recordConsent(locationVersion: locationLegalVersion)
                       .then<void>(
-                        (_) {},
+                        (consent) {
+                          if (!mounted) return;
+                          widget.services.store.updateConsent(
+                            consent,
+                            sessionRevision: consentRevision,
+                          );
+                        },
                         onError: (Object error, StackTrace stack) {
                           debugPrint('위치 동의 기록 전송 실패: $error');
                         },

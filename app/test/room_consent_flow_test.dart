@@ -307,7 +307,7 @@ void main() {
       expect(f.services.locationShare.sharing, isTrue);
       expect(f.services.locationSource.watches, 1);
       expect(f.services.api.follows, ['alice']);
-      expect(hasLocationConsent(f.services.store.preferences), isTrue);
+      expect(hasLocationConsent(f.services.store.consent), isTrue);
       final consentRequests = f.services.api.http.requests;
       expect(consentRequests, hasLength(1));
       expect(consentRequests.single.method, 'PUT');
@@ -522,25 +522,77 @@ void main() {
     }
   }, timeout: _timeout);
 
-  testWidgets('차량의 moving 표본은 동의 팝업 전에 정차 오류로 차단한다', (tester) async {
-    final f = await _Fixture.create(tester, car: true);
-    try {
-      await completeConsentFuture(
+  for (final restricted in [false, true]) {
+    for (final moving in [false, true]) {
+      testWidgets('차량 주행 제한 $restricted·GPS 이동 $moving의 모달 진입과 정차 문구', (
         tester,
-        f.services.locationShare.start(token: Object(), stillValid: () => true),
-      );
-      await _sample(tester, f, speed: .5);
-      expect(f.services.locationShare.motionState, LocationMotionState.moving);
+      ) async {
+        final events = StreamController<Object?>.broadcast();
+        final f = await _Fixture.create(
+          tester,
+          car: true,
+          drivingEvents: events.stream,
+        );
+        try {
+          events.add({'restricted': restricted, 'available': true});
+          await completeConsentFuture(
+            tester,
+            f.services.locationShare.start(
+              token: Object(),
+              stillValid: () => true,
+            ),
+          );
+          for (var second = 0; second <= (moving ? 0 : 3); second++) {
+            if (second > 0) await tester.pump(const Duration(seconds: 1));
+            await _sample(tester, f, speed: moving ? 3 : 0);
+          }
+          expect(
+            f.services.locationShare.motionState,
+            moving
+                ? LocationMotionState.moving
+                : LocationMotionState.stationary,
+          );
+          await _member(tester, 'alice');
+          expect(
+            find.text('정차 후 설정할 수 있습니다'),
+            restricted ? findsOneWidget : findsNothing,
+          );
+          expect(
+            find.byType(Dialog),
+            restricted ? findsNothing : findsOneWidget,
+          );
+          if (!restricted) await _tap(tester, '동의');
+          expect(f.services.api.follows, restricted ? isEmpty : ['alice']);
+          expect(f.services.rooms.followTarget, restricted ? isNull : 'alice');
+          expect(tester.takeException(), isNull);
+        } finally {
+          await f.dispose(tester);
+          await events.close();
+        }
+      }, timeout: _timeout);
+    }
+  }
+
+  testWidgets('차량 동의 모달 중 주행 제한이 켜지면 동의 후 따라가기를 시작하지 않는다', (tester) async {
+    final events = StreamController<Object?>.broadcast();
+    final f = await _Fixture.create(
+      tester,
+      car: true,
+      drivingEvents: events.stream,
+    );
+    try {
+      events.add({'restricted': false, 'available': true});
+      await pumpConsentUi(tester);
       await _member(tester, 'alice');
-      expect(find.text('정차 후 설정할 수 있습니다'), findsOneWidget);
-      expect(find.byType(Dialog), findsNothing);
-      expect(f.services.locationSource.requests, 1);
+      events.add({'restricted': true, 'available': true});
+      await pumpConsentUi(tester);
+      await _tap(tester, '동의');
       expect(f.services.api.follows, isEmpty);
-      expect(f.services.rooms.followTarget, isNull);
-      expect(find.byType(RoomMap), findsNothing);
-      expect(tester.takeException(), isNull);
+      expect(find.text('정차 후 설정할 수 있습니다'), findsOneWidget);
+      expect(f.services.locationShare.sharing, isTrue);
     } finally {
       await f.dispose(tester);
+      await events.close();
     }
   }, timeout: _timeout);
 
@@ -577,7 +629,7 @@ void main() {
 
   for (final immediate in [true, false]) {
     testWidgets(
-      '차량 동의 후 ${immediate ? "start 중" : "POST 뒤"} 첫 moving 판정은 따라가기만 거부한다',
+      '차량 동의 후 ${immediate ? "start 중" : "POST 뒤"} 첫 moving 표본에도 주행 제한이 없으면 따라가기를 유지한다',
       (tester) async {
         final f = await _Fixture.create(tester, car: true);
         try {
@@ -597,12 +649,12 @@ void main() {
             expect(f.services.rooms.followTarget, 'alice');
             await _sample(tester, f, speed: .5);
           }
-          expect(f.services.rooms.followTarget, isNull);
-          expect(f.services.rooms.followError, '정차 후 설정할 수 있습니다');
-          expect(find.text('정차 후 설정할 수 있습니다'), findsOneWidget);
-          expect(find.byType(RoomMap), findsNothing);
-          expect(f.services.api.follows, immediate ? isEmpty : ['alice']);
-          expect(f.services.api.unfollows, immediate ? 0 : 1);
+          expect(f.services.rooms.followTarget, 'alice');
+          expect(f.services.rooms.followError, isNull);
+          expect(find.text('정차 후 설정할 수 있습니다'), findsNothing);
+          expect(find.byType(RoomMap), findsOneWidget);
+          expect(f.services.api.follows, ['alice']);
+          expect(f.services.api.unfollows, 0);
           expect(f.services.locationShare.sharing, isTrue);
           expect(f.services.locationSource.watches, 1);
           expect(f.services.locationSource.cancellations, 0);
@@ -1017,6 +1069,7 @@ class _Fixture {
     bool car = false,
     String handle = 'bob',
     Size? size,
+    Stream<Object?>? drivingEvents,
   }) async {
     tester.view.physicalSize =
         size ?? (car ? const Size(1320, 940) : const Size(412, 915));
@@ -1028,6 +1081,7 @@ class _Fixture {
       tester,
       mode: mode,
       handle: handle,
+      drivingEvents: drivingEvents,
     );
     await services.openRoom(tester);
     final f = _Fixture(services);

@@ -1,11 +1,6 @@
-import 'dart:async';
-
-import 'package:flutter/foundation.dart';
-
 import '../net/api_client.dart';
 import '../net/models.dart';
 import '../room/room_session.dart';
-import 'legal_consent_store.dart';
 import 'session_store.dart';
 
 /// Cold startup refreshes identity and offers a room card. Opening the room,
@@ -19,8 +14,13 @@ Future<void> restoreSession({
   final token = store.token;
   if (token == null) return;
   final baseUrl = store.baseUrl;
+  final sessionRevision = store.sessionRevision;
+  final consentRevision = store.consentRevision;
   bool current() =>
-      isCurrent() && token == store.token && baseUrl == store.baseUrl;
+      isCurrent() &&
+      token == store.token &&
+      baseUrl == store.baseUrl &&
+      sessionRevision == store.sessionRevision;
   try {
     const retryDelays = [
       Duration(seconds: 2),
@@ -29,7 +29,9 @@ Future<void> restoreSession({
     ];
     late MeResult me;
     for (var attempt = 0; ; attempt++) {
-      if (!current() || rooms.state.code != null) return;
+      if (!current() ||
+          (rooms.state.code != null && (attempt > 0 || store.consentLoaded)))
+        return;
       try {
         me = await api.me();
         break;
@@ -43,32 +45,13 @@ Future<void> restoreSession({
       }
     }
     if (!current()) return;
-    final privacyVersion =
-        hasPrivacyConsent(store.preferences) &&
-            me.consent?.privacy?.version != legalVersion
-        ? legalVersion
-        : null;
-    final locationVersion =
-        hasLocationConsent(store.preferences) &&
-            me.consent?.location?.version != locationLegalVersion
-        ? locationLegalVersion
-        : null;
-    if (privacyVersion != null || locationVersion != null) {
-      unawaited(
-        api
-            .recordConsent(
-              privacyVersion: privacyVersion,
-              locationVersion: locationVersion,
-            )
-            .then<void>(
-              (_) {},
-              onError: (Object error, StackTrace stack) {
-                debugPrint('동의 기록 동기화 실패: $error');
-              },
-            ),
-      );
-    }
-    await store.save(AuthResult(me.user, token));
+    await store.save(
+      AuthResult(me.user, token),
+      consent: me.consent,
+      consentLoaded: true,
+      // A GET started before an explicit PUT must not undo that newer consent.
+      expectedConsentRevision: consentRevision,
+    );
     if (!current() || rooms.state.code != null) return;
     rooms.setRestorableRoom(me.room);
   } on ApiException catch (error) {
