@@ -51,6 +51,7 @@ class UnavoIcon extends StatelessWidget {
     'moon',
     'phone',
     'paste',
+    'player-play',
     'plus',
     'refresh',
     'rooms',

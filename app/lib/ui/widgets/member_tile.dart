@@ -51,11 +51,18 @@ class MemberTile extends StatelessWidget {
     );
     final indicators = [
       if (member.ready)
-        UnavoIcon(
-          'check',
-          key: ValueKey('member-ready-${member.handle}'),
-          size: car ? 24 : 18,
-          color: UnavoColors.onCall,
+        Container(
+          padding: EdgeInsets.all(car ? 4 : 3),
+          decoration: const BoxDecoration(
+            shape: BoxShape.circle,
+            color: UnavoColors.call,
+          ),
+          child: UnavoIcon(
+            'check',
+            key: ValueKey('member-ready-${member.handle}'),
+            size: car ? 28 : 18,
+            color: UnavoColors.onCall,
+          ),
         ),
       if (_interrupted || _speaking)
         UnavoIcon(
