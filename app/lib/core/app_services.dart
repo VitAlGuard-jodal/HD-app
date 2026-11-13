@@ -10,6 +10,7 @@ import '../call/webrtc_media_engine.dart';
 import '../location/location_share.dart';
 import '../location/geolocator_location_source.dart';
 import '../location/location_source.dart';
+import '../location/vehicle_location_source.dart';
 import '../map/map_provider.dart';
 import '../net/api_client.dart';
 import '../room/room_session.dart';
@@ -24,7 +25,12 @@ class AppServices {
     DeviceMode? deviceMode,
     MapProvider? mapProvider,
   }) : mapProvider = mapProvider ?? mapProviderFromEnvironment(),
-       locationSource = locationSource ?? GeolocatorLocationSource() {
+       locationSource =
+           locationSource ??
+           VehicleLocationSource(
+             mode: deviceMode ?? DeviceMode.phone,
+             fallback: GeolocatorLocationSource(),
+           ) {
     api = ApiClient(tokenStore: store);
     mic = MicRouter(store);
     calls = CallService();

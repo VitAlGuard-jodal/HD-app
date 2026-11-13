@@ -10,11 +10,15 @@ import kr.modumoa.hdapp.audio.AudioChannel
 import kr.modumoa.hdapp.call.CallChannel
 import kr.modumoa.hdapp.call.CallForegroundService
 import kr.modumoa.hdapp.drive.DriveChannel
+import kr.modumoa.hdapp.location.LocationChannel
+import kr.modumoa.hdapp.tts.TtsChannel
 
 class MainActivity : FlutterActivity() {
     private var audioChannel: AudioChannel? = null
     private var callChannel: CallChannel? = null
     private var driveChannel: DriveChannel? = null
+    private var locationChannel: LocationChannel? = null
+    private var ttsChannel: TtsChannel? = null
     private var deviceChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -35,6 +39,8 @@ class MainActivity : FlutterActivity() {
         audioChannel = AudioChannel(this, app, messenger)
         callChannel = CallChannel(app, messenger)
         driveChannel = DriveChannel(this, messenger)
+        locationChannel = LocationChannel(this, messenger)
+        ttsChannel = TtsChannel(this, messenger)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -50,6 +56,7 @@ class MainActivity : FlutterActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         audioChannel?.onPermissionsResult(requestCode)
+        locationChannel?.onPermissionsResult(requestCode)
     }
 
     override fun onResume() {
@@ -66,10 +73,14 @@ class MainActivity : FlutterActivity() {
         audioChannel?.dispose()
         callChannel?.dispose()
         driveChannel?.dispose()
+        locationChannel?.dispose()
+        ttsChannel?.dispose()
         deviceChannel?.setMethodCallHandler(null)
         audioChannel = null
         callChannel = null
         driveChannel = null
+        locationChannel = null
+        ttsChannel = null
         deviceChannel = null
         super.cleanUpFlutterEngine(flutterEngine)
     }

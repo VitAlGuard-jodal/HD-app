@@ -13,6 +13,7 @@ import '../core/device_mode.dart';
 import '../core/driving_state.dart';
 import '../location/location_share.dart';
 import '../location/location_source.dart';
+import '../location/follow_voice_guidance.dart';
 import '../net/api_client.dart';
 import '../net/models.dart';
 
@@ -69,7 +70,11 @@ class RoomSession extends ChangeNotifier {
     this.driving,
     LocationSource? locationSource,
     DateTime Function()? locationNow,
+    FollowVoiceGuidance? followVoice,
   }) {
+    _followVoice =
+        followVoice ??
+        FollowVoiceGuidance(enabled: () => _carMode, now: locationNow);
     locationShare = LocationShare(
       api: api,
       source: locationSource,
@@ -126,6 +131,7 @@ class RoomSession extends ChangeNotifier {
   final DeviceMode? deviceMode;
   final DrivingState? driving;
   late final LocationShare locationShare;
+  late final FollowVoiceGuidance _followVoice;
   late final StreamSubscription<Map<String, MeshPeerState>> _peerSubscription;
   Map<String, MeshPeerState> get peerStates => mediaEngine.peerStates;
   RoomState _state = const RoomState();
@@ -842,6 +848,12 @@ class RoomSession extends ChangeNotifier {
   }
 
   void _endFollow(FollowResponse event) {
+    _updateFollowVoice();
+    _followVoice.ended(
+      target: event.target,
+      name: displayNameOf(event.target),
+      reason: event.reason,
+    );
     _followTarget = null;
     _pendingFollow = null;
     _followRequestId = null;
@@ -1011,6 +1023,7 @@ class RoomSession extends ChangeNotifier {
         !checkFollowAllowed(target) ||
         !locationShare.sharing)
       return;
+    _followVoice.clear();
     // 다른 pending 대상에서 전환할 때 이미 켜진 공유는 이번 동의로 이어 쓴다.
     for (final entry in _locationStarts.entries.toList()) {
       if (!entry.value.incoming && entry.value.target != target)
@@ -1082,6 +1095,7 @@ class RoomSession extends ChangeNotifier {
   }
 
   Future<void> stopFollowing() async {
+    _followVoice.clear();
     final code = state.code;
     if (code == null || followIntent == null) return;
     _deferredHelloFollow = null;
@@ -1218,6 +1232,7 @@ class RoomSession extends ChangeNotifier {
   }
 
   void _clearLocations() {
+    _followVoice.clear();
     _followStops.clear();
     _serverRevision = 0;
     _myFollowRevision = null;
@@ -1622,8 +1637,24 @@ class RoomSession extends ChangeNotifier {
     }
   }
 
+  void _updateFollowVoice() {
+    if (!_disposed) {
+      _followVoice.update(
+        room: state.code,
+        target: followTarget,
+        name: followTarget == null ? '' : displayNameOf(followTarget!),
+        measuredAt: positions[followTarget]?.at,
+        sharing: locationShare.sharing,
+        leaving: state.isLeaving,
+      );
+    }
+  }
+
   void _notify() {
-    if (!_disposed) notifyListeners();
+    if (!_disposed) {
+      _updateFollowVoice();
+      notifyListeners();
+    }
   }
 
   @override
@@ -1654,6 +1685,7 @@ class RoomSession extends ChangeNotifier {
     }
     unawaited(_peerSubscription.cancel());
     _shutdown = Future.wait<void>([
+      _followVoice.dispose(),
       stoppingLocation,
       _followQueue,
       _eventQueue,

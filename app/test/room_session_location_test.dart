@@ -13,6 +13,7 @@ import 'package:unavo/core/device_mode.dart';
 import 'package:unavo/core/driving_state.dart';
 import 'package:unavo/location/location_share.dart';
 import 'package:unavo/location/location_source.dart';
+import 'package:unavo/location/follow_voice_guidance.dart';
 import 'package:unavo/net/api_client.dart';
 import 'package:unavo/net/models.dart';
 import 'package:unavo/room/room_session.dart';
@@ -38,6 +39,93 @@ LocationFix _fix(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  for (final reason in ['stopped', 'stale']) {
+    test('D2 $reason SSE는 차량 음성과 기존 화면 알림에 각각 한 번 전달된다', () {
+      fakeAsync((clock) {
+        final speech = _FollowSpeech();
+        final f = _Fixture.create(clock, mode: DeviceMode.car, speech: speech);
+        f.open();
+        f.startSharing();
+        _finish(clock, f.session.startFollowing('alice'));
+        f.event(LocationStopped('alice', reason: reason, revision: 20));
+        f.event(LocationStopped('alice', reason: reason, revision: 20));
+        f.event(
+          FollowResponse(
+            'alice',
+            false,
+            requestId: 'alice-request',
+            reason: reason,
+            revision: 20,
+          ),
+        );
+        expect(speech.texts, [
+          reason == 'stopped'
+              ? '앨리스 님이 위치 공유를 끝냈습니다'
+              : '앨리스 님 위치가 잠시 갱신되지 않고 있습니다',
+        ]);
+        expect(f.session.followTarget, isNull);
+        expect(f.session.takeFollowNotice()?.reason, reason);
+        expect(f.session.takeFollowNotice(), isNull);
+        f.dispose();
+      });
+    }, timeout: _timeout);
+  }
+
+  test('D2 차량은 측정 시각 90초 지연과 후속 서버 stale을 한 번만 말한다', () {
+    fakeAsync((clock) {
+      final speech = _FollowSpeech();
+      final f = _Fixture.create(clock, mode: DeviceMode.car, speech: speech);
+      f.open();
+      f.startSharing();
+      _finish(clock, f.session.startFollowing('alice'));
+      f.event(
+        LocationUpdated(
+          LocationFix(
+            handle: 'alice',
+            stream: '0123456789abcdef',
+            lat: 37,
+            lng: 127,
+            at: f.now().millisecondsSinceEpoch,
+            seq: 1,
+          ),
+        ),
+      );
+      clock.elapse(const Duration(seconds: 90));
+      clock.flushMicrotasks();
+      expect(speech.texts, ['앨리스 님 위치가 잠시 갱신되지 않고 있습니다']);
+      f.event(const LocationStopped('alice', reason: 'stale', revision: 20));
+      expect(speech.texts, hasLength(1));
+      expect(f.session.takeFollowNotice()?.reason, 'stale');
+      f.dispose();
+    });
+  }, timeout: _timeout);
+
+  for (final action in ['leave', 'stop-follow', 'stop-share']) {
+    test('D2 $action는 RoomSession에서 음성 stop까지 전달된다', () {
+      fakeAsync((clock) {
+        final speech = _FollowSpeech();
+        final f = _Fixture.create(clock, mode: DeviceMode.car, speech: speech);
+        f.open();
+        f.startSharing();
+        _finish(clock, f.session.startFollowing('alice'));
+        switch (action) {
+          case 'leave':
+            _finish(clock, f.session.leave());
+          case 'stop-follow':
+            _finish(clock, f.session.stopFollowing());
+          case 'stop-share':
+            _finish(clock, f.session.locationShare.stop());
+        }
+        clock.flushMicrotasks();
+        expect(speech.stops, 1);
+        clock.elapse(const Duration(seconds: 91));
+        clock.flushMicrotasks();
+        expect(speech.texts, isEmpty);
+        f.dispose();
+      });
+    }, timeout: _timeout);
+  }
 
   for (final leaveFails in [true, false]) {
     test(
@@ -1544,7 +1632,12 @@ T _finish<T>(FakeAsync clock, Future<T> future) {
 }
 
 class _Fixture {
-  _Fixture(this.clock, this.store, DeviceMode mode) {
+  _Fixture(
+    this.clock,
+    this.store,
+    DeviceMode mode,
+    FollowSpeechOutput? speech,
+  ) {
     api = _Api(store, http);
     mic = MicRouter(store);
     unawaited(drivingEvents.done);
@@ -1559,18 +1652,27 @@ class _Fixture {
       driving: driving,
       locationSource: source,
       locationNow: now,
+      followVoice: speech == null
+          ? null
+          : FollowVoiceGuidance(
+              enabled: () => mode == DeviceMode.car,
+              output: speech,
+              now: now,
+            ),
     );
   }
   static _Fixture create(
     FakeAsync clock, {
     String handle = 'bob',
     DeviceMode mode = DeviceMode.phone,
+    FollowSpeechOutput? speech,
   }) {
     SharedPreferences.setMockInitialValues({'token': 'test', 'handle': handle});
     return _Fixture(
       clock,
       SessionStore(_finish(clock, SharedPreferences.getInstance())),
       mode,
+      speech,
     );
   }
 
@@ -1635,6 +1737,20 @@ class _Fixture {
     store.dispose();
     clock.flushMicrotasks();
     expect(clock.pendingTimers, isEmpty);
+  }
+}
+
+class _FollowSpeech implements FollowSpeechOutput {
+  final texts = <String>[];
+  int stops = 0;
+  @override
+  Future<void> speak(String text, DateTime expiresAt) async {
+    texts.add(text);
+  }
+
+  @override
+  Future<void> stop() async {
+    stops++;
   }
 }
 

@@ -224,6 +224,7 @@ class MicRouter(context: Context) {
             if (focusRequest == null) {
                 lateinit var request: AudioFocusRequest
                 request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                    .setWillPauseWhenDucked(false)
                     .setAudioAttributes(AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
@@ -236,9 +237,14 @@ class MicRouter(context: Context) {
                                             releaseLocked()
                                             mutableState.update { it.copy(error = "다른 오디오가 우선되어 통화가 중단되었습니다") }
                                         }
-                                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
-                                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK ->
+                                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ->
                                             mutableState.update { it.copy(isInterrupted = true) }
+                                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                                            // Automotive navigation speech may coexist with CALL.
+                                            // HAL handles mixing/ducking; don't mute WebRTC here.
+                                            if (detectMode() != MicMode.CAR)
+                                                mutableState.update { it.copy(isInterrupted = true) }
+                                        }
                                         AudioManager.AUDIOFOCUS_GAIN ->
                                             mutableState.update { it.copy(isInterrupted = false, error = null) }
                                     }

@@ -5,10 +5,14 @@ class LocationSample {
     this.accuracy,
     this.speed,
     this.heading,
+    this.altitude,
+    this.confidence,
     required this.at,
   });
   final double lat, lng;
   final double? accuracy, speed, heading;
+  // Pleos confidence has no documented metre unit; never send it as accuracy.
+  final double? altitude, confidence;
   final DateTime at;
 }
 
