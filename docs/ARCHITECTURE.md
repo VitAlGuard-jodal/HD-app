@@ -200,7 +200,7 @@ M10은 가입 화면에서 만 14세 이상 확인을 받으며 가입 본문 `o
 
 참여자 `_refresh`가 현재 조회·멤버 세대의 적용까지 성공하면 SSE 연결 상태(`isConnected=true`)에서만 `state.error`를 지우며, SSE 미연결 중에는 재접속 안내를 유지한다.
 
-## 13. 지도 화면(M2·M3·M5a)
+## 13. 지도 화면(M2·M3·M5a·C2)
 
 초기 M1의 데이터 통로에 실제 GPS와 지도 공급원 경계를 연결한다. 동의 UI와 수명은 §12·§14·§15를 따른다.
 
@@ -220,27 +220,35 @@ M10은 가입 화면에서 만 14세 이상 확인을 받으며 가입 본문 `o
 | `UNAVO_TILE_ATTRIBUTION` | `© 국토교통부 브이월드`. 빈 설정도 이 출처로 대체한다 |
 | `UNAVO_TILE_MIN_ZOOM` / `UNAVO_TILE_MAX_ZOOM` | `6` / `19`. 다크 상한 18. 잘못된 숫자는 기본값, 역전된 최솟값은 상한으로 보정한다 |
 
-브이월드 WMTS 경로는 **tileMatrix/tileRow/tileCol = z/y/x** 순서다. 키와 레이어만 치환하고 좌표 치환은 flutter_map에 맡긴다. User-Agent 패키지 이름은 `kr.modumoa.hdapp`이다. 키 없음·타일 오류 시 테마에 맞춘 단색 위에 차 아이콘·궤적을 유지한다. 실패 로그는 프로세스당 한 번만 남기고 키가 포함된 URL·예외 본문을 출력하지 않는다.
+브이월드 WMTS 경로는 **tileMatrix/tileRow/tileCol = z/y/x** 순서다. 키와 레이어만 치환하고 좌표 치환은 flutter_map에 맡긴다. User-Agent 패키지 이름은 `kr.modumoa.hdapp`이다. 키 없음·타일 오류 시 테마에 맞춘 단색 위에 프로필·방향 마커와 궤적을 유지한다. 실패 로그는 프로세스당 한 번만 남기고 키가 포함된 URL·예외 본문을 출력하지 않는다.
 
 **타일 이용 규칙.** M2 지시문의 브이월드 2026-10-30 약관 기준으로 원본 타일을 표시한다. 위성 레이어, 색 필터, 블렌드, 재스타일, 타일 Opacity를 사용하지 않으며 `TileDisplay.instantaneous()`로 타일 페이드도 끈다. 시스템 `MediaQuery.platformBrightness`가 바뀌면 제공 레이어 Base/midnight만 바꾼다. 지도 우하단 출처는 접기·숨기기 기능 없는 텍스트이며 키가 없어도 표시한다.
 
 공급자는 기본 클래스 `NetworkTileProvider`이고 추가 캐시 패키지·수동 저장은 없다. **8.3.2에서는 이 공급자도 디스크 캐시가 기본으로 켜져 있으므로 `cachingProvider: const DisabledMapCachingProvider()`를 명시한다.** Flutter 이미지 메모리 캐시만 사용한다. 설치된 패키지 소스와 [공식 캐시 문서](https://docs.fleaflet.dev/layers/raster-tile-layer/caching.md)로 기본 동작을 확인했다. 대상은 Android/iOS 앱이며 브라우저 자체 캐시 정책을 다루는 웹 배포는 이번 범위가 아니다.
 
-**네이버 표시·약관(M3).** 고정된 flutter_naver_map 1.4.4의 `NMapType.navi`와 `nightModeEnable`을 사용한다. 회전·기울임 제스처, 최대 기울임 63도, 건물 레이어를 켜고 축척·위치 버튼·실내 지도는 끈다. 첫 카메라는 내 위치 → 따라가는 대상 → 첫 참여자 → 서울시청 순서로 정하며 줌은 16이다. 설치 소스에서 옵션은 `didUpdateWidget`이 아니라 `NaverMap.build → _updateOptionsIfNeeded → controller._updateOptions`로 갱신됨을 확인했다. 밝기 변경 시 야간 옵션만 갱신하고 지도를 재생성하지 않는다.
+**네이버 표시·약관(M3).** 고정된 flutter_naver_map 1.4.4의 `NMapType.navi`와 `nightModeEnable`을 사용한다. 회전·기울임 제스처, 최대 기울임 63도, 건물 레이어를 켜고 축척·위치 버튼·실내 지도는 끈다. 첫 카메라는 내 위치 → 따라가는 대상 → 첫 참여자 → 서울시청 순서로 정하며 줌은 18이다. 설치 소스에서 옵션은 `didUpdateWidget`이 아니라 `NaverMap.build → _updateOptionsIfNeeded → controller._updateOptions`로 갱신됨을 확인했다. 밝기 변경 시 야간 옵션만 갱신하고 지도를 재생성하지 않는다.
 
 NAVER 로고는 왼쪽 아래에 상시 유지하고 플로팅 바 여백을 확보한다. `logoClickEnable: true`로 SDK의 법적 고지·오픈소스 화면을 그대로 연다. 로고를 숨기거나 다른 UI로 덮지 않으며, 네이버 지도 위에 별도의 출처 텍스트는 붙이지 않는다. 타일 색 필터·변형·커스텀 스타일을 추가하지 않는다. 위의 디스크 캐시 금지는 브이월드 타일 규칙이며, 네이버 SDK 자체 지도 캐시는 SDK가 관리한다. 마커의 `NOverlayImage.fromWidget`은 SDK 내부 임시 이미지 캐시를 사용한다.
 
 **교체 경계·표시.** `app/lib/map/room_map.dart`는 얇은 `RoomMap` facade와 `abstract class RoomMapController`를 제공한다. `RoomMapController.create(provider)`가 `NaverRoomMapController` / `VworldRoomMapController`를 만들고 facade가 대응하는 지도 구현을 선택한다. 기존 무인자 컨트롤러와 facade의 기본값은 브이월드로 유지한다. 컨트롤러는 `moveTo(latitude, longitude, zoom:)`, `follow()`, `recenter()`, `alignHeading(bool)`을 제공한다. facade 입력은 positions/trail/targetHandle/selfHandle/following/brightness/onInteraction/tiles와 car/fullscreen/onFullscreen/onStopSharing이다. 공통 지도 버튼은 facade 내부에 표시한다. positions는 표시 이름과 LocationFix를 담은 `RoomMapPosition`이다. RoomScreen은 서비스의 공급원·오류 상태를 전달하고 공급원별 SDK 카메라·좌표 타입은 사용하지 않는다. 브이월드 구현은 `vworld_room_map.dart`에 유지한다.
 
-두 구현은 `room_map_geometry.dart`의 전방점·거리 계산과 `room_map_widgets.dart`의 GPS/차량 마커·거리 라벨·원형 버튼을 공유한다. 내 마커는 파란 GPS 점·흰 테두리·옅은 바깥 원이며 heading이 있을 때만 부채꼴을 그린다. 상대는 폰 32dp·차량 44dp 차 아이콘과 작은 표시 이름, 불투명도 0.55다. 네이버는 `NOverlayImage.fromWidget`을 `(handle, 표시 이름, 나 여부, heading 유무, brightness, car)`별로 캐시하고, car SVG는 먼저 디코딩한다. 위치·방위는 `setPosition`/`setAngle`, 스타일은 `setIcon`/`setSize`/`setAlpha`로 갱신한다. `NMarker(alpha:)`를 써 위젯과 SDK에서 alpha를 이중 적용하지 않는다. `setGlobalZIndex(300000)`으로 내 마커를 상대(200000) 위에 둔다. 네이버는 중심 anchor·`isFlat: true`이고 캡처 위젯에는 heading을 다시 적용하지 않는다. 브이월드는 내 마커를 MarkerLayer의 마지막에 배치한다.
+두 구현은 `room_map_geometry.dart`의 이동 방향·전방점·거리·카메라 계산과 `room_map_widgets.dart`의 프로필·방향 삼각형·거리 라벨·원형 버튼을 공유한다. C2(2026-11-13)는 **나·상대 모두** `MemberAvatar`로 사진 또는 선택한 마스코트를 표시하며, 프로필 미설정은 `mascot-01`이다. 사진 로딩·실패 중에도 기본 마스코트를 표시한다. 입장 순서 무지개 3dp 테두리, 내 alpha 1·상대 alpha 0.55, 내 마커 최상위 순서를 유지한다. 프로필 사진·마스코트·이름표는 지도 회전·기울임과 무관하게 똑바로 유지한다.
+
+**마커 크기·위치(C2).** `RoomMarkerStyle`의 프로필 지름은 나·상대 동일하게 폰 28dp·차량 32dp다. 테두리 바깥 4dp 공간의 작은 삼각형까지 포함한 아이콘 영역은 폰 36×36dp·차량 40×40dp다. 상대 이름은 아래 별도 12dp 영역에 9sp 한 줄 말줄임으로 표시하며, 이름표 폭은 프로필 지름 이하로 제한한다. 내 이름표는 생략한다. 이름표를 포함한 전체 오버레이 높이는 상대 폰 48dp·차량 52dp지만 **GPS anchor는 프로필 중심**이다. 네이버는 상대 anchor의 y를 `directionDiameter / 2 / size.height`로, 브이월드는 그에 대응하는 alignment로 맞춘다.
+
+**방향 계산(C2).** `RoomDirectionTracker`는 handle별 기준 위치·마지막 표본·마지막 방향만 보관한다. 첫 표본에는 heading·speed가 있어도 방향을 표시하지 않는다. 같은 stream의 새 seq에서 기준 위치와의 거리가 `minimumMovementMeters=3.0 m` 이상이면 이동 방위각을 계산하고 기준점을 갱신한다. 3m 미만은 기준점을 유지해 이동을 누적하고, 정차·작은 흔들림에는 마지막 방향을 유지한다. 표본 heading은 `minimumHeadingSpeed=1.5 m/s` 이상이고 이동 방위와 최단 각도 차이가 `maximumHeadingDifference=45°` 이하일 때만 `headingWeight=0.2`로 보조한다(이동 방위 80%·heading 20%). 이동과 어긋나는 heading 0은 버리며 실제 북진 0은 허용한다. 각도 보정은 0/360 경계의 최단 방향으로 계산한다. 중복·역순 seq는 무시하고, stream 변경은 미확정 상태로 초기화하며, 사라진 참여자의 상태는 제거한다. `LocationFix`·서버 프로토콜은 바꾸지 않는다.
+
+**방향 표시·캐시(C2).** 방향 삼각형은 프로필과 별도 오버레이다. 네이버 프로필은 `angle: 0`, `isFlat: false`, 방향 마커도 `isFlat: false`로 둔다. flat 삼각형은 tilt 50에서 세로로 눌려 똑바로 선 프로필 안쪽에 들어올 수 있으므로, 카메라의 `nowCameraPositionStream`을 구독하여 화면 각도 `atan2(sin(이동 방위−카메라 방위), cos(이동 방위−카메라 방위) × cos(tilt))`만 `setAngle`로 갱신한다. 카메라 변경마다 위치를 다시 조회하거나 비트맵을 만들지 않는다. 회전·기울임에도 기본 마커의 형태가 유지되고 flat 마커는 함께 회전·기울어진다는 SDK 동작은 [네이버 공식 마커 문서](https://navermaps.github.io/android-map-sdk/guide-ko/5-2.html)의 플랫 절과 설치된 1.4.4 소스로 확인했다. 브이월드는 프로필 `Marker.rotate: true`로 지도 회전을 상쇄하고, 별도 삼각형은 `rotate: false`와 계산된 이동 방위를 적용하여 지도와 함께 회전한다. 방향 미확정 시 네이버는 오버레이를 생성하지 않거나 숨기고, 브이월드는 삼각형을 생략한다.
+
+네이버 `RoomMarkerIconCache` 키는 `(handle, 표시 이름, 나 여부, brightness, car, avatar kind, avatar version, 입장 색)`이다. 좌표·heading 유무·heading 값·계산된 방향은 키에서 제외한다. 사진·마스코트는 캡처 전에 `ui.Image`로 디코딩한다. 실패 시 기본 마스코트 캡처를 30초 재사용하고 다음 sync에서 재시도한다. 방향 이미지는 `(입장 색, car)`별로 북쪽 삼각형만 캡처하여 최대 14개(7색×2모드)를 재사용한다. 위치 변경은 `setPosition`, 방향 변경은 `setAngle`, 스타일 변경은 `setIcon`·`setSize`·`setAlpha`로 처리한다. SDK alpha와 위젯 opacity를 이중 적용하지 않는다. 내 프로필/삼각형 global z-index는 300000/300001, 상대는 200000/200001이다. 브이월드는 참여자별 삼각형·프로필 순서로 나를 마지막에 배치한다. 참여자 제거 시 오버레이·프로필 캐시·디코딩 이미지를 정리하고, 지도 dispose 시 이미지·캐시·카메라 구독을 정리한다.
 
 네이버 궤적은 금색 폭 8·테마 대비색 외곽선 폭 2의 `NPathOverlay`이며 2점 미만이면 생략한다. 이후 `setCoords`로 갱신한다. 브이월드는 기존 금색 폭 6의 둥근 Polyline이다. 지도에는 `trailOf(followTarget)`만 전달한다. 세션은 위치·궤적이 바뀔 때만 새 불변 스냅샷을 만들고 그 사이에는 같은 객체를 돌려주므로 네이버의 `listEquals`는 identical로 단락되고 브이월드는 궤적 참조가 바뀔 때만 투영한 `LatLng` 목록을 다시 만든다.
 
-**따라가기 공통 규칙.** `roomForwardPoint()`는 heading이 있으면 전방 반평면의 가장 가까운 점을, 없으면 최근접 꼭짓점 다음 점을 고른다. 적절한 점이 없으면 따라가는 대상의 현재 위치를 쓴다. 직선 거리는 `350 m` / `1.2 km` 형식이며 좌상단에 표시한다. 사용자 터치가 끝날 때까지 자동 이동을 멈추고 마지막 제스처/카메라 정지 뒤 5초 후 따라가기가 켜진 경우에만 재개한다. 따라가기 꺼짐에서는 새 표본·테마 변경으로 카메라를 자동 이동하지 않는다.
+**따라가기 공통 규칙.** `roomForwardPoint()`·`followBounds()`는 계산된 direction이 있으면 전방 반평면의 가장 가까운 점을, 없으면 최근접 꼭짓점 다음 점을 고른다. 원시 `LocationFix.heading`은 사용하지 않는다. 적절한 점이 없으면 따라가는 대상의 현재 위치를 쓴다. 직선 거리는 `350 m` / `1.2 km` 형식이며 좌상단에 표시한다. 사용자 터치가 끝날 때까지 자동 이동을 멈추고 마지막 제스처/카메라 정지 뒤 5초 후 따라가기가 켜진 경우에만 재개한다. 따라가기 꺼짐에서는 새 표본·테마 변경으로 카메라를 자동 이동하지 않는다.
 
-`naverFollowCamera()`는 SDK와 무관하게 내 위치 중심·tilt 50·진행 방향·거리 줌을 계산한다. 방위는 내 heading → 전방점 방위 → 현재 방위 순서다. 대상까지 거리 `<200m: 17`, `<600m: 16`, `<1.5km: 15`, `<4km: 14`, 나머지 13을 쓴다. 상대 위치가 없으면 내 위치·줌 16이다. 네이버는 최대 초당 1회 최신 표본으로 `NCameraUpdate.withParams`에 linear·800ms를 설정한다. 브이월드도 같은 중심·거리 줌을 쓰며 2D 공급원이라 tilt는 적용하지 않는다.
+`naverFollowCamera()`는 SDK와 무관하게 내 위치 중심·tilt 50·계산된 이동 방향·거리 줌을 계산한다. 방위는 `RoomDirectionTracker`의 내 방향을 사용하고 미확정이면 현재 카메라 방위를 유지한다. 앞차 위치·궤적만으로 내 진행 방향을 추측하지 않는다. `RoomFollowCameraPolicy`의 기본 내비 줌과 따라가기 상한은 18, 원거리 하한은 14다. 대상까지 거리 `<200m: 18`, `<600m: 17`, `<1.5km: 16`, `<4km: 15`, 나머지 14를 쓴다. 상대 위치가 없거나 그룹장 본인이면 내 위치·줌 18이다. 두 지도 초기 카메라와 `moveTo()` 기본 줌도 18이다. 현재 런타임에는 두 좌표의 bounds를 SDK에 전달하는 자동 fit 동작이 없으며, 내 위치 중심·거리 단계 줌을 유지한다. 네이버는 최대 초당 1회 최신 표본으로 `NCameraUpdate.withParams`에 linear·800ms를 설정한다. 브이월드도 같은 중심·거리 줌을 쓰고 타일 공급원의 최소·최대 줌으로 제한하며, 2D 공급원이라 tilt는 적용하지 않는다.
 
-수동 제스처 중에는 자동 이동을 멈추고 마지막 조작 종료·카메라 정지 후 5초 뒤 재개한다. 내 위치 버튼은 줌을 유지한 채 내 위치로 이동한다. 방향 정렬은 따라가기 여부와 무관하게 즉시 heading 기준으로 회전하고 이후 heading 갱신을 반영한다. 다시 누르면 북쪽 위(0도)를 유지한다. 네이버 `withParams`에서 생략한 줌·tilt는 유지하고, 브이월드는 카메라 rotation에 반대 부호를 사용한다. 따라가기 해제는 보류 카메라 요청과 진행 중 전환을 취소한다.
+수동 제스처 중에는 자동 이동을 멈추고 마지막 조작 종료·카메라 정지 후 5초 뒤 재개한다. 내 위치 버튼은 줌을 유지한 채 내 위치로 이동한다. 방향 정렬은 따라가기 여부와 무관하게 계산된 내 이동 방향으로 즉시 회전하고 이후 방향 갱신을 반영한다. 방향 미확정이면 현재 방위를 유지하고, 정차 시 마지막 방향을 유지한다. 다시 누르면 북쪽 위(0도)를 유지한다. 네이버 `withParams`에서 생략한 줌·tilt는 유지하고, 브이월드는 카메라 rotation에 반대 부호를 사용한다. 따라가기 해제는 보류 카메라 요청과 진행 중 전환을 취소한다.
 
 **GPS·권한.** `AppServices` 기본 소스는 `GeolocatorLocationSource()`이며 테스트용 소스 주입도 유지한다. 서비스 확인 → checkPermission → denied일 때 requestPermission → 앱 권한 상태 변환 순서다. whileInUse/always는 granted, denied/unableToDetermine는 denied, deniedForever는 deniedForever다. 서비스 꺼짐은 serviceOff이며 권한 요청 도중 서비스가 꺼지는 경우도 다시 확인한다.
 
@@ -345,11 +353,11 @@ hello는 `{self,members,leader,positions,trails,revision,followTarget,pendingFol
 
 `ui/avatar_images.dart`는 `ImageDescriptor`로 원본 비율을 읽고 `instantiateImageCodec(targetWidth/targetHeight)`로 긴 변 최대 1024px를 디코딩한다. `Canvas`·`PictureRecorder`로 중앙 정사각형을 256×256에 그린 뒤 `toByteData(png)`로 새 PNG를 만든다. 원본 경로·PNG는 앱 저장소에 쓰지 않는다. 크기·디코딩·네트워크 오류는 M4 `showNoticeDialog`로 표시하며 차량 모달에도 80dp 조작부를 전달한다. 저장·사진 처리 중 중복 조작을 막는다. 저장 성공은 로컬 세션 메타데이터와 내 방 카드에 즉시 반영되고, 다른 참여자는 SSE로 갱신된다. 늦은 HTTP/hello가 더 높은 avatar version을 덮지 않는다.
 
-**마커·캐시.** 이 절의 규칙이 §13·§15의 이전 파란 점/차 아이콘 크기를 갱신한다. 상대는 같은 `MemberAvatar`를 사용하며, 프로필 미설정(null)이면 카드와 같은 기본 마스코트 1번(`mascot-01`)을 표시한다. 폰 36dp·차량 48dp, 3dp 입장 순서 무지개 테두리, alpha 0.55와 이름 배지를 유지한다. 나는 프로필 유무와 무관하게 GPS 점·흰 테두리·heading 부채꼴이며 색만 내 입장 색으로 바뀐다. 내 alpha 1과 최상위 z-index를 유지한다. 상대 마커는 기본 마스코트를 포함해 heading 회전이 없으며 이름표도 회전하지 않는다. 네이버 사진 로드 실패의 임시 차 아이콘도 angle 0을 유지한다.
+**마커·캐시.** M5b의 나 GPS 점·상대 36/48dp 규칙은 **§13 C2로 대체**한다. 나·상대 모두 사진/선택 마스코트/미설정 기본 마스코트(`mascot-01`)를 사용하며, 폰 28dp·차량 32dp다. 무지개 3dp 테두리, 내 alpha 1·상대 0.55와 내 최상위 순서를 유지한다. 프로필·이름표는 회전하지 않으며, 이동 방향은 별도 작은 삼각형으로 표시한다. 이름표 크기·anchor·방향 계산·지도 회전 보정·캐시 키는 §13을 따른다.
 
-`ApiClient.avatarPhoto`는 인증 헤더를 포함한 version URL로 가져오며 서버 주소·로그인 토큰·handle·version별 메모리 캐시를 사용한다. 실패 시각·오류도 같은 키로 30초 보관해 추가 HTTP 없이 같은 오류를 반환하며 성공·실패를 합친 64개 상한을 유지한다. 30초가 지나거나 서버·토큰·버전이 바뀌면 다시 요청한다. 네이버 `NOverlayImage.fromWidget` 키에는 handle·표시 이름·나 여부·heading 유무·밝기·차량 여부와 avatar kind·version·색을 포함한다. 사진/마스코트는 `ui.Image`로 완전히 디코딩한 후 `RawImage`로 캡처하므로 비어 있는 첫 프레임을 저장하지 않는다. 로딩 실패 시 임시 차 마커도 `RoomMarkerIconCache`에서 실패 시각과 함께 30초 재사용하고, 만료 후 다음 sync에서 다시 캡처하며 성공하면 동일 버전이어도 즉시 아이콘을 교체한다. SDK alpha와 위젯 opacity를 중복 적용하지 않는다. 앱 수동 디스크 캐시는 없으며 SDK의 캡처용 임시 캐시는 §13과 같다. 브이월드도 facade로 전달된 avatar·order·API와 공통 마커 위젯을 사용한다.
+`ApiClient.avatarPhoto`는 인증 헤더를 포함한 version URL로 가져오며 서버 주소·로그인 토큰·handle·version별 메모리 캐시를 사용한다. 실패 시각·오류도 같은 키로 30초 보관해 추가 HTTP 없이 같은 오류를 반환하며 성공·실패를 합친 64개 상한을 유지한다. 30초가 지나거나 서버·토큰·버전이 바뀌면 다시 요청한다. 네이버 사진/마스코트는 `ui.Image`로 완전히 디코딩한 뒤 `RawImage`로 캡처한다. 로딩 실패 시 `RoomMarkerIconCache`가 기본 마스코트 캡처를 30초 재사용하고 만료 후 다음 sync에서 재시도하며, 성공하면 동일 버전이어도 즉시 아이콘을 교체한다. 방향·heading 변경은 프로필 비트맵을 다시 만들지 않는다. SDK alpha와 위젯 opacity를 중복 적용하지 않는다. 앱 수동 디스크 캐시는 없으며 SDK의 캡처용 임시 캐시는 §13과 같다. 브이월드도 facade로 전달된 avatar·order·API와 공통 프로필·방향 위젯을 사용한다.
 
-**동의·검증.** M5b 당시 개인정보 `legalVersion='2'`, 위치 문서 `locationLegalVersion='1'`과 M6의 항목별 동의 저장을 유지했고 법률 Markdown은 변경하지 않았다. 이후 M7의 배경 전송 동의와 M10의 두 문서 버전 3·서버 동의 기록은 §12를 따른다. 추가 검증은 `member_colors_test.dart`, `member_avatar_test.dart`, `profile_screen_test.dart`, 지도 캐시 키·내 GPS 색 테스트, 개인정보 버전 2 재동의 테스트, 서버 `avatars.test.ts`이다. 서버 테스트에는 마이그레이션, 300KB/PNG/IHDR 검사, 버전 증가·사진 삭제, 인증·캐시 헤더, 첫 입장 순서와 재입장, 공개 직렬화·참여 방 SSE를 포함한다. 새 테스트는 30초 timeout과 유한 pump를 사용하고 비동기 핸들러 밖에서 검증한다. 이 작업에서는 정적 분석·구문·포맷만 검사하며 테스트 실행과 빌드는 Fable이 담당한다. 실제 갤러리·네이티브 지도 캡처와 폰/차량 배치는 기기 확인 대상이다.
+**동의·검증.** M5b 당시 개인정보 `legalVersion='2'`, 위치 문서 `locationLegalVersion='1'`과 M6의 항목별 동의 저장을 유지했고 법률 Markdown은 변경하지 않았다. 이후 M7의 배경 전송 동의와 M10의 두 문서 버전 3·서버 동의 기록은 §12를 따른다. 추가 검증은 `member_colors_test.dart`, `member_avatar_test.dart`, `profile_screen_test.dart`, 지도 캐시 키·입장 색 테스트(C2에서 나·상대 프로필·방향·크기·카메라 회전 테스트로 갱신), 개인정보 버전 2 재동의 테스트, 서버 `avatars.test.ts`이다. 서버 테스트에는 마이그레이션, 300KB/PNG/IHDR 검사, 버전 증가·사진 삭제, 인증·캐시 헤더, 첫 입장 순서와 재입장, 공개 직렬화·참여 방 SSE를 포함한다. 새 테스트는 30초 timeout과 유한 pump를 사용하고 비동기 핸들러 밖에서 검증한다. 이 작업에서는 정적 분석·구문·포맷만 검사하며 테스트 실행과 빌드는 Fable이 담당한다. 실제 갤러리·네이티브 지도 캡처와 폰/차량 배치는 기기 확인 대상이다.
 
 ## 17. 차량 모드 주행 중 조작 잠금(M8b)
 

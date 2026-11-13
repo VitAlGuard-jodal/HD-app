@@ -6,19 +6,29 @@ import 'package:flutter/material.dart';
 import '../ui/icons.dart';
 import '../net/api_client.dart';
 import '../net/models.dart';
-import '../ui/member_colors.dart';
 import '../ui/widgets/member_avatar.dart';
 import '../ui/theme.dart';
 import 'room_map_geometry.dart';
 
 class RoomMarkerStyle {
   const RoomMarkerStyle({required this.self, required this.car});
+  // 줌 18의 도로를 가리지 않도록 나·상대 모두 같은 작은 프로필을 쓴다.
+  static const phoneDiameter = 28.0;
+  static const carDiameter = 32.0;
+  static const directionInset = 4.0;
+  static const labelHeight = 12.0;
+  static const labelFontSize = 9.0;
   final bool self, car;
-  double get diameter => self ? (car ? 56 : 40) : (car ? 48 : 36);
+  double get diameter => car ? carDiameter : phoneDiameter;
+  double get directionDiameter => diameter + directionInset * 2;
   double get opacity => self ? 1 : .55;
   int get globalZIndex => self ? 300000 : 200000;
+  Size get directionSize => Size.square(directionDiameter);
   Size get size =>
-      self ? Size.square(diameter) : Size(diameter + 24, diameter + 16);
+      Size(directionDiameter, directionDiameter + (self ? 0 : labelHeight));
+  // 아래 이름표까지 포함한 비트맵의 중심이 아닌, 프로필의 중심이 GPS 좌표다.
+  Offset get anchor => Offset(.5, directionDiameter / 2 / size.height);
+  Alignment get alignment => Alignment(0, 1 - 2 * anchor.dy);
 }
 
 class RoomCarMarker extends StatelessWidget {
@@ -27,16 +37,13 @@ class RoomCarMarker extends StatelessWidget {
     required this.position,
     required this.self,
     this.car = false,
-    this.rotateHeading = true,
     this.applyOpacity = true,
-    this.carIcon,
     this.api,
     this.avatarImage,
     this.avatarLoadFailed = false,
   });
   final RoomMapPosition position;
-  final bool self, car, rotateHeading, applyOpacity;
-  final Widget? carIcon;
+  final bool self, car, applyOpacity;
   final ApiClient? api;
   final ui.Image? avatarImage;
   final bool avatarLoadFailed;
@@ -44,124 +51,119 @@ class RoomCarMarker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final style = RoomMarkerStyle(self: self, car: car);
-    final heading = rotateHeading
-        ? (position.fix.heading ?? 0) * math.pi / 180
-        : 0.0;
     return Semantics(
       label: '${position.name}${self ? ", 나" : ""}',
       child: Opacity(
         opacity: applyOpacity ? style.opacity : 1,
         child: SizedBox.fromSize(
           size: style.size,
-          child: self
-              ? Transform.rotate(
-                  angle: heading,
-                  child: CustomPaint(
-                    key: const ValueKey('gps-marker'),
-                    painter: RoomGpsPainter(
-                      hasHeading: position.fix.heading != null,
-                      color: rainbowColor(position.order),
+          child: Stack(
+            children: [
+              Positioned(
+                left: RoomMarkerStyle.directionInset,
+                top: RoomMarkerStyle.directionInset,
+                child: MemberAvatar(
+                  member: Member(
+                    position.fix.handle,
+                    position.name,
+                    '',
+                    avatar: avatarLoadFailed ? const Avatar() : position.avatar,
+                    order: position.order,
+                  ),
+                  diameter: style.diameter,
+                  api: api,
+                  defaultMascot: true,
+                  decodedImage: avatarImage,
+                  imageResolved: avatarImage != null,
+                  // 브이월드 사진 로딩·실패 중에도 프로필 규칙을 유지한다.
+                  fallback: Image.asset(
+                    'assets/avatars/mascot-01.png',
+                    fit: BoxFit.contain,
+                  ),
+                ),
+              ),
+              if (!self)
+                Positioned(
+                  left: RoomMarkerStyle.directionInset,
+                  top: style.directionDiameter + 1,
+                  width: style.diameter,
+                  child: Container(
+                    color: UnavoColors.text,
+                    child: Text(
+                      position.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      textScaler: TextScaler.noScaling,
+                      style: const TextStyle(
+                        fontSize: RoomMarkerStyle.labelFontSize,
+                        height: 1.1,
+                        color: UnavoColors.ink,
+                      ),
                     ),
                   ),
-                )
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (!avatarLoadFailed)
-                      MemberAvatar(
-                        member: Member(
-                          position.fix.handle,
-                          position.name,
-                          '',
-                          avatar: position.avatar,
-                          order: position.order,
-                        ),
-                        diameter: style.diameter,
-                        api: api,
-                        defaultMascot: true,
-                        decodedImage: avatarImage,
-                        imageResolved: avatarImage != null,
-                      )
-                    else
-                      Transform.rotate(
-                        angle: heading,
-                        child: Container(
-                          width: style.diameter,
-                          height: style.diameter,
-                          padding: const EdgeInsets.all(3),
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: UnavoColors.text,
-                            border: Border.all(
-                              color: rainbowColor(position.order),
-                              width: 3,
-                            ),
-                          ),
-                          child:
-                              carIcon ??
-                              UnavoIcon(
-                                'car',
-                                size: style.diameter - 12,
-                                color: UnavoColors.ink,
-                              ),
-                        ),
-                      ),
-                    Container(
-                      color: UnavoColors.text,
-                      padding: const EdgeInsets.symmetric(horizontal: 3),
-                      child: Text(
-                        position.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 10,
-                          height: 1.2,
-                          color: UnavoColors.ink,
-                        ),
-                      ),
-                    ),
-                  ],
                 ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-class RoomGpsPainter extends CustomPainter {
-  const RoomGpsPainter({required this.hasHeading, required this.color});
-  final bool hasHeading;
+/// 프로필과 별도 레이어다. 네이버는 북쪽 그림을 한 번 캡처한 뒤 SDK angle만
+/// 갱신하고, 브이월드는 지도와 함께 회전하는 마커 안에서 이동 방위를 적용한다.
+class RoomDirectionIndicator extends StatelessWidget {
+  const RoomDirectionIndicator({
+    super.key,
+    required this.direction,
+    required this.color,
+    required this.self,
+    this.car = false,
+    this.applyOpacity = true,
+  });
+  final double direction;
   final Color color;
+  final bool self, car, applyOpacity;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = RoomMarkerStyle(self: self, car: car);
+    return IgnorePointer(
+      child: Opacity(
+        opacity: applyOpacity ? style.opacity : 1,
+        child: SizedBox.fromSize(
+          size: style.directionSize,
+          child: Transform.rotate(
+            angle: direction * math.pi / 180,
+            child: CustomPaint(painter: RoomDirectionPainter(color: color)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class RoomDirectionPainter extends CustomPainter {
+  const RoomDirectionPainter({required this.color});
+  final Color color;
+
   @override
   void paint(Canvas canvas, Size size) {
-    final center = size.center(Offset.zero);
-    final radius = size.shortestSide;
-    if (hasHeading) {
-      canvas.drawPath(
-        Path()
-          ..moveTo(center.dx, center.dy)
-          ..arcTo(
-            Rect.fromCircle(center: center, radius: radius * .5),
-            -math.pi * .75,
-            math.pi * .5,
-            false,
-          )
-          ..close(),
-        Paint()..color = color.withValues(alpha: .25),
-      );
-    }
-    canvas.drawCircle(
-      center,
-      radius * .32,
-      Paint()..color = color.withValues(alpha: .16),
+    final x = size.width / 2;
+    canvas.drawPath(
+      Path()
+        ..moveTo(x, .5)
+        ..lineTo(x + 3, RoomMarkerStyle.directionInset - .5)
+        ..lineTo(x - 3, RoomMarkerStyle.directionInset - .5)
+        ..close(),
+      Paint()..color = color,
     );
-    canvas.drawCircle(center, radius * .19, Paint()..color = Colors.white);
-    canvas.drawCircle(center, radius * .14, Paint()..color = color);
   }
 
   @override
-  bool shouldRepaint(RoomGpsPainter oldDelegate) =>
-      hasHeading != oldDelegate.hasHeading || color != oldDelegate.color;
+  bool shouldRepaint(RoomDirectionPainter oldDelegate) =>
+      color != oldDelegate.color;
 }
 
 class RoomMapControls extends StatelessWidget {

@@ -5,7 +5,6 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 
 import '../net/models.dart';
 import '../net/api_client.dart';
@@ -19,8 +18,11 @@ import 'room_map_widgets.dart';
 class NaverRoomMapController implements RoomMapController {
   _NaverRoomMapState? _state;
   @override
-  void moveTo(double latitude, double longitude, {double zoom = 16}) =>
-      _state?._moveTo(NLatLng(latitude, longitude), zoom);
+  void moveTo(
+    double latitude,
+    double longitude, {
+    double zoom = RoomFollowCameraPolicy.navigationZoom,
+  }) => _state?._moveTo(NLatLng(latitude, longitude), zoom);
   @override
   void follow() => _state?._queueFollow();
   @override
@@ -40,25 +42,55 @@ NMarker roomNaverMarker({
   required NOverlayImage icon,
   required bool self,
   required bool car,
-  bool profile = false,
 }) {
   final style = RoomMarkerStyle(self: self, car: car);
   return NMarker(
     id: handle,
     position: _point(fix),
     icon: icon,
-    angle: !self && profile ? 0 : fix.heading ?? 0,
-    isFlat: true,
-    anchor: NPoint.relativeCenter,
+    // 사진·이름표는 지도 회전·기울임과 무관하게 화면에서 똑바로 유지한다.
+    angle: 0,
+    isFlat: false,
+    anchor: NPoint(style.anchor.dx, style.anchor.dy),
     size: style.size,
     alpha: style.opacity,
   )..setGlobalZIndex(style.globalZIndex);
 }
 
+NMarker roomNaverDirectionMarker({
+  required String handle,
+  required LocationFix fix,
+  required NOverlayImage icon,
+  required bool self,
+  required bool car,
+  required double? direction,
+  double cameraBearing = 0,
+  double cameraTilt = 0,
+}) {
+  final style = RoomMarkerStyle(self: self, car: car);
+  return NMarker(
+      id: 'direction:$handle',
+      position: _point(fix),
+      icon: icon,
+      angle: roomScreenDirection(
+        direction ?? 0,
+        cameraBearing: cameraBearing,
+        cameraTilt: cameraTilt,
+      ),
+      // flat 마커는 tilt 50에서 프로필 안쪽으로 눕는다. 화면 크기를 유지하며
+      // SDK 카메라 스트림으로 화면 방위만 보정하여 항상 테두리 바깥에 둔다.
+      isFlat: false,
+      anchor: NPoint.relativeCenter,
+      size: style.directionSize,
+      alpha: style.opacity,
+    )
+    ..setIsVisible(direction != null)
+    ..setGlobalZIndex(style.globalZIndex + 1);
+}
+
 typedef RoomMarkerKey = (
   String,
   String,
-  bool,
   bool,
   Brightness,
   bool,
@@ -76,7 +108,6 @@ RoomMarkerKey roomMarkerCacheKey({
   position.fix.handle,
   position.name,
   self,
-  position.fix.heading != null,
   brightness,
   car,
   position.avatar.kind,
@@ -162,9 +193,15 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   NaverMapController? _camera;
   late final NCameraPosition _initialCamera;
   final _markers = <String, NMarker>{};
+  final _directionMarkers = <String, NMarker>{};
   final _markerKeys = <String, RoomMarkerKey>{};
   final _icons = RoomMarkerIconCache();
+  // 7가지 입장 색 × 폰/차량의 북쪽 삼각형만 캡처한다. 방위는 키에 없다.
+  final _directionIcons = <(Color, bool), NOverlayImage>{};
+  final _directions = RoomDirectionTracker();
   final _assetImages = <String, ui.Image>{};
+  StreamSubscription<OnCameraChangedParams>? _cameraSubscription;
+  double _cameraBearing = 0, _cameraTilt = 0;
   NPathOverlay? _path;
   List<LocationFix> _pathPoints = const [];
   bool _syncing = false, _syncAgain = false, _loggedError = false;
@@ -177,6 +214,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
 
   LocationFix? get _self => widget.positions[widget.selfHandle]?.fix;
   LocationFix? get _target => widget.positions[widget.targetHandle]?.fix;
+  double? get _selfDirection => _directions[widget.selfHandle];
   bool get _canFollow =>
       mounted &&
       _camera != null &&
@@ -188,19 +226,22 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   void initState() {
     super.initState();
     widget.controller._state = this;
+    _directions.update(widget.positions.values.map((position) => position.fix));
     final initial =
         _self ?? _target ?? widget.positions.values.firstOrNull?.fix;
     _initialCamera = NCameraPosition(
       target: initial == null
           ? const NLatLng(37.5665, 126.978)
           : _point(initial),
-      zoom: 16,
+      zoom: RoomFollowCameraPolicy.navigationZoom,
     );
   }
 
   @override
   void didUpdateWidget(NaverRoomMap oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final previousDirection = _selfDirection;
+    _directions.update(widget.positions.values.map((position) => position.fix));
     if (oldWidget.controller != widget.controller) {
       if (oldWidget.controller._state == this)
         oldWidget.controller._state = null;
@@ -229,9 +270,9 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     if (!widget.following &&
         _headingAligned == true &&
         !_paused &&
-        oldWidget.positions[oldWidget.selfHandle]?.fix.heading !=
-            _self?.heading) {
-      unawaited(_rotateCamera(_self?.heading ?? 0));
+        previousDirection != _selfDirection &&
+        _selfDirection != null) {
+      unawaited(_rotateCamera(_selfDirection!));
     }
     if (!widget.following || _self == null) {
       _cancelFollow();
@@ -259,10 +300,25 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     if (!mounted) return;
     _camera = camera;
     _markers.clear();
+    _directionMarkers.clear();
     _markerKeys.clear();
+    _cameraBearing = _initialCamera.bearing;
+    _cameraTilt = _initialCamera.tilt;
+    unawaited(_cameraSubscription?.cancel());
+    _cameraSubscription = camera.nowCameraPositionStream.listen((event) {
+      if (!_isCurrent(camera)) return;
+      _cameraBearing = event.position.bearing;
+      _cameraTilt = event.position.tilt;
+      _updateDirectionAngles();
+    });
     _path = null;
     _pathPoints = const [];
     unawaited(_syncOverlays());
+    if (_headingAligned == true &&
+        !widget.following &&
+        _selfDirection != null) {
+      unawaited(_rotateCamera(_selfDirection!));
+    }
     _queueFollow();
   }
 
@@ -274,72 +330,83 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
         car: widget.car,
       );
 
-  // fromWidget는 첫 paint 직후 캡처한다. 비동기 SvgPicture의 빈 첫 프레임을
-  // 피하려고 기존 SVG를 먼저 디코딩하고 같은 마커 위젯에 RawImage로 넣는다.
-  Future<ui.Image?> _markerAsset(String name, double size) async {
-    final assetKey = '$name-$size';
-    final cached = _assetImages[assetKey];
-    if (cached != null) return cached;
-    final pixels = (size * MediaQuery.devicePixelRatioOf(context)).ceil();
-    final picture = await vg.loadPicture(
-      SvgAssetLoader('assets/icons/ui-$name.svg'),
-      context,
-    );
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder)
-      ..scale(pixels / picture.size.width, pixels / picture.size.height);
-    canvas.drawPicture(picture.picture);
-    final scaled = recorder.endRecording();
-    try {
-      final image = await scaled.toImage(pixels, pixels);
-      if (!mounted) {
-        image.dispose();
-        return null;
-      }
-      return _assetImages[assetKey] = image;
-    } finally {
-      scaled.dispose();
-      picture.picture.dispose();
-    }
-  }
-
   Future<NOverlayImage?> _markerIcon(
     RoomMarkerKey key,
     RoomMapPosition position,
   ) => _icons.load(key, () async {
-    final style = RoomMarkerStyle(self: key.$3, car: key.$6);
-    final avatar = key.$3 ? null : await _markerAvatar(position);
-    final failed = !key.$3 && avatar == null;
-    final car = key.$3 || avatar != null
-        ? null
-        : await _markerAsset('car', style.diameter);
-    if (!mounted || (!key.$3 && avatar == null && car == null)) return null;
+    final style = RoomMarkerStyle(self: key.$3, car: key.$5);
+    var avatar = await _markerAvatar(position);
+    final failed = avatar == null;
+    avatar ??= await _defaultMarkerAvatar();
+    if (!mounted || avatar == null) return null;
     final icon = await NOverlayImage.fromWidget(
       context: context,
       size: style.size,
       widget: RoomCarMarker(
         position: position,
         self: key.$3,
-        car: key.$6,
+        car: key.$5,
         avatarImage: avatar,
         avatarLoadFailed: failed,
-        // SDK 회전·alpha를 한 번만 적용한다. 이름은 전체 표시 이름별로 캐시한다.
-        rotateHeading: false,
+        // SDK alpha만 적용한다. 사진과 이름의 비트맵은 방향에 의존하지 않는다.
         applyOpacity: false,
-        carIcon: car == null
-            ? null
-            : RawImage(
-                image: car,
-                width: style.diameter,
-                height: style.diameter,
-                color: UnavoColors.ink,
-                colorBlendMode: BlendMode.srcIn,
-              ),
       ),
     );
     if (!mounted) return null;
     return (icon: icon, failed: failed);
   });
+
+  Future<ui.Image?> _defaultMarkerAvatar() async {
+    final cached = _assetImages['default-avatar'];
+    if (cached != null) return cached;
+    if (!mounted) return null;
+    final image = await decodeAvatar(
+      const Member('', '', ''),
+      bundle: DefaultAssetBundle.of(context),
+      defaultMascot: true,
+    );
+    if (!mounted) {
+      image?.dispose();
+      return null;
+    }
+    if (image != null) _assetImages['default-avatar'] = image;
+    return image;
+  }
+
+  Future<NOverlayImage?> _directionIcon(Color color, bool car) async {
+    final key = (color, car);
+    final cached = _directionIcons[key];
+    if (cached != null) return cached;
+    final icon = await NOverlayImage.fromWidget(
+      context: context,
+      size: RoomMarkerStyle(self: false, car: car).directionSize,
+      widget: RoomDirectionIndicator(
+        direction: 0,
+        color: color,
+        self: false,
+        car: car,
+        applyOpacity: false,
+      ),
+    );
+    if (!mounted) return null;
+    return _directionIcons[key] = icon;
+  }
+
+  void _updateDirectionAngles() {
+    for (final entry in _directionMarkers.entries) {
+      final direction = _directions[entry.key];
+      final marker = entry.value;
+      final visible = direction != null;
+      if (marker.isVisible != visible) marker.setIsVisible(visible);
+      if (direction == null) continue;
+      final angle = roomScreenDirection(
+        direction,
+        cameraBearing: _cameraBearing,
+        cameraTilt: _cameraTilt,
+      );
+      if (marker.angle != angle) marker.setAngle(angle);
+    }
+  }
 
   Future<ui.Image?> _markerAvatar(RoomMapPosition position) async {
     final avatar = position.avatar;
@@ -398,6 +465,12 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       _markers.remove(handle);
       _markerKeys.remove(handle);
     }
+    for (final handle in _directionMarkers.keys.toList()) {
+      if (widget.positions.containsKey(handle)) continue;
+      await camera.deleteOverlay(_directionMarkers[handle]!.info);
+      if (!_isCurrent(camera)) return;
+      _directionMarkers.remove(handle);
+    }
     _icons.removeWhere((key) {
       final current = widget.positions[key.$1];
       return current == null || _keyFor(key.$1, current) != key;
@@ -429,7 +502,6 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
           icon: icon,
           self: entry.key == widget.selfHandle,
           car: widget.car,
-          profile: entry.key != widget.selfHandle,
         );
         await camera.addOverlay(added);
         if (!_isCurrent(camera)) return;
@@ -437,17 +509,12 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       } else {
         final point = _point(current.fix);
         if (marker.position != point) marker.setPosition(point);
-        final angle = entry.key != widget.selfHandle
-            ? 0.0
-            : current.fix.heading ?? 0;
-        if (marker.angle != angle) {
-          marker.setAngle(angle);
-        }
         if (_markerKeys[entry.key] != key || marker.icon != icon) {
           marker.setIcon(icon);
           marker.setSize(style.size);
           marker.setAlpha(style.opacity);
           marker.setGlobalZIndex(style.globalZIndex);
+          marker.setAnchor(NPoint(style.anchor.dx, style.anchor.dy));
         }
       }
       if (_icons.hasResolved(key)) {
@@ -456,7 +523,46 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       } else {
         _markerKeys.remove(entry.key);
       }
+
+      final direction = _directions[entry.key];
+      var arrow = _directionMarkers[entry.key];
+      if (direction == null) {
+        if (arrow?.isVisible == true) arrow!.setIsVisible(false);
+        continue;
+      }
+      final directionIcon = await _directionIcon(
+        rainbowColor(current.order),
+        widget.car,
+      );
+      if (!_isCurrent(camera) || directionIcon == null) return;
+      final latest = widget.positions[entry.key];
+      if (latest == null || _keyFor(entry.key, latest) != key) continue;
+      if (arrow == null) {
+        arrow = roomNaverDirectionMarker(
+          handle: entry.key,
+          fix: latest.fix,
+          icon: directionIcon,
+          self: entry.key == widget.selfHandle,
+          car: widget.car,
+          direction: _directions[entry.key],
+          cameraBearing: _cameraBearing,
+          cameraTilt: _cameraTilt,
+        );
+        await camera.addOverlay(arrow);
+        if (!_isCurrent(camera)) return;
+        _directionMarkers[entry.key] = arrow;
+      } else {
+        final point = _point(latest.fix);
+        if (arrow.position != point) arrow.setPosition(point);
+        if (arrow.icon != directionIcon) arrow.setIcon(directionIcon);
+        if (arrow.size != style.directionSize)
+          arrow.setSize(style.directionSize);
+        if (arrow.alpha != style.opacity) arrow.setAlpha(style.opacity);
+        if (arrow.globalZIndex != style.globalZIndex + 1)
+          arrow.setGlobalZIndex(style.globalZIndex + 1);
+      }
     }
+    _updateDirectionAngles();
 
     final points = roomPathPoints(widget.trail);
     if (points.isEmpty) {
@@ -517,7 +623,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       final next = naverFollowCamera(
         self: _self,
         leader: _target,
-        trail: widget.trail,
+        direction: _selfDirection,
         currentBearing: current.bearing,
         isLeader: widget.selfHandle == widget.targetHandle,
       );
@@ -562,8 +668,10 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     if (_pointers != 0) return;
     _resumeTimer = Timer(const Duration(seconds: 5), () {
       _paused = false;
-      if (_headingAligned == true && !widget.following) {
-        unawaited(_rotateCamera(_self?.heading ?? 0));
+      if (_headingAligned == true &&
+          !widget.following &&
+          _selfDirection != null) {
+        unawaited(_rotateCamera(_selfDirection!));
       }
       _queueFollow();
     });
@@ -620,7 +728,9 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     _cancelFollow();
     _resumeTimer?.cancel();
     _paused = false;
-    unawaited(_rotateCamera(enabled ? (_self?.heading ?? 0) : 0));
+    if (!enabled || _selfDirection != null) {
+      unawaited(_rotateCamera(enabled ? _selfDirection! : 0));
+    }
   }
 
   Future<void> _rotateCamera(double bearing) async {
@@ -637,6 +747,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     }
     _assetImages.clear();
     _icons.clear();
+    _directionIcons.clear();
   }
 
   @override
@@ -644,6 +755,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     _cancelFollow();
     _resumeTimer?.cancel();
     _clock.stop();
+    unawaited(_cameraSubscription?.cancel());
     _camera = null;
     if (widget.controller._state == this) widget.controller._state = null;
     // 네이티브 컨트롤러는 NaverMap.dispose가 소유한다.

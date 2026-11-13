@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -20,6 +18,7 @@ LocationFix _fix(
   double lat,
   double lng, {
   double? heading,
+  double? speed,
   int seq = 0,
 }) => LocationFix(
   handle: handle,
@@ -29,6 +28,7 @@ LocationFix _fix(
   at: 1000 + seq * 1000,
   seq: seq,
   heading: heading,
+  speed: speed,
 );
 
 final _self = _fix('bob', 37.5, 127, heading: 90);
@@ -43,6 +43,7 @@ void main() {
       self: _self,
       leader: _leader,
       trail: [behind, farther, ahead],
+      direction: 90,
     )!;
     expect(bounds.self, _self);
     expect(bounds.ahead, ahead);
@@ -170,7 +171,7 @@ void main() {
     controller.dispose();
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  testWidgets('키 없는 지도는 GPS 점·상대 기본 마스코트·상대 이름·궤적·출처를 표시한다', (tester) async {
+  testWidgets('키 없는 지도도 나·상대 기본 프로필·작은 이름표·궤적·출처를 표시한다', (tester) async {
     final controller = RoomMapController();
     final trail = [_fix('alice', 37.5, 127.0002), _leader];
     await _pumpMap(tester, controller, trail: trail);
@@ -189,26 +190,25 @@ void main() {
       (widget) => widget is UnavoIcon && widget.name == 'star',
     );
     expect(cars, findsNothing, reason: '프로필 미설정 상대도 차 아이콘 대신 기본 마스코트를 쓴다');
-    final avatar = tester.widget<MemberAvatar>(find.byType(MemberAvatar));
-    expect(avatar.defaultMascot, isTrue, reason: '브이월드도 공통 마커의 기본 마스코트를 사용한다');
-    expect(
-      avatar.member.avatar.kind,
-      isNull,
-      reason: '기본 렌더링은 저장된 프로필을 바꾸지 않는다',
-    );
+    final avatars = tester.widgetList<MemberAvatar>(find.byType(MemberAvatar));
+    expect(avatars, hasLength(2));
+    for (final avatar in avatars) {
+      expect(avatar.defaultMascot, isTrue, reason: '나·상대 모두 기본 마스코트를 사용한다');
+      expect(avatar.member.avatar.kind, isNull, reason: '저장된 프로필을 바꾸지 않는다');
+      expect(avatar.diameter, 28);
+    }
     expect(stars, findsNothing);
-    expect(find.byKey(const ValueKey('gps-marker')), findsOneWidget);
+    expect(find.byKey(const ValueKey('gps-marker')), findsNothing);
     expect(find.text('보비'), findsNothing);
     expect(find.text('앨리스'), findsOneWidget);
-    final rotations = tester.widgetList<Transform>(find.byType(Transform));
     expect(
-      rotations.any(
-        (rotation) =>
-            (rotation.transform.entry(1, 0) - math.sin(math.pi / 2)).abs() <
-            .0001,
-      ),
-      isTrue,
+      find.byType(RoomDirectionIndicator),
+      findsNothing,
+      reason: '첫 표본만으로 방향을 표시하지 않는다',
     );
+    for (final marker in markers) {
+      expect(marker.rotate, isTrue, reason: '사진·이름표는 지도 회전을 상쇄한다');
+    }
     final line = tester
         .widget<PolylineLayer>(find.byType(PolylineLayer))
         .polylines
@@ -232,7 +232,7 @@ void main() {
         .widget<FlutterMap>(find.byType(FlutterMap))
         .mapController!
         .camera;
-    expect(camera().zoom, 17);
+    expect(camera().zoom, 18);
     expect(camera().center, LatLng(_self.lat, _self.lng));
     final gesture = await tester.startGesture(
       tester.getCenter(find.byType(FlutterMap)),
@@ -251,13 +251,13 @@ void main() {
     await tester.pump();
     expect(camera().center, isNot(dragged));
     expect(camera().center, LatLng(_self.lat, _self.lng));
-    expect(camera().zoom, 14);
+    expect(camera().zoom, 15);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     controller.dispose();
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  testWidgets('지도 버튼은 재중심 줌 유지·heading 회전·북쪽 복귀, 상대만 반투명이다', (tester) async {
+  testWidgets('지도 버튼은 줌 유지·계산된 이동 방향 정렬·북쪽 복귀, 상대만 반투명이다', (tester) async {
     final controller = RoomMapController();
     await _pumpMap(tester, controller);
     MapCamera camera() => tester
@@ -272,7 +272,17 @@ void main() {
     expect(camera().center, LatLng(_self.lat, _self.lng));
     await tester.tap(find.byTooltip('방향 정렬'));
     await tester.pump();
-    expect((camera().rotation + 360) % 360, 270);
+    expect(camera().rotation, 0, reason: '아직 이동하지 않았으면 센서 heading을 쓰지 않는다');
+    final movedSelf = _fix(
+      'bob',
+      _self.lat,
+      _self.lng + .0001,
+      seq: 1,
+      heading: 0,
+      speed: 10,
+    );
+    await _pumpMap(tester, controller, self: movedSelf);
+    expect((camera().rotation + 360) % 360, closeTo(270, .001));
     await tester.tap(find.byTooltip('방향 정렬'));
     await tester.pump();
     expect(camera().rotation, 0);
@@ -294,6 +304,113 @@ void main() {
         self ? 1 : .55,
       );
     }
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('기본 카메라·moveTo 줌18과 차량 프로필32·방향 포함40을 사용한다', (tester) async {
+    final controller = RoomMapController();
+    await _pumpMap(tester, controller, car: true);
+    final map = tester.widget<FlutterMap>(find.byType(FlutterMap));
+    expect(map.options.initialZoom, 18);
+    expect(map.mapController!.camera.zoom, 18);
+    controller.moveTo(_self.lat, _self.lng);
+    await tester.pump();
+    expect(map.mapController!.camera.zoom, 18);
+    for (final avatar in tester.widgetList<MemberAvatar>(
+      find.byType(MemberAvatar),
+    )) {
+      expect(avatar.diameter, 32);
+    }
+    for (final marker
+        in tester.widget<MarkerLayer>(find.byType(MarkerLayer)).markers) {
+      expect(marker.width, 40);
+      final self = marker.key == const ValueKey<String>('map-marker-bob');
+      expect(
+        marker.alignment,
+        RoomMarkerStyle(self: self, car: true).alignment,
+      );
+    }
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('브이월드 나·상대 방향은 독립적이며 지도 회전에도 사진은 서 있고 삼각형은 이동을 가리킨다', (
+    tester,
+  ) async {
+    final controller = RoomMapController();
+    await _pumpMap(tester, controller);
+    final movedSelf = _fix(
+      'bob',
+      _self.lat,
+      _self.lng + .0001,
+      seq: 1,
+      heading: 0,
+      speed: 10,
+    );
+    final movedOther = _fix('alice', _leader.lat + .00005, _leader.lng, seq: 1);
+    await _pumpMap(tester, controller, self: movedSelf, leader: movedOther);
+    final markers = tester
+        .widget<MarkerLayer>(find.byType(MarkerLayer))
+        .markers;
+    expect(markers.map((marker) => marker.key), [
+      const ValueKey<String>('map-direction-alice'),
+      const ValueKey<String>('map-marker-alice'),
+      const ValueKey<String>('map-direction-bob'),
+      const ValueKey<String>('map-marker-bob'),
+    ]);
+    for (final marker in markers) {
+      expect(marker.rotate, marker.child is RoomCarMarker);
+    }
+    Offset directionVector(bool self) {
+      final indicator = find.byWidgetPredicate(
+        (widget) => widget is RoomDirectionIndicator && widget.self == self,
+      );
+      final box = tester.renderObject<RenderBox>(
+        find.descendant(of: indicator, matching: find.byType(CustomPaint)),
+      );
+      final center = box.size.center(Offset.zero);
+      return box.localToGlobal(Offset(center.dx, 0)) -
+          box.localToGlobal(center);
+    }
+
+    expect(directionVector(true).dx, greaterThan(0));
+    expect(directionVector(true).dy, closeTo(0, .001));
+    expect(directionVector(false).dx, closeTo(0, .001));
+    expect(directionVector(false).dy, lessThan(0));
+    controller.alignHeading(true);
+    await tester.pump();
+    expect(directionVector(true).dx, closeTo(0, .001));
+    expect(directionVector(true).dy, lessThan(0));
+    expect(directionVector(false).dx, lessThan(0));
+    expect(directionVector(false).dy, closeTo(0, .001));
+    for (final avatar in find.byType(MemberAvatar).evaluate()) {
+      final box = avatar.renderObject! as RenderBox;
+      final horizontal =
+          box.localToGlobal(const Offset(1, 0)) -
+          box.localToGlobal(Offset.zero);
+      expect(horizontal.dx, closeTo(1, .001));
+      expect(horizontal.dy, closeTo(0, .001), reason: '프로필 사진 자체는 항상 똑바로 유지한다');
+    }
+    final previous = directionVector(true);
+    await _pumpMap(
+      tester,
+      controller,
+      self: _fix(
+        'bob',
+        movedSelf.lat,
+        movedSelf.lng,
+        seq: 2,
+        heading: 180,
+        speed: 0,
+      ),
+      leader: movedOther,
+      brightness: Brightness.dark,
+    );
+    expect(directionVector(true).dx, closeTo(previous.dx, .001));
+    expect(directionVector(true).dy, closeTo(previous.dy, .001));
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     controller.dispose();
@@ -337,6 +454,8 @@ Future<void> _pumpMap(
   bool follow = false,
   Map<String, RoomMapPosition>? positions,
   LocationFix? leader,
+  LocationFix? self,
+  bool car = false,
   List<LocationFix> trail = const [],
   Brightness brightness = Brightness.light,
   MapTiles tiles = const MapTiles(),
@@ -354,7 +473,7 @@ Future<void> _pumpMap(
               positions:
                   positions ??
                   {
-                    'bob': RoomMapPosition(_self, displayName: '보비'),
+                    'bob': RoomMapPosition(self ?? _self, displayName: '보비'),
                     'alice': RoomMapPosition(
                       leader ?? _leader,
                       displayName: '앨리스',
@@ -366,6 +485,7 @@ Future<void> _pumpMap(
               following: follow,
               brightness: brightness,
               tiles: tiles,
+              car: car,
             ),
           ),
         ),

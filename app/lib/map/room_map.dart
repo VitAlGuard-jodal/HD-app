@@ -18,7 +18,11 @@ abstract class RoomMapController {
     MapProvider.naver => NaverRoomMapController(),
     MapProvider.vworld => VworldRoomMapController(),
   };
-  void moveTo(double latitude, double longitude, {double zoom = 16});
+  void moveTo(
+    double latitude,
+    double longitude, {
+    double zoom = RoomFollowCameraPolicy.navigationZoom,
+  });
   void follow();
   void recenter();
   void alignHeading(bool enabled);

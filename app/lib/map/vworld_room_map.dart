@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../net/models.dart';
 import '../net/api_client.dart';
+import '../ui/member_colors.dart';
 import '../ui/theme.dart';
 import 'map_tiles.dart';
 import 'room_map.dart' show RoomMapController;
@@ -16,8 +17,11 @@ import 'room_map_widgets.dart';
 class VworldRoomMapController implements RoomMapController {
   _VworldRoomMapState? _state;
   @override
-  void moveTo(double latitude, double longitude, {double zoom = 16}) =>
-      _state?._moveTo(LatLng(latitude, longitude), zoom);
+  void moveTo(
+    double latitude,
+    double longitude, {
+    double zoom = RoomFollowCameraPolicy.navigationZoom,
+  }) => _state?._moveTo(LatLng(latitude, longitude), zoom);
   @override
   void follow() => _state?._queueFollow();
   @override
@@ -63,6 +67,7 @@ class VworldRoomMap extends StatefulWidget {
 
 class _VworldRoomMapState extends State<VworldRoomMap> {
   final _camera = MapController();
+  final _directions = RoomDirectionTracker();
   Timer? _resumeTimer;
   bool _ready = false, _paused = false, _followQueued = false;
   int _pointers = 0;
@@ -72,20 +77,26 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
   MapTiles get _tiles => widget.tiles ?? mapTiles;
   LocationFix? get _self => widget.positions[widget.selfHandle]?.fix;
   LocationFix? get _target => widget.positions[widget.targetHandle]?.fix;
+  double? get _selfDirection => _directions[widget.selfHandle];
   double get _maximumZoom => _tiles.maximumZoom(widget.brightness);
   double get _minimumZoom => widget.following
-      ? math.min(18, _tiles.minimumZoom(widget.brightness))
+      ? math.min(
+          RoomFollowCameraPolicy.maximumZoom,
+          _tiles.minimumZoom(widget.brightness),
+        )
       : _tiles.minimumZoom(widget.brightness);
 
   @override
   void initState() {
     super.initState();
     (widget.controller as VworldRoomMapController)._state = this;
+    _directions.update(widget.positions.values.map((position) => position.fix));
   }
 
   @override
   void didUpdateWidget(VworldRoomMap oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _directions.update(widget.positions.values.map((position) => position.fix));
     if (oldWidget.controller != widget.controller) {
       (oldWidget.controller as VworldRoomMapController)._state = null;
       (widget.controller as VworldRoomMapController)._state = this;
@@ -104,14 +115,16 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
       _followQueued = false;
       if (!mounted || _paused) return;
       if (!widget.following) {
-        if (_headingAligned == true) _camera.rotate(-(_self?.heading ?? 0));
+        if (_headingAligned == true && _selfDirection != null)
+          _camera.rotate(-_selfDirection!);
         return;
       }
       final next = naverFollowCamera(
         self: _self,
         leader: _target,
-        trail: widget.trail,
+        direction: _selfDirection,
         currentBearing: -_camera.camera.rotation,
+        isLeader: widget.selfHandle == widget.targetHandle,
       );
       if (next == null) return;
       _camera.move(
@@ -156,7 +169,9 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
     if (!_ready) return;
     _resumeTimer?.cancel();
     _paused = false;
-    _camera.rotate(enabled ? -(_self?.heading ?? 0) : 0);
+    if (!enabled || _selfDirection != null) {
+      _camera.rotate(enabled ? -_selfDirection! : 0);
+    }
   }
 
   @override
@@ -193,7 +208,10 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
                 initialCenter: initial == null
                     ? const LatLng(37.5665, 126.978)
                     : _point(initial),
-                initialZoom: 16.0.clamp(_minimumZoom, _maximumZoom),
+                initialZoom: RoomFollowCameraPolicy.navigationZoom.clamp(
+                  _minimumZoom,
+                  _maximumZoom,
+                ),
                 minZoom: _minimumZoom,
                 maxZoom: _maximumZoom,
                 backgroundColor: widget.brightness == Brightness.dark
@@ -235,24 +253,7 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
                         (entry) => entry.key == widget.selfHandle,
                       ),
                     ])
-                      Marker(
-                        key: ValueKey('map-marker-${entry.key}'),
-                        point: _point(entry.value.fix),
-                        width: RoomMarkerStyle(
-                          self: entry.key == widget.selfHandle,
-                          car: widget.car,
-                        ).size.width,
-                        height: RoomMarkerStyle(
-                          self: entry.key == widget.selfHandle,
-                          car: widget.car,
-                        ).size.height,
-                        child: RoomCarMarker(
-                          api: widget.api,
-                          position: entry.value,
-                          self: entry.key == widget.selfHandle,
-                          car: widget.car,
-                        ),
-                      ),
+                      ..._memberMarkers(entry.key, entry.value),
                   ],
                 ),
               ],
@@ -276,6 +277,45 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Iterable<Marker> _memberMarkers(
+    String handle,
+    RoomMapPosition position,
+  ) sync* {
+    final self = handle == widget.selfHandle;
+    final style = RoomMarkerStyle(self: self, car: widget.car);
+    final direction = _directions[handle];
+    if (direction != null) {
+      yield Marker(
+        key: ValueKey<String>('map-direction-$handle'),
+        point: _point(position.fix),
+        width: style.directionSize.width,
+        height: style.directionSize.height,
+        // 지도와 함께 회전: 실제 방위 + camera.rotation이 화면 방위가 된다.
+        rotate: false,
+        child: RoomDirectionIndicator(
+          direction: direction,
+          color: rainbowColor(position.order),
+          self: self,
+          car: widget.car,
+        ),
+      );
+    }
+    yield Marker(
+      key: ValueKey<String>('map-marker-$handle'),
+      point: _point(position.fix),
+      width: style.size.width,
+      height: style.size.height,
+      alignment: style.alignment,
+      rotate: true,
+      child: RoomCarMarker(
+        api: widget.api,
+        position: position,
+        self: self,
+        car: widget.car,
       ),
     );
   }
