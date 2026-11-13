@@ -90,13 +90,10 @@ void main() {
         expect(marker.alpha, self ? 1 : .55);
         expect(marker.globalZIndex, self ? 300000 : 200000);
         expect(style.diameter, car ? 32 : 28);
-        expect(style.directionDiameter, car ? 40 : 36);
+        expect(style.directionDiameter, car ? 56 : 50);
         expect(marker.size, style.size);
         expect(marker.anchor.x, .5);
-        expect(
-          marker.anchor.y * marker.size.height,
-          style.directionDiameter / 2,
-        );
+        expect(marker.anchor.y * marker.size.height, style.diameter / 2);
         expect(marker.isFlat, isFalse, reason: '지도 회전·tilt에도 프로필을 똑바로 세운다');
         expect(marker.angle, 0);
       }
@@ -120,7 +117,7 @@ void main() {
         expect(marker.isVisible, direction != null);
         expect(marker.isFlat, isFalse, reason: 'tilt에도 삼각형이 프로필 안으로 눕지 않는다');
         expect(marker.anchor, NPoint.relativeCenter);
-        expect(marker.size, const Size.square(40));
+        expect(marker.size, const Size.square(56));
         expect(marker.alpha, self ? 1 : .55);
         expect(marker.globalZIndex, self ? 300001 : 200001);
         if (direction != null) {
@@ -316,7 +313,7 @@ void main() {
     }
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  testWidgets('삼각형만 별도 회전하며 폰36·차량40dp 안에서 그린다', (tester) async {
+  testWidgets('삼각형만 별도 회전하며 폰50·차량56dp 안에서 그린다', (tester) async {
     for (final car in [false, true]) {
       await tester.pumpWidget(
         MaterialApp(
@@ -332,7 +329,7 @@ void main() {
       );
       expect(
         tester.getSize(find.byType(RoomDirectionIndicator)),
-        Size.square(car ? 40 : 36),
+        Size.square(car ? 56 : 50),
       );
       final transform = tester.widget<Transform>(
         find.descendant(
@@ -352,10 +349,91 @@ void main() {
                   .painter!
               as RoomDirectionPainter;
       expect(painter.color, rainbowColor(3));
+      expect(painter.car, car);
       expect(find.byType(MemberAvatar), findsNothing);
       expect(tester.takeException(), isNull);
     }
   }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('방향 삼각형은 흰 2dp 외곽선·옅은 대비선을 그리며 프로필과 2dp 떨어진다', () {
+    for (final car in [false, true]) {
+      final style = RoomMarkerStyle(self: false, car: car);
+      final painter = RoomDirectionPainter(color: rainbowColor(1), car: car);
+      void paint(Canvas canvas) => painter.paint(canvas, style.directionSize);
+      expect(
+        paint,
+        paints
+          ..path(
+            color: const Color(0x26000000),
+            strokeWidth: 3,
+            style: PaintingStyle.stroke,
+          )
+          ..path(
+            color: Colors.white,
+            strokeWidth: 2,
+            style: PaintingStyle.stroke,
+          )
+          ..path(color: rainbowColor(1), style: PaintingStyle.fill),
+      );
+      expect(
+        paint,
+        paints..something((method, arguments) {
+          if (method != #drawPath) return false;
+          final path = arguments[0] as Path;
+          final stroke = arguments[1] as Paint;
+          expect(
+            path.getBounds().size,
+            car ? const Size(12, 7) : const Size(10, 6),
+          );
+          expect(stroke.strokeJoin, StrokeJoin.round);
+          final bounds = path.getBounds().inflate(stroke.strokeWidth / 2);
+          final profileTop = (style.directionDiameter - style.diameter) / 2;
+          expect(profileTop - bounds.bottom, closeTo(2, .001));
+          expect(bounds.top, greaterThanOrEqualTo(0));
+          expect(bounds.left, greaterThanOrEqualTo(0));
+          expect(bounds.right, lessThanOrEqualTo(style.directionDiameter));
+          final center = style.directionSize.center(Offset.zero);
+          final edge = path.computeMetrics().single;
+          for (var offset = 0.0; offset < edge.length; offset += .5) {
+            final radius =
+                (edge.getTangentForOffset(offset)!.position - center).distance;
+            expect(
+              radius + stroke.strokeWidth / 2,
+              lessThanOrEqualTo(style.directionDiameter / 2 + .001),
+              reason: '어느 각도로 회전해도 외곽선이 잘리지 않는다',
+            );
+            expect(
+              radius - stroke.strokeWidth / 2 - style.diameter / 2,
+              greaterThanOrEqualTo(2 - .001),
+              reason: '회전 후에도 프로필과 2dp 이상 떨어진다',
+            );
+          }
+          return true;
+        }),
+      );
+      for (final self in [false, true]) {
+        final profile = RoomMarkerStyle(self: self, car: car);
+        final profileBounds = (Offset.zero & profile.size).shift(
+          -Offset(
+            profile.size.width * profile.anchor.dx,
+            profile.size.height * profile.anchor.dy,
+          ),
+        );
+        final bounds = profileBounds.expandToInclude(
+          Rect.fromCircle(
+            center: Offset.zero,
+            radius: style.directionDiameter / 2,
+          ),
+        );
+        expect(bounds.width, lessThanOrEqualTo(56));
+        expect(
+          bounds.height,
+          lessThanOrEqualTo(56),
+          reason: 'GPS에 맞춰 겹친 방향·프로필·이름표 전체',
+        );
+      }
+    }
+  });
 
   test('프로필 캐시는 사진 버전·색을 구분하고 위치·heading 유무·각도는 무시한다', () async {
     RoomMarkerKey key({

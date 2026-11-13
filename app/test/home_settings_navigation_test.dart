@@ -17,10 +17,14 @@ import 'package:unavo/screens/phone/profile.dart';
 import 'package:unavo/screens/phone/room.dart';
 import 'package:unavo/screens/phone/rooms.dart';
 import 'package:unavo/screens/phone/settings.dart';
+import 'package:unavo/ui/icons.dart';
+import 'package:unavo/ui/theme.dart';
 import 'package:unavo/ui/widgets/floating_bar.dart';
 import 'package:unavo/ui/widgets/mic_level.dart';
 import 'package:unavo/ui/widgets/panel_button.dart';
 
+import 'support/car_field_expectations.dart';
+import 'support/car_shell_expectations.dart';
 import 'support/consent_fakes.dart';
 import 'support/icon_bundle.dart';
 
@@ -228,8 +232,9 @@ void main() {
           await _tapKey(tester, 'settings-profile');
         }
         expect(find.byType(ProfileScreen), findsOneWidget);
+        _expectDetailBack(tester, car: car, screen: find.byType(ProfileScreen));
         expect(
-          tester.getSize(find.byKey(const ValueKey('profile-back'))).height,
+          tester.getSize(find.byKey(const ValueKey('profile-save'))).height,
           car ? 80 : 56,
         );
         expect(find.byKey(const ValueKey('profile-gallery')), findsNothing);
@@ -280,6 +285,22 @@ void main() {
           );
           expect(find.byTooltip('친구 추가'), findsOneWidget);
           expect(find.byTooltip('목록 새로고침'), findsOneWidget);
+          final friendField = find.descendant(
+            of: _detail,
+            matching: find.byType(TextField),
+          );
+          final addFriend = find.byWidgetPredicate(
+            (w) => w is PanelButton && w.label == '친구 추가',
+          );
+          expectCarFieldGeometry(tester, friendField, alignedWith: addFriend);
+          await tester.enterText(friendField, 'alice');
+          await tester.pump();
+          expectCarFieldGeometry(
+            tester,
+            friendField,
+            alignedWith: addFriend,
+            focused: true,
+          );
         } else {
           expect(sourcePage, findsOneWidget);
           expect(dialog, findsNothing);
@@ -299,7 +320,12 @@ void main() {
         await _tapKey(tester, 'settings-mic');
         expect(find.byType(MicScreen), findsOneWidget);
         expect(find.byType(MicLevel), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('settings-mic-back')),
+          car ? findsNothing : findsOneWidget,
+        );
         if (car) {
+          _expectDetailBack(tester, car: true, screen: _detail);
           expect(
             find.descendant(of: _detail, matching: find.byType(MicScreen)),
             findsOneWidget,
@@ -309,12 +335,18 @@ void main() {
         }
         await _tapKey(tester, 'settings-legal');
         expect(find.byType(LegalDocumentsScreen), findsOneWidget);
+        _expectDetailBack(
+          tester,
+          car: car,
+          screen: find.byType(LegalDocumentsScreen),
+        );
         expect(find.text('우나보 개인정보 처리방침'), findsOneWidget);
         await _tapKey(tester, 'legal-document-1');
         expect(find.text('위치정보 수집·이용 동의'), findsOneWidget);
         expect(find.byKey(const ValueKey('legal-accept')), findsNothing);
         if (car) {
           await _tapKey(tester, 'car-settings-menu-consent');
+          _expectDetailBack(tester, car: true, screen: _detail);
           expect(find.text('위치정보 수집·이용 동의'), findsOneWidget);
         } else {
           await _tapKey(tester, 'legal-documents-back');
@@ -325,14 +357,21 @@ void main() {
         );
         await _tapKey(tester, 'settings-map');
         expect(find.byType(MapCreditsScreen), findsOneWidget);
-        await tester.tap(
-          find.descendant(
-            of: find.byType(MapCreditsScreen),
-            matching: find.byTooltip('뒤로'),
-          ),
+        _expectDetailBack(
+          tester,
+          car: car,
+          screen: find.byType(MapCreditsScreen),
         );
-        await _pumpNavigation(tester);
-        if (car) await _openSettings(tester);
+        expect(find.byTooltip('패키지 라이선스'), findsOneWidget);
+        if (!car) {
+          await tester.tap(
+            find.descendant(
+              of: find.byType(MapCreditsScreen),
+              matching: find.byTooltip('뒤로'),
+            ),
+          );
+          await _pumpNavigation(tester);
+        }
         await _tapKey(tester, 'settings-back');
         expect(find.byType(SettingsScreen), findsNothing);
         _expectLobbyOnly();
@@ -407,11 +446,21 @@ void main() {
             matching: find.byType(TextField),
           );
           expect(serverField, findsOneWidget);
+          _expectDetailBack(tester, car: car, screen: find.byType(AuthScreen));
+          expect(
+            find.byKey(const ValueKey('server-settings-back')),
+            car ? findsNothing : findsOneWidget,
+          );
           expect(
             tester.widget<TextField>(serverField).controller!.text,
             services.store.baseUrl,
           );
           if (car) {
+            expectCarFieldGeometry(
+              tester,
+              serverField,
+              alignedWith: find.byKey(const ValueKey('server-settings-save')),
+            );
             expect(
               find.descendant(
                 of: find.byKey(const ValueKey('car-primary')),
@@ -423,6 +472,11 @@ void main() {
             addTearDown(tester.view.resetViewInsets);
             tester.view.viewInsets = const FakeViewPadding(bottom: 648);
             await _pumpNavigation(tester);
+            expectCarFieldGeometry(
+              tester,
+              serverField,
+              alignedWith: find.byKey(const ValueKey('server-settings-save')),
+            );
             for (final target in [
               serverField,
               find.byKey(const ValueKey('server-settings-save')),
@@ -432,6 +486,8 @@ void main() {
             }
           }
           await tester.enterText(serverField, 'ftp://example.invalid');
+          await _pumpNavigation(tester);
+          if (car) expectCarFieldGeometry(tester, serverField, focused: true);
           await _tapKey(tester, 'server-settings-save');
           expect(find.byType(AuthScreen), findsOneWidget);
           expect(services.store.baseUrl, 'https://example.invalid');
@@ -588,18 +644,81 @@ void main() {
 
   testWidgets('차량 빈 로비도 만들기·참여 중인 방을 가로로 나누고 빈 상태를 표시한다', (tester) async {
     final services = await _mountApp(tester, car: true);
+    final semantics = tester.ensureSemantics();
     try {
       await _tapKey(tester, 'room-home');
       await completeConsentFuture(tester, services.rooms.forget());
       await _pumpNavigation(tester);
+      expectCarShellSemantics(tester, settingsEnabled: true);
+      for (final label in ['새 방 이름', '방 코드']) {
+        expect(
+          find.semantics.byLabel(label).evaluate().single,
+          isSemantics(label: label, isTextField: true),
+        );
+      }
+      for (final label in ['방 만들기', '코드로 참여']) {
+        expect(
+          find.semantics.byLabel(label).evaluate().single,
+          isSemantics(label: label, isButton: true, hasTapAction: true),
+        );
+      }
       expect(find.byKey(const ValueKey('car-lobby-create')), findsOneWidget);
       final active = find.byKey(const ValueKey('car-lobby-active'));
+      final empty = find.byKey(const ValueKey('car-lobby-empty'));
+      expect(find.descendant(of: active, matching: empty), findsOneWidget);
+      expect(find.text('참여 중인 방이 없습니다.'), findsOneWidget);
       expect(
-        find.descendant(of: active, matching: find.byTooltip('참여 중인 방이 없습니다.')),
+        find.descendant(of: empty, matching: find.byType(UnavoIcon)),
         findsOneWidget,
+      );
+      final icon = tester.widget<UnavoIcon>(
+        find.descendant(of: empty, matching: find.byType(UnavoIcon)),
+      );
+      expect(icon.size, 80);
+      expect(icon.color, UnavoColors.muted.withValues(alpha: .4));
+      for (final type in [
+        TextField,
+        InputDecorator,
+        PanelButton,
+        OutlinedButton,
+        InkWell,
+        GestureDetector,
+        DecoratedBox,
+      ]) {
+        expect(
+          find.descendant(of: empty, matching: find.byType(type)),
+          findsNothing,
+        );
+      }
+      for (final container in tester.widgetList<Container>(
+        find.descendant(of: empty, matching: find.byType(Container)),
+      )) {
+        expect(container.decoration, isNull);
+        expect(container.foregroundDecoration, isNull);
+      }
+      expect(
+        tester.getSemantics(empty),
+        matchesSemantics(label: '참여 중인 방이 없습니다.'),
       );
       expect(find.byKey(const ValueKey('current-room-card')), findsNothing);
       expect(find.text(joinedRoomReason), findsNothing);
+      for (final (hint, label) in [('새 방 이름', '방 만들기'), ('방 코드', '코드로 참여')]) {
+        final field = find.byWidgetPredicate(
+          (w) => w is TextField && w.decoration?.hintText == hint,
+        );
+        final button = find.byWidgetPredicate(
+          (w) => w is PanelButton && w.label == label,
+        );
+        expectCarFieldGeometry(tester, field, alignedWith: button);
+        await tester.enterText(field, hint == '방 코드' ? 'ABC123' : '함께 가는 길');
+        await tester.pump();
+        expectCarFieldGeometry(
+          tester,
+          field,
+          alignedWith: button,
+          focused: true,
+        );
+      }
       expect(
         tester
             .widget<PanelButton>(
@@ -612,6 +731,100 @@ void main() {
       );
       expect(tester.takeException(), isNull);
     } finally {
+      semantics.dispose();
+      await _finish(tester, services);
+    }
+  }, timeout: _timeout);
+
+  testWidgets('차량 설정 톱니는 금색 선택·비활성이며 다시 눌러도 상세와 선택 모달을 유지한다', (tester) async {
+    final services = await _mountApp(tester, car: true);
+    final semantics = tester.ensureSemantics();
+    try {
+      await _tapKey(tester, 'room-home');
+      expectCarShellSemantics(tester, settingsEnabled: true);
+      final gear = find.byKey(const ValueKey('open-settings'));
+      expect(tester.widget<PanelButton>(gear).selected, isFalse);
+      expect(tester.widget<PanelButton>(gear).onPressed, isNotNull);
+      await _tapKey(tester, 'open-settings');
+      expectCarShellSemantics(
+        tester,
+        settingsEnabled: false,
+        settingsSelected: true,
+      );
+      for (final label in ['프로필', '친구', '마이크']) {
+        expect(
+          find.semantics.byLabel(label).evaluate().single,
+          isSemantics(label: label, isButton: true, hasTapAction: true),
+        );
+      }
+      final selected = tester.widget<PanelButton>(gear);
+      expect(selected.selected, isTrue);
+      expect(selected.style, PanelButtonStyle.gold);
+      expect(selected.onPressed, isNull);
+      final button = tester.widget<OutlinedButton>(
+        find.descendant(of: gear, matching: find.byType(OutlinedButton)),
+      );
+      expect(button.onPressed, isNull);
+      expect(
+        button.style!.backgroundColor!.resolve({WidgetState.disabled}),
+        UnavoColors.gold,
+      );
+      expect(
+        tester
+            .widget<UnavoIcon>(
+              find.descendant(of: gear, matching: find.byType(UnavoIcon)),
+            )
+            .color,
+        UnavoColors.ink,
+      );
+      expect(
+        tester.getSemantics(gear),
+        matchesSemantics(
+          label: '설정',
+          isButton: true,
+          hasEnabledState: true,
+          isSelected: true,
+          hasSelectedState: true,
+        ),
+      );
+      await _tapKey(tester, 'settings-mic');
+      await _tapKey(tester, 'open-settings');
+      expect(find.byType(MicScreen), findsOneWidget);
+      await _tapKey(tester, 'settings-profile');
+      await _tapKey(tester, 'profile-edit');
+      final dialog = find.byKey(const ValueKey('profile-source-dialog'));
+      expect(dialog, findsOneWidget);
+      expect(find.semantics.byLabel('사진첩에서 선택'), findsOne);
+      expect(find.semantics.byLabel('닫기'), findsOne);
+      for (final label in ['프로필', '친구', '마이크']) {
+        expect(find.semantics.byLabel(label), findsNothing);
+      }
+      expect(find.semantics.byLabel(RegExp('프로필 사진 바꾸기')), findsNothing);
+      // 주 패널 모달은 그 뒤의 설정 내용만 가린다. 머리줄은 패널 밖이다.
+      expectCarShellSemantics(
+        tester,
+        settingsEnabled: false,
+        settingsSelected: true,
+      );
+      await _tapKey(tester, 'open-settings');
+      expect(dialog, findsOneWidget);
+      expect(find.byType(ProfileScreen), findsOneWidget);
+      await tester.tap(find.byTooltip('닫기'));
+      await _pumpNavigation(tester);
+      expect(find.semantics.byLabel('프로필'), findsOne);
+      expect(find.semantics.byLabel(RegExp('프로필 사진 바꾸기')), findsOne);
+      await _tapKey(tester, 'settings-back');
+      expectCarShellSemantics(tester, settingsEnabled: true);
+      expect(tester.widget<PanelButton>(gear).selected, isFalse);
+      expect(tester.widget<PanelButton>(gear).style, PanelButtonStyle.neutral);
+      expect(tester.widget<PanelButton>(gear).onPressed, isNotNull);
+      await _tapKey(tester, 'open-settings');
+      expect(find.byType(SettingsScreen), findsOneWidget);
+      expect(services.rooms.state.code, 'ABC123');
+      expect(services.calls.state.isActive, isTrue);
+      expect(tester.takeException(), isNull);
+    } finally {
+      semantics.dispose();
       await _finish(tester, services);
     }
   }, timeout: _timeout);
@@ -681,6 +894,29 @@ void main() {
 
 Finder get _secondary => find.byKey(const ValueKey('car-secondary'));
 Finder get _detail => find.byKey(const ValueKey('car-settings-detail'));
+
+void _expectDetailBack(
+  WidgetTester tester, {
+  required bool car,
+  required Finder screen,
+}) {
+  final back = find.byWidgetPredicate(
+    (w) => w is PanelButton && w.icon == 'back',
+  );
+  expect(
+    find.descendant(of: car ? _detail : screen, matching: back),
+    car ? findsNothing : findsOneWidget,
+  );
+  if (car) {
+    expect(find.byKey(const ValueKey('settings-back')), findsOneWidget);
+    expect(back, findsOneWidget);
+  } else {
+    expect(
+      tester.getSize(find.descendant(of: screen, matching: back)).height,
+      56,
+    );
+  }
+}
 
 Future<void> _openSettings(WidgetTester tester) async {
   if (find.byType(RoomScreen).evaluate().isNotEmpty) {

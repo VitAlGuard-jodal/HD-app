@@ -7,8 +7,13 @@ import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/panel_scroll.dart';
 
 class MapCreditsScreen extends StatelessWidget {
-  const MapCreditsScreen({super.key, this.provider = MapProvider.vworld});
+  const MapCreditsScreen({
+    super.key,
+    this.provider = MapProvider.vworld,
+    this.showBackButton = true,
+  });
   final MapProvider provider;
+  final bool showBackButton;
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -18,16 +23,18 @@ class MapCreditsScreen extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Align(
-              alignment: Alignment.centerLeft,
-              child: PanelButton(
-                label: '뒤로',
-                icon: 'back',
-                iconOnly: true,
-                onPressed: () => Navigator.of(context).pop(),
+            if (showBackButton) ...[
+              Align(
+                alignment: Alignment.centerLeft,
+                child: PanelButton(
+                  label: '뒤로',
+                  icon: 'back',
+                  iconOnly: true,
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
               ),
-            ),
-            const SizedBox(height: 24),
+              const SizedBox(height: 24),
+            ],
             Expanded(
               child: PanelScroll(
                 child: Column(

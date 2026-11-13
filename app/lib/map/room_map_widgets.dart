@@ -15,19 +15,28 @@ class RoomMarkerStyle {
   // 줌 18의 도로를 가리지 않도록 나·상대 모두 같은 작은 프로필을 쓴다.
   static const phoneDiameter = 28.0;
   static const carDiameter = 32.0;
-  static const directionInset = 4.0;
   static const labelHeight = 12.0;
   static const labelFontSize = 9.0;
+  static const directionGap = 2.0;
+  static const directionOutlineWidth = 2.0;
+  static const directionShadowWidth = 3.0;
+  static const directionShadowColor = Color(0x26000000);
   final bool self, car;
   double get diameter => car ? carDiameter : phoneDiameter;
-  double get directionDiameter => diameter + directionInset * 2;
+  // 흰 외곽선까지 차량 14×9dp·폰 12×8dp다. 더 바깥의 옅은
+  // 0.5dp 대비선까지 포함해도 프로필에서 2dp 떨어지며 56dp 안에 든다.
+  Size get directionTriangleSize => car ? const Size(12, 7) : const Size(10, 6);
+  double get directionDiameter =>
+      diameter +
+      2 * (directionGap + directionTriangleSize.height + directionShadowWidth);
   double get opacity => self ? 1 : .55;
   int get globalZIndex => self ? 300000 : 200000;
   Size get directionSize => Size.square(directionDiameter);
-  Size get size =>
-      Size(directionDiameter, directionDiameter + (self ? 0 : labelHeight));
+  // 프로필 비트맵에는 회전용 빈 여백을 중복으로 넣지 않는다.
+  // 아래 12dp 이름표까지 GPS에 맞춰 겹치면 전체 영역은 차량 56dp 이하다.
+  Size get size => Size(diameter, diameter + (self ? 0 : labelHeight));
   // 아래 이름표까지 포함한 비트맵의 중심이 아닌, 프로필의 중심이 GPS 좌표다.
-  Offset get anchor => Offset(.5, directionDiameter / 2 / size.height);
+  Offset get anchor => Offset(.5, diameter / 2 / size.height);
   Alignment get alignment => Alignment(0, 1 - 2 * anchor.dy);
 }
 
@@ -60,8 +69,8 @@ class RoomCarMarker extends StatelessWidget {
           child: Stack(
             children: [
               Positioned(
-                left: RoomMarkerStyle.directionInset,
-                top: RoomMarkerStyle.directionInset,
+                left: 0,
+                top: 0,
                 child: MemberAvatar(
                   member: Member(
                     position.fix.handle,
@@ -84,8 +93,8 @@ class RoomCarMarker extends StatelessWidget {
               ),
               if (!self)
                 Positioned(
-                  left: RoomMarkerStyle.directionInset,
-                  top: style.directionDiameter + 1,
+                  left: 0,
+                  top: style.diameter + 1,
                   width: style.diameter,
                   child: Container(
                     color: UnavoColors.text,
@@ -136,7 +145,9 @@ class RoomDirectionIndicator extends StatelessWidget {
           size: style.directionSize,
           child: Transform.rotate(
             angle: direction * math.pi / 180,
-            child: CustomPaint(painter: RoomDirectionPainter(color: color)),
+            child: CustomPaint(
+              painter: RoomDirectionPainter(color: color, car: car),
+            ),
           ),
         ),
       ),
@@ -145,25 +156,46 @@ class RoomDirectionIndicator extends StatelessWidget {
 }
 
 class RoomDirectionPainter extends CustomPainter {
-  const RoomDirectionPainter({required this.color});
+  const RoomDirectionPainter({required this.color, this.car = false});
   final Color color;
+  final bool car;
 
   @override
   void paint(Canvas canvas, Size size) {
     final x = size.width / 2;
+    final triangle = RoomMarkerStyle(
+      self: false,
+      car: car,
+    ).directionTriangleSize;
+    const top = RoomMarkerStyle.directionShadowWidth / 2;
+    final path = Path()
+      ..moveTo(x, top)
+      ..lineTo(x + triangle.width / 2, top + triangle.height)
+      ..lineTo(x - triangle.width / 2, top + triangle.height)
+      ..close();
+    // 둥근 join은 꼭짓점의 miter가 캡처 영역 밖으로 잘리지 않게 한다.
     canvas.drawPath(
-      Path()
-        ..moveTo(x, .5)
-        ..lineTo(x + 3, RoomMarkerStyle.directionInset - .5)
-        ..lineTo(x - 3, RoomMarkerStyle.directionInset - .5)
-        ..close(),
-      Paint()..color = color,
+      path,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = RoomMarkerStyle.directionShadowWidth
+        ..color = RoomMarkerStyle.directionShadowColor,
     );
+    canvas.drawPath(
+      path,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = RoomMarkerStyle.directionOutlineWidth
+        ..color = Colors.white,
+    );
+    canvas.drawPath(path, Paint()..color = color);
   }
 
   @override
   bool shouldRepaint(RoomDirectionPainter oldDelegate) =>
-      color != oldDelegate.color;
+      color != oldDelegate.color || car != oldDelegate.car;
 }
 
 class RoomMapControls extends StatelessWidget {

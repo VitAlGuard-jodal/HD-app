@@ -6,6 +6,7 @@ import '../../net/models.dart';
 import '../../room/room_session.dart';
 import '../../ui/theme.dart';
 import '../../ui/control_scale.dart';
+import '../../ui/icons.dart';
 import '../../ui/widgets/focus_ring.dart';
 import '../../ui/widgets/panel_button.dart';
 import '../../ui/widgets/panel_scroll.dart';
@@ -160,7 +161,30 @@ class _RoomsScreenState extends State<RoomsScreen> {
       ];
       final active = <Widget>[
         if (roomCode == null)
-          const StatusChip('참여 중인 방이 없습니다.', icon: 'rooms')
+          if (ControlScale.isCar(context))
+            Semantics(
+              key: const ValueKey('car-lobby-empty'),
+              container: true,
+              label: '참여 중인 방이 없습니다.',
+              child: ExcludeSemantics(
+                child: Padding(
+                  padding: EdgeInsets.all(ControlScale.gap(context)),
+                  child: Column(
+                    children: [
+                      UnavoIcon(
+                        'rooms',
+                        size: ControlScale.target(context),
+                        color: UnavoColors.muted.withValues(alpha: .4),
+                      ),
+                      SizedBox(height: ControlScale.gap(context)),
+                      const Text('참여 중인 방이 없습니다.', style: UnavoType.caption),
+                    ],
+                  ),
+                ),
+              ),
+            )
+          else
+            const StatusChip('참여 중인 방이 없습니다.', icon: 'rooms')
         else
           FocusRing(
             child: Semantics(

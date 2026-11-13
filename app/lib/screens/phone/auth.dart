@@ -23,12 +23,14 @@ class AuthScreen extends StatefulWidget {
     required this.store,
     required this.mode,
     this.serverSettingsOnly = false,
+    this.showBackButton = true,
     this.onSaveServer,
   });
   final ApiClient api;
   final SessionStore store;
   final DeviceMode mode;
   final bool serverSettingsOnly;
+  final bool showBackButton;
   final Future<void> Function(String normalizedUrl)? onSaveServer;
   @override
   State<AuthScreen> createState() => _AuthScreenState();
@@ -221,13 +223,15 @@ class _AuthScreenState extends State<AuthScreen> {
     children: [
       Row(
         children: [
-          PanelButton(
-            key: const ValueKey('server-settings-back'),
-            label: '뒤로',
-            icon: 'back',
-            onPressed: _busy ? null : () => Navigator.of(context).pop(),
-          ),
-          SizedBox(width: ControlScale.gap(context)),
+          if (widget.showBackButton) ...[
+            PanelButton(
+              key: const ValueKey('server-settings-back'),
+              label: '뒤로',
+              icon: 'back',
+              onPressed: _busy ? null : () => Navigator.of(context).pop(),
+            ),
+            SizedBox(width: ControlScale.gap(context)),
+          ],
           Expanded(child: _serverField()),
           SizedBox(width: ControlScale.gap(context)),
           PanelButton(

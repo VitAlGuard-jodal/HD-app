@@ -36,16 +36,11 @@ class _CarDashboardState extends State<CarDashboard> {
   }
 
   void _openSettings() {
+    if (_settingsVisible) return;
     widget.onInteraction?.call();
     FocusScope.of(context).unfocus();
     widget.onHome?.call();
-    if (_settingsVisible) {
-      _primaryNavigator.currentState?.popUntil(
-        (route) => route is PageRoute && route.settings.name == 'settings',
-      );
-    } else {
-      setState(() => _settingsVisible = true);
-    }
+    setState(() => _settingsVisible = true);
   }
 
   void _removedPage(Page<Object?> page) {
@@ -69,6 +64,7 @@ class _CarDashboardState extends State<CarDashboard> {
       return CarShell(
         room: roomVisible,
         onSettings: _openSettings,
+        settingsSelected: _settingsVisible,
         primary: NavigatorPopHandler<void>(
           onPopWithResult: (_) => _primaryNavigator.currentState?.maybePop(),
           child: Navigator(

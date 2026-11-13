@@ -16,6 +16,7 @@ import 'package:unavo/ui/theme.dart';
 import 'package:unavo/ui/widgets/panel_button.dart';
 
 import 'support/consent_fakes.dart';
+import 'support/car_shell_expectations.dart';
 import 'support/icon_bundle.dart';
 
 void main() {
@@ -370,8 +371,15 @@ void main() {
       tester,
       mode: DeviceMode.car,
     );
+    final semantics = tester.ensureSemantics();
     try {
       await _mount(tester, services, car: true);
+      expectCarShellSemantics(tester, settingsEnabled: false);
+      expect(find.semantics.byLabel('서비스 이용 동의'), findsOne);
+      expect(
+        tester.getSemantics(find.byKey(const ValueKey('legal-accept'))),
+        isSemantics(label: '동의', isButton: true, isEnabled: false),
+      );
       expect(find.byType(CarShell), findsOneWidget);
       expect(find.byKey(const ValueKey('car-secondary')), findsNothing);
       final primary = find.byKey(const ValueKey('car-primary'));
@@ -408,6 +416,11 @@ void main() {
       await _tapKey(tester, 'legal-check-0');
       _expectAcceptButtonState(tester, enabled: false);
       await _tapKey(tester, 'legal-decline');
+      // 루트 모달은 주 패널 경계 밖에서 셸 전체의 접근성을 가린다.
+      for (final label in ['우나보', 'UNAVO', '설정', '서비스 이용 동의']) {
+        expect(find.semantics.byLabel(label), findsNothing);
+      }
+      expect(find.semantics.byLabel('닫기'), findsOne);
       final card = find.descendant(
         of: find.byType(Dialog),
         matching: find.byType(Material),
@@ -417,8 +430,10 @@ void main() {
       await tester.tap(find.byTooltip('닫기'));
       await pumpConsentUi(tester);
       expect(find.byType(AuthScreen), findsOneWidget);
+      expectCarShellSemantics(tester, settingsEnabled: true);
       expect(tester.takeException(), isNull);
     } finally {
+      semantics.dispose();
       await _finish(tester, services);
     }
   }, timeout: const Timeout(Duration(seconds: 30)));

@@ -293,9 +293,13 @@ class _LegalConsentScreenState extends State<LegalConsentScreen> {
 
 /// 설정에서는 저장된 동의 여부를 바꾸지 않고 같은 원문 렌더러만 사용한다.
 class LegalDocumentsScreen extends StatefulWidget {
-  const LegalDocumentsScreen({super.key, this.initialIndex = 0})
-    : assert(initialIndex >= 0 && initialIndex < 2);
+  const LegalDocumentsScreen({
+    super.key,
+    this.initialIndex = 0,
+    this.showBackButton = true,
+  }) : assert(initialIndex >= 0 && initialIndex < 2);
   final int initialIndex;
+  final bool showBackButton;
 
   @override
   State<LegalDocumentsScreen> createState() => _LegalDocumentsScreenState();
@@ -317,12 +321,13 @@ class _LegalDocumentsScreenState extends State<LegalDocumentsScreen> {
           children: [
             Row(
               children: [
-                PanelButton(
-                  key: const ValueKey('legal-documents-back'),
-                  label: '뒤로',
-                  icon: 'back',
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
+                if (widget.showBackButton)
+                  PanelButton(
+                    key: const ValueKey('legal-documents-back'),
+                    label: '뒤로',
+                    icon: 'back',
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
                 const Spacer(),
                 for (var index = 0; index < _documents.length; index++) ...[
                   if (index > 0) SizedBox(width: ControlScale.gap(context)),

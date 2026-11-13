@@ -14,6 +14,8 @@ import 'package:unavo/ui/theme.dart';
 import 'package:unavo/ui/widgets/panel_button.dart';
 
 import 'support/avatar_fakes.dart';
+import 'support/car_field_expectations.dart';
+import 'support/car_shell_expectations.dart';
 import 'support/consent_fakes.dart';
 import 'support/icon_bundle.dart';
 
@@ -198,6 +200,7 @@ void main() {
               'token': 'car-auth-token',
             };
           final api = http.api(store);
+          final semantics = tester.ensureSemantics();
           try {
             await tester.pumpWidget(
               UnavoAppearance(
@@ -214,6 +217,7 @@ void main() {
               ),
             );
             await pumpConsentUi(tester);
+            expectCarShellSemantics(tester, settingsEnabled: true);
             if (signup) {
               await tester.tap(find.byTooltip('가입'));
               await pumpConsentUi(tester);
@@ -230,6 +234,7 @@ void main() {
                 tester.getRect(inputs.at(i)),
             ];
             for (var i = 0; i < before.length; i++) {
+              expectCarFieldGeometry(tester, inputs.at(i), alignedWith: submit);
               expect(
                 before[i].center.dy,
                 closeTo(tester.getCenter(submit).dy, .01),
@@ -249,6 +254,8 @@ void main() {
               (w) => w is TextField && w.decoration?.hintText == 'https://…',
             );
             await tester.enterText(server, 'https://example.invalid');
+            await pumpConsentUi(tester);
+            expectCarFieldGeometry(tester, server, focused: true);
             final keyboardHeight = size.width == 1706
                 ? 648.0
                 : size.height * .45;
@@ -260,6 +267,12 @@ void main() {
               expect(inputs.at(i).hitTestable(), findsOneWidget);
               await tester.tap(inputs.at(i));
               await pumpConsentUi(tester);
+              expectCarFieldGeometry(
+                tester,
+                inputs.at(i),
+                alignedWith: submit,
+                focused: true,
+              );
               expect(tester.getRect(inputs.at(i)), before[i]);
               expect(
                 tester.getRect(inputs.at(i)).bottom,
@@ -306,6 +319,7 @@ void main() {
             );
             expect(tester.takeException(), isNull);
           } finally {
+            semantics.dispose();
             await tester.pumpWidget(const SizedBox.shrink());
             api.close();
             store.dispose();

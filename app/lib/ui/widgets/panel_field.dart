@@ -38,9 +38,16 @@ class PanelField extends StatelessWidget {
   final List<TextInputFormatter>? inputFormatters;
   final bool? enableSuggestions;
   @override
-  Widget build(BuildContext context) => FocusRing(
-    child: SizedBox(
-      height: ControlScale.target(context),
+  Widget build(BuildContext context) {
+    final car = ControlScale.isCar(context);
+    final target = ControlScale.target(context);
+    final prefixIcon = UnavoIcon(
+      icon,
+      color: UnavoColors.muted,
+      size: ControlScale.icon(context),
+    );
+    final field = SizedBox(
+      height: target,
       child: TextField(
         controller: controller,
         focusNode: focusNode,
@@ -55,26 +62,28 @@ class PanelField extends StatelessWidget {
         textCapitalization: textCapitalization,
         textInputAction: textInputAction,
         style: UnavoType.body,
+        textAlignVertical: car ? TextAlignVertical.center : null,
         scrollPadding: const EdgeInsets.all(24),
         contextMenuBuilder: (_, editable) =>
-            PanelEditMenu(editable: editable, car: ControlScale.isCar(context)),
+            PanelEditMenu(editable: editable, car: car),
         decoration: InputDecoration(
           hintText: label,
-          hintStyle: const TextStyle(fontSize: 16, color: UnavoColors.muted),
+          hintStyle: car
+              ? UnavoType.body.copyWith(color: UnavoColors.muted)
+              : const TextStyle(fontSize: 16, color: UnavoColors.muted),
           filled: true,
           fillColor: UnavoColors.input,
           contentPadding: const EdgeInsets.symmetric(horizontal: 14),
           prefixIcon: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14),
-            child: UnavoIcon(
-              icon,
-              color: UnavoColors.muted,
-              size: ControlScale.icon(context),
-            ),
+            child: car ? Center(child: prefixIcon) : prefixIcon,
           ),
           prefixIconConstraints: BoxConstraints(
-            minWidth: ControlScale.isCar(context) ? 64 : 52,
-            maxWidth: ControlScale.isCar(context) ? 64 : 52,
+            minWidth: car ? 64 : 52,
+            maxWidth: car ? 64 : 52,
+            // TextField의 바깥 높이만으로는 실제 채움·테두리가 늘어나지 않는다.
+            minHeight: car ? target : 0,
+            maxHeight: car ? target : double.infinity,
           ),
           border: const OutlineInputBorder(
             borderRadius: BorderRadius.all(Radius.circular(4)),
@@ -84,9 +93,9 @@ class PanelField extends StatelessWidget {
             borderRadius: BorderRadius.all(Radius.circular(4)),
             borderSide: BorderSide(color: UnavoColors.line),
           ),
-          focusedBorder: const OutlineInputBorder(
-            borderRadius: BorderRadius.all(Radius.circular(4)),
-            borderSide: BorderSide(color: UnavoColors.gold),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: const BorderRadius.all(Radius.circular(4)),
+            borderSide: BorderSide(color: UnavoColors.gold, width: car ? 3 : 1),
           ),
           disabledBorder: const OutlineInputBorder(
             borderRadius: BorderRadius.all(Radius.circular(4)),
@@ -94,6 +103,8 @@ class PanelField extends StatelessWidget {
           ),
         ),
       ),
-    ),
-  );
+    );
+    // 차량 입력은 같은 상자 안의 focusedBorder만 사용한다.
+    return car ? field : FocusRing(child: field);
+  }
 }

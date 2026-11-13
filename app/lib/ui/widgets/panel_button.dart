@@ -17,6 +17,7 @@ class PanelButton extends StatelessWidget {
     this.height = 56,
     this.iconOnly = true,
     this.selected = false,
+    this.dimWhenDisabled = true,
     this.child,
     this.fontSize = 16,
   }) : assert(!iconOnly || icon != null || child != null);
@@ -27,6 +28,9 @@ class PanelButton extends StatelessWidget {
   final double height;
   final bool iconOnly;
   final bool selected;
+
+  /// 현재 화면을 나타내는 비활성 선택 버튼은 선택 색을 유지할 수 있다.
+  final bool dimWhenDisabled;
   final Widget? child;
   final double fontSize;
   @override
@@ -36,7 +40,7 @@ class PanelButton extends StatelessWidget {
     final effectiveHeight = height < target ? target : height;
     final disabledColor = UnavoColors.text.withValues(alpha: 0.4);
     final (background, foreground, border) = switch (style) {
-      _ when onPressed == null => (
+      _ when onPressed == null && dimWhenDisabled => (
         UnavoColors.panel,
         disabledColor,
         disabledColor,
@@ -123,7 +127,7 @@ class PanelButton extends StatelessWidget {
                   overlayColor: const WidgetStatePropertyAll(Color(0x16F3EDDF)),
                 ),
                 // 별도 child의 SVG는 버튼의 foregroundColor를 상속하지 않는다.
-                child: onPressed == null && child != null
+                child: onPressed == null && dimWhenDisabled && child != null
                     ? ColorFiltered(
                         colorFilter: ColorFilter.mode(
                           foreground,

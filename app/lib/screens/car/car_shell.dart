@@ -16,11 +16,13 @@ class CarShell extends StatelessWidget {
     super.key,
     required this.primary,
     this.onSettings,
+    this.settingsSelected = false,
     this.room = false,
   });
   final bool room;
   final Widget primary;
   final VoidCallback? onSettings;
+  final bool settingsSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -56,25 +58,34 @@ class CarShell extends StatelessWidget {
                   child: Column(
                     children: [
                       if (!room)
-                        Row(
-                          children: [
-                            Text(
-                              '우나보',
-                              style: UnavoType.display.copyWith(fontSize: 32),
-                            ),
-                            const SizedBox(width: 16),
-                            Text(
-                              'UNAVO',
-                              style: UnavoType.western.copyWith(fontSize: 20),
-                            ),
-                            const Spacer(),
-                            PanelButton(
-                              key: const ValueKey('open-settings'),
-                              label: '설정',
-                              icon: 'settings',
-                              onPressed: onSettings,
-                            ),
-                          ],
+                        Semantics(
+                          container: true,
+                          explicitChildNodes: true,
+                          child: Row(
+                            children: [
+                              Text(
+                                '우나보',
+                                style: UnavoType.display.copyWith(fontSize: 32),
+                              ),
+                              const SizedBox(width: 16),
+                              Text(
+                                'UNAVO',
+                                style: UnavoType.western.copyWith(fontSize: 20),
+                              ),
+                              const Spacer(),
+                              PanelButton(
+                                key: const ValueKey('open-settings'),
+                                label: '설정',
+                                icon: 'settings',
+                                selected: settingsSelected,
+                                style: settingsSelected
+                                    ? PanelButtonStyle.gold
+                                    : PanelButtonStyle.neutral,
+                                dimWhenDisabled: !settingsSelected,
+                                onPressed: settingsSelected ? null : onSettings,
+                              ),
+                            ],
+                          ),
                         ),
                       if (!room) const SizedBox(height: 16),
                       Expanded(
@@ -85,7 +96,14 @@ class CarShell extends StatelessWidget {
                           padding: room
                               ? EdgeInsets.zero
                               : const EdgeInsets.all(24),
-                          child: primary,
+                          // 중첩 Navigator의 투명 route 장벽도 BlockSemantics를
+                          // 만든다. 차단을 패널 안에 한정해 머리줄을 보존한다.
+                          // 패널의 선택 모달은 여전히 그 뒤의 route를 가린다.
+                          child: Semantics(
+                            container: true,
+                            explicitChildNodes: true,
+                            child: primary,
+                          ),
                         ),
                       ),
                     ],

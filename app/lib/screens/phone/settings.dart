@@ -336,15 +336,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       api: widget.services.api,
       store: widget.services.store,
       car: true,
+      showBackButton: false,
     ),
     _CarSetting.friends => FriendsScreen(
       services: widget.services,
       onRoom: widget.onRoom ?? (_) {},
     ),
-    _CarSetting.mic => _SettingsPage(
-      backKey: const ValueKey('settings-mic-back'),
-      child: MicScreen(router: widget.services.mic),
-    ),
+    _CarSetting.mic => MicScreen(router: widget.services.mic),
     _CarSetting.volume => ListenableBuilder(
       listenable: widget.services.rooms,
       builder: (context, _) {
@@ -386,12 +384,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
       store: widget.services.store,
       mode: DeviceMode.car,
       serverSettingsOnly: true,
+      showBackButton: false,
       onSaveServer: _saveServer,
     ),
     // 새 법률 문구를 만들지 않고 기존의 두 정본을 각각 먼저 연다.
-    _CarSetting.terms => const LegalDocumentsScreen(),
-    _CarSetting.consent => const LegalDocumentsScreen(initialIndex: 1),
-    _CarSetting.map => MapCreditsScreen(provider: widget.services.mapProvider),
+    _CarSetting.terms => const LegalDocumentsScreen(showBackButton: false),
+    _CarSetting.consent => const LegalDocumentsScreen(
+      initialIndex: 1,
+      showBackButton: false,
+    ),
+    _CarSetting.map => MapCreditsScreen(
+      provider: widget.services.mapProvider,
+      showBackButton: false,
+    ),
     _CarSetting.logout => PanelScroll(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

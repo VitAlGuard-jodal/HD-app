@@ -25,10 +25,12 @@ class ProfileScreen extends StatefulWidget {
     required this.api,
     required this.store,
     this.car = false,
+    this.showBackButton = true,
   });
   final ApiClient api;
   final SessionStore store;
   final bool car;
+  final bool showBackButton;
   @override
   State<ProfileScreen> createState() => _ProfileScreenState();
 }
@@ -272,16 +274,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   ),
                   const SizedBox(height: 16),
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    mainAxisAlignment: widget.showBackButton
+                        ? MainAxisAlignment.spaceBetween
+                        : MainAxisAlignment.end,
                     children: [
-                      PanelButton(
-                        key: const ValueKey('profile-back'),
-                        label: '되돌리기',
-                        icon: 'back',
-                        onPressed: _busy
-                            ? null
-                            : () => Navigator.of(context).pop(),
-                      ),
+                      if (widget.showBackButton)
+                        PanelButton(
+                          key: const ValueKey('profile-back'),
+                          label: '되돌리기',
+                          icon: 'back',
+                          onPressed: _busy
+                              ? null
+                              : () => Navigator.of(context).pop(),
+                        ),
                       PanelButton(
                         key: const ValueKey('profile-save'),
                         label: '프로필 저장',

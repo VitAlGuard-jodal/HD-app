@@ -290,7 +290,11 @@ void main() {
     final markers = tester
         .widget<MarkerLayer>(find.byType(MarkerLayer))
         .markers;
-    expect(markers.last.key, const ValueKey('map-marker-bob'));
+    // 내 프로필과 내 방향 표시가 마지막(맨 위)에 그려진다.
+    expect(markers.skip(markers.length - 2).map((m) => m.key).toList(), const [
+      ValueKey('map-marker-bob'),
+      ValueKey('map-direction-bob'),
+    ]);
     for (final self in [false, true]) {
       final marker = find.byWidgetPredicate(
         (w) => w is RoomCarMarker && w.self == self,
@@ -325,7 +329,7 @@ void main() {
     }
     for (final marker
         in tester.widget<MarkerLayer>(find.byType(MarkerLayer)).markers) {
-      expect(marker.width, 40);
+      expect(marker.width, 32);
       final self = marker.key == const ValueKey<String>('map-marker-bob');
       expect(
         marker.alignment,
@@ -337,84 +341,121 @@ void main() {
     controller.dispose();
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  testWidgets('브이월드 나·상대 방향은 독립적이며 지도 회전에도 사진은 서 있고 삼각형은 이동을 가리킨다', (
-    tester,
-  ) async {
-    final controller = RoomMapController();
-    await _pumpMap(tester, controller);
-    final movedSelf = _fix(
-      'bob',
-      _self.lat,
-      _self.lng + .0001,
-      seq: 1,
-      heading: 0,
-      speed: 10,
-    );
-    final movedOther = _fix('alice', _leader.lat + .00005, _leader.lng, seq: 1);
-    await _pumpMap(tester, controller, self: movedSelf, leader: movedOther);
-    final markers = tester
-        .widget<MarkerLayer>(find.byType(MarkerLayer))
-        .markers;
-    expect(markers.map((marker) => marker.key), [
-      const ValueKey<String>('map-direction-alice'),
-      const ValueKey<String>('map-marker-alice'),
-      const ValueKey<String>('map-direction-bob'),
-      const ValueKey<String>('map-marker-bob'),
-    ]);
-    for (final marker in markers) {
-      expect(marker.rotate, marker.child is RoomCarMarker);
-    }
-    Offset directionVector(bool self) {
-      final indicator = find.byWidgetPredicate(
-        (widget) => widget is RoomDirectionIndicator && widget.self == self,
-      );
-      final box = tester.renderObject<RenderBox>(
-        find.descendant(of: indicator, matching: find.byType(CustomPaint)),
-      );
-      final center = box.size.center(Offset.zero);
-      return box.localToGlobal(Offset(center.dx, 0)) -
-          box.localToGlobal(center);
-    }
+  for (final car in [false, true]) {
+    testWidgets(
+      '브이월드 ${car ? '차량' : '폰'} 나·상대 방향은 독립적이며 지도 회전에도 사진은 서 있고 삼각형은 이동을 가리킨다',
+      (tester) async {
+        final controller = RoomMapController();
+        await _pumpMap(tester, controller, car: car);
+        final movedSelf = _fix(
+          'bob',
+          _self.lat,
+          _self.lng + .0001,
+          seq: 1,
+          heading: 0,
+          speed: 10,
+        );
+        final movedOther = _fix(
+          'alice',
+          _leader.lat + .00005,
+          _leader.lng,
+          seq: 1,
+        );
+        await _pumpMap(
+          tester,
+          controller,
+          self: movedSelf,
+          leader: movedOther,
+          car: car,
+        );
+        final markers = tester
+            .widget<MarkerLayer>(find.byType(MarkerLayer))
+            .markers;
+        expect(markers.map((marker) => marker.key), [
+          const ValueKey<String>('map-marker-alice'),
+          const ValueKey<String>('map-direction-alice'),
+          const ValueKey<String>('map-marker-bob'),
+          const ValueKey<String>('map-direction-bob'),
+        ]);
+        for (final marker in markers) {
+          expect(marker.rotate, marker.child is RoomCarMarker);
+          if (marker.child is RoomDirectionIndicator) {
+            expect(
+              Size(marker.width, marker.height),
+              Size.square(car ? 56 : 50),
+            );
+            final painter =
+                tester
+                        .widget<CustomPaint>(
+                          find.descendant(
+                            of: find.byWidget(marker.child),
+                            matching: find.byType(CustomPaint),
+                          ),
+                        )
+                        .painter!
+                    as RoomDirectionPainter;
+            expect(painter.car, car);
+          }
+        }
+        Offset directionVector(bool self) {
+          final indicator = find.byWidgetPredicate(
+            (widget) => widget is RoomDirectionIndicator && widget.self == self,
+          );
+          final box = tester.renderObject<RenderBox>(
+            find.descendant(of: indicator, matching: find.byType(CustomPaint)),
+          );
+          final center = box.size.center(Offset.zero);
+          return box.localToGlobal(Offset(center.dx, 0)) -
+              box.localToGlobal(center);
+        }
 
-    expect(directionVector(true).dx, greaterThan(0));
-    expect(directionVector(true).dy, closeTo(0, .001));
-    expect(directionVector(false).dx, closeTo(0, .001));
-    expect(directionVector(false).dy, lessThan(0));
-    controller.alignHeading(true);
-    await tester.pump();
-    expect(directionVector(true).dx, closeTo(0, .001));
-    expect(directionVector(true).dy, lessThan(0));
-    expect(directionVector(false).dx, lessThan(0));
-    expect(directionVector(false).dy, closeTo(0, .001));
-    for (final avatar in find.byType(MemberAvatar).evaluate()) {
-      final box = avatar.renderObject! as RenderBox;
-      final horizontal =
-          box.localToGlobal(const Offset(1, 0)) -
-          box.localToGlobal(Offset.zero);
-      expect(horizontal.dx, closeTo(1, .001));
-      expect(horizontal.dy, closeTo(0, .001), reason: '프로필 사진 자체는 항상 똑바로 유지한다');
-    }
-    final previous = directionVector(true);
-    await _pumpMap(
-      tester,
-      controller,
-      self: _fix(
-        'bob',
-        movedSelf.lat,
-        movedSelf.lng,
-        seq: 2,
-        heading: 180,
-        speed: 0,
-      ),
-      leader: movedOther,
-      brightness: Brightness.dark,
+        expect(directionVector(true).dx, greaterThan(0));
+        expect(directionVector(true).dy, closeTo(0, .001));
+        expect(directionVector(false).dx, closeTo(0, .001));
+        expect(directionVector(false).dy, lessThan(0));
+        controller.alignHeading(true);
+        await tester.pump();
+        expect(directionVector(true).dx, closeTo(0, .001));
+        expect(directionVector(true).dy, lessThan(0));
+        expect(directionVector(false).dx, lessThan(0));
+        expect(directionVector(false).dy, closeTo(0, .001));
+        for (final avatar in find.byType(MemberAvatar).evaluate()) {
+          final box = avatar.renderObject! as RenderBox;
+          final horizontal =
+              box.localToGlobal(const Offset(1, 0)) -
+              box.localToGlobal(Offset.zero);
+          expect(horizontal.dx, closeTo(1, .001));
+          expect(
+            horizontal.dy,
+            closeTo(0, .001),
+            reason: '프로필 사진 자체는 항상 똑바로 유지한다',
+          );
+        }
+        final previous = directionVector(true);
+        await _pumpMap(
+          tester,
+          controller,
+          self: _fix(
+            'bob',
+            movedSelf.lat,
+            movedSelf.lng,
+            seq: 2,
+            heading: 180,
+            speed: 0,
+          ),
+          leader: movedOther,
+          brightness: Brightness.dark,
+          car: car,
+        );
+        expect(directionVector(true).dx, closeTo(previous.dx, .001));
+        expect(directionVector(true).dy, closeTo(previous.dy, .001));
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        controller.dispose();
+      },
+      timeout: const Timeout(Duration(seconds: 30)),
     );
-    expect(directionVector(true).dx, closeTo(previous.dx, .001));
-    expect(directionVector(true).dy, closeTo(previous.dy, .001));
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox.shrink());
-    controller.dispose();
-  }, timeout: const Timeout(Duration(seconds: 30)));
+  }
 
   testWidgets('따라가기 꺼짐은 카메라를 유지하고 재중심은 내 위치로 이동한다', (tester) async {
     final controller = RoomMapController();

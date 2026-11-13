@@ -288,7 +288,22 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
     final self = handle == widget.selfHandle;
     final style = RoomMarkerStyle(self: self, car: widget.car);
     final direction = _directions[handle];
+    yield Marker(
+      key: ValueKey<String>('map-marker-$handle'),
+      point: _point(position.fix),
+      width: style.size.width,
+      height: style.size.height,
+      alignment: style.alignment,
+      rotate: true,
+      child: RoomCarMarker(
+        api: widget.api,
+        position: position,
+        self: self,
+        car: widget.car,
+      ),
+    );
     if (direction != null) {
+      // 네이버의 globalZIndex + 1과 같이 방향 표시를 프로필 위에 둔다.
       yield Marker(
         key: ValueKey<String>('map-direction-$handle'),
         point: _point(position.fix),
@@ -304,20 +319,6 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
         ),
       );
     }
-    yield Marker(
-      key: ValueKey<String>('map-marker-$handle'),
-      point: _point(position.fix),
-      width: style.size.width,
-      height: style.size.height,
-      alignment: style.alignment,
-      rotate: true,
-      child: RoomCarMarker(
-        api: widget.api,
-        position: position,
-        self: self,
-        car: widget.car,
-      ),
-    );
   }
 }
 
