@@ -209,6 +209,7 @@ class NaverRoomMap extends StatefulWidget {
     this.guidance,
     this.meetingPins = const [],
     this.onPointSelected,
+    this.mapBuilder,
   });
   final NaverRoomMapController controller;
   final ApiClient? api;
@@ -223,6 +224,9 @@ class NaverRoomMap extends StatefulWidget {
   final VoidCallback? onInteraction;
   final String? authError;
   final bool car, fullscreen;
+  // Allows lifecycle/camera tests without creating a native platform view.
+  @visibleForTesting
+  final Widget Function(NaverMap map)? mapBuilder;
 
   @override
   State<NaverRoomMap> createState() => _NaverRoomMapState();
@@ -252,6 +256,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   bool _paused = false, _followPending = false, _following = false;
   int _pointers = 0, _cameraRevision = 0;
   bool? _headingAligned;
+  bool _initialSelfCentered = false, _userInteracted = false;
 
   LocationFix? get _self => widget.positions[widget.selfHandle]?.fix;
   LocationFix? get _target => widget.positions[widget.targetHandle]?.fix;
@@ -270,6 +275,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     _directions.update(widget.positions.values.map((position) => position.fix));
     final initial =
         _self ?? _target ?? widget.positions.values.firstOrNull?.fix;
+    _initialSelfCentered = _self != null;
     _initialCamera = NCameraPosition(
       target: initial == null
           ? const NLatLng(37.5665, 126.978)
@@ -310,6 +316,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
         oldWidget.brightness != widget.brightness) {
       unawaited(_syncOverlays());
     }
+    _centerInitialSelf();
     if (!widget.following &&
         _headingAligned == true &&
         !_paused &&
@@ -332,6 +339,17 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   }
 
   bool _isCurrent(NaverMapController camera) => mounted && _camera == camera;
+
+  void _centerInitialSelf() {
+    if (_initialSelfCentered ||
+        _userInteracted ||
+        _self == null ||
+        _camera == null)
+      return;
+    _initialSelfCentered = true;
+    if (!widget.following)
+      unawaited(_moveCamera(_camera!, _point(_self!), null));
+  }
 
   void _logError(Object error) {
     if (!mounted || _loggedError) return;
@@ -359,6 +377,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     _anchorMarker = null;
     _meetingMarkers.clear();
     unawaited(_syncOverlays());
+    _centerInitialSelf();
     if (_headingAligned == true &&
         !widget.following &&
         _selfDirection != null) {
@@ -808,6 +827,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   }
 
   void _interaction() {
+    _userInteracted = true;
     _paused = true;
     _cancelFollow();
     widget.onInteraction?.call();
@@ -854,6 +874,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   }
 
   void _alignHeading(bool enabled) {
+    _userInteracted = true;
     _headingAligned = enabled;
     _cancelFollow();
     _resumeTimer?.cancel();
@@ -920,34 +941,36 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
                 },
                 onPointerUp: (_) => _releasePointer(),
                 onPointerCancel: (_) => _releasePointer(),
-                child: NaverMap(
-                  // 1.4.4는 build의 _updateOptionsIfNeeded에서 옵션을 갱신한다.
-                  options: NaverMapViewOptions(
-                    initialCameraPosition: _initialCamera,
-                    mapType: NMapType.navi,
-                    nightModeEnable: widget.brightness == Brightness.dark,
-                    scaleBarEnable: false,
-                    locationButtonEnable: false,
-                    indoorEnable: false,
-                    activeLayerGroups: const [NLayerGroup.building],
-                    logoClickEnable: true,
-                    logoAlign: NLogoAlign.leftBottom,
-                    logoMargin: EdgeInsets.fromLTRB(12, 16, 12, logoBottom),
-                    contentPadding: EdgeInsets.zero,
-                    maxTilt: 63,
-                    rotationGesturesEnable: true,
-                    tiltGesturesEnable: true,
+                child: _buildMap(
+                  NaverMap(
+                    // 1.4.4는 build의 _updateOptionsIfNeeded에서 옵션을 갱신한다.
+                    options: NaverMapViewOptions(
+                      initialCameraPosition: _initialCamera,
+                      mapType: NMapType.navi,
+                      nightModeEnable: widget.brightness == Brightness.dark,
+                      scaleBarEnable: false,
+                      locationButtonEnable: false,
+                      indoorEnable: false,
+                      activeLayerGroups: const [NLayerGroup.building],
+                      logoClickEnable: true,
+                      logoAlign: NLogoAlign.leftBottom,
+                      logoMargin: EdgeInsets.fromLTRB(12, 16, 12, logoBottom),
+                      contentPadding: EdgeInsets.zero,
+                      maxTilt: 63,
+                      rotationGesturesEnable: true,
+                      tiltGesturesEnable: true,
+                    ),
+                    onMapReady: _onMapReady,
+                    onMapLongTapped: widget.onPointSelected == null
+                        ? null
+                        : (_, point) => widget.onPointSelected!(
+                            RoutePoint(point.latitude, point.longitude),
+                          ),
+                    onCameraChange: (reason, animated) {
+                      if (reason == NCameraUpdateReason.gesture) _interaction();
+                    },
+                    onCameraIdle: _onCameraIdle,
                   ),
-                  onMapReady: _onMapReady,
-                  onMapLongTapped: widget.onPointSelected == null
-                      ? null
-                      : (_, point) => widget.onPointSelected!(
-                          RoutePoint(point.latitude, point.longitude),
-                        ),
-                  onCameraChange: (reason, animated) {
-                    if (reason == NCameraUpdateReason.gesture) _interaction();
-                  },
-                  onCameraIdle: _onCameraIdle,
                 ),
               ),
               if (widget.authError != null || distance != null)
@@ -972,4 +995,6 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       },
     );
   }
+
+  Widget _buildMap(NaverMap map) => widget.mapBuilder?.call(map) ?? map;
 }

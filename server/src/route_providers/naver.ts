@@ -4,7 +4,11 @@ import type { Point, ProviderRoute } from "../route_contract.ts";
 
 export interface NaverConfig { provider: "naver"; keyId: string; key: string }
 export type RouteConfig = NaverConfig | { provider: "disabled" };
-export type RouteProvider = (origin: Point, destination: Point, signal: AbortSignal, config: NaverConfig) => Promise<ProviderRoute>;
+export type RouteEndpoint = "reference" | "destination";
+// Only a user-selected D may end at a nearby road. J/P0/trace/origins stay at 25 m.
+export const DESTINATION_ENDPOINT_GAP_METERS = 100;
+export type RouteProvider = (origin: Point, destination: Point, signal: AbortSignal, config: NaverConfig,
+  endpoint?: RouteEndpoint) => Promise<ProviderRoute>;
 export interface RouteTiming { quality: "guide" | "rough"; knots: { meters: number; seconds: number }[] }
 export interface TimedProviderRoute extends ProviderRoute { timing: RouteTiming }
 
@@ -32,7 +36,8 @@ function atAnchor(origin: Point, destination: Point): ProviderRoute {
 }
 
 // Fixtures use invented coordinates, never saved product responses.
-export function parseNaverRoute(value: unknown, origin: Point, destination: Point): ProviderRoute {
+export function parseNaverRoute(value: unknown, origin: Point, destination: Point, endpoint: RouteEndpoint = "reference"): ProviderRoute {
+  const endGapLimit = endpoint === "destination" ? DESTINATION_ENDPOINT_GAP_METERS : ROUTE_ENDPOINT_GAP_METERS;
   if (!record(value) || !Number.isInteger(value.code)) invalid();
   if (value.code === 1) return atAnchor(origin, destination);
   if ([2, 3, 4, 5].includes(value.code as number)) throw new RouteError("NO_ROUTE");
@@ -48,7 +53,7 @@ export function parseNaverRoute(value: unknown, origin: Point, destination: Poin
   const summaryStart = coordinate(summary.start.location);
   const summaryEnd = coordinate(summary.goal.location);
   if (distance(origin, summaryStart) > ROUTE_ENDPOINT_GAP_METERS
-    || distance(destination, summaryEnd) > ROUTE_ENDPOINT_GAP_METERS) throw new RouteError("ENDPOINT_MISMATCH");
+    || distance(destination, summaryEnd) > endGapLimit) throw new RouteError("ENDPOINT_MISMATCH");
   const points: Point[] = [];
   let length = 0;
   for (const raw of route.path) {
@@ -72,7 +77,7 @@ export function parseNaverRoute(value: unknown, origin: Point, destination: Poin
   const actualEnd = points.at(-1)!;
   const startGapMeters = distance(origin, actualStart);
   const endGapMeters = distance(destination, actualEnd);
-  if (startGapMeters > ROUTE_ENDPOINT_GAP_METERS || endGapMeters > ROUTE_ENDPOINT_GAP_METERS) throw new RouteError("ENDPOINT_MISMATCH");
+  if (startGapMeters > ROUTE_ENDPOINT_GAP_METERS || endGapMeters > endGapLimit) throw new RouteError("ENDPOINT_MISMATCH");
   return { result: "route", provider: "naver", routeOption: "traoptimal", points,
     meters: summary.distance, seconds: summary.duration / 1000,
     actualStart, actualEnd, startGapMeters, endGapMeters };
@@ -112,7 +117,7 @@ function retryAfter(value: string | null, now: number): number {
 }
 
 export function naverProvider(fetcher: typeof fetch = fetch, now = () => Date.now(), includeTiming = false): RouteProvider {
-  return async (origin, destination, signal, config) => {
+  return async (origin, destination, signal, config, endpoint = "reference") => {
     try {
       const url = new URL("https://maps.apigw.ntruss.com/map-direction/v1/driving");
       url.searchParams.set("start", `${origin.lng},${origin.lat}`);
@@ -130,7 +135,7 @@ export function naverProvider(fetcher: typeof fetch = fetch, now = () => Date.no
       }
       const value = await readResponse(response);
       if (response.status === 400 && (!record(value) || ![1, 2, 3, 4, 5].includes(value.code as number))) invalid();
-      return includeTiming ? parseNaverRecommendationRoute(value, origin, destination) : parseNaverRoute(value, origin, destination);
+      return includeTiming ? parseNaverRecommendationRoute(value, origin, destination) : parseNaverRoute(value, origin, destination, endpoint);
     } catch (error) {
       if (signal.aborted && signal.reason instanceof RouteError) throw signal.reason;
       if (error instanceof RouteError) throw error;
@@ -143,7 +148,7 @@ export function naverProvider(fetcher: typeof fetch = fetch, now = () => Date.no
 // indices preserve the mapping even when parseNaverRoute removes duplicates.
 // https://api.ncloud-docs.com/docs/application-maps-directions5
 export function parseNaverRecommendationRoute(value: unknown, origin: Point, destination: Point): TimedProviderRoute {
-  const result = parseNaverRoute(value, origin, destination);
+  const result = parseNaverRoute(value, origin, destination, "destination");
   const length = result.points.reduce((sum, p, i) => sum + (i ? distance(result.points[i - 1], p) : 0), 0);
   const rough = (): TimedProviderRoute => ({ ...result, timing: { quality: "rough",
     knots: [{ meters: 0, seconds: 0 }, { meters: length, seconds: result.seconds }] } });

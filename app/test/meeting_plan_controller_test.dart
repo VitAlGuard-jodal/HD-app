@@ -7,6 +7,81 @@ import 'support/follow_route_fakes.dart';
 import 'support/meeting_plan_fakes.dart';
 
 void main() {
+  test(
+    'r11 B8 repeated timer and SSE observations cannot move the first upload observation',
+    () {
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      // LocationShare notifies RoomSession synchronously at each accepted upload.
+      // Later timer/SSE/UI updates of that same ref must not become new receipts.
+      for (var n = 0; n < 3; n++) {
+        f.age = 200;
+        f.drive(0, elapsed: 5000);
+        f.age = 9000;
+        f.update();
+      }
+      expect(f.controller.canEditMeetingPlan, isTrue);
+      f.age = 10001;
+      f.update();
+      expect(f.controller.canEditMeetingPlan, isFalse);
+    },
+  );
+  test(
+    'r11 B8 compressed first receipts do not invent a two-second stop window',
+    () {
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      f.controller.update(null);
+      for (final (seq, measured, age) in [
+        (1, 0, 9000.0),
+        (2, 5000, 4500.0),
+        (3, 10000, 0.0),
+      ]) {
+        f.self = testFix(
+          0,
+          handle: 'self',
+          seq: seq,
+          at: routeEpoch + measured,
+          speed: 0,
+        );
+        f.age = age;
+        f.update();
+      }
+      f.controller.applySnapshot([], [follower], planFeatures);
+      expect(f.controller.canEditMeetingPlan, isFalse);
+    },
+  );
+  test(
+    'r11 A1 D route keeps the building pin and stops at the actual road endpoint',
+    () async {
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      f.stop();
+      await f.enroll(
+        plan: planJson(join: 1000),
+        runtime: runtimeJson(
+          followerPhase: 'toDestination',
+          branch: 'destination',
+        ),
+      );
+      final call = f.routes.single;
+      final j = call.json;
+      final end = {'lat': testPoint(940).lat, 'lng': testPoint(940).lng};
+      j['points'] = [j['points'].first, end];
+      j['actualEnd'] = end;
+      j['endGapMeters'] = 60;
+      call.pending.complete(call.request.parseResult(j));
+      await flush();
+      expect(f.controller.view!.connector.last, testPoint(940));
+      expect(
+        f.controller.pins.firstWhere((p) => p.id == 'destination').point,
+        testPoint(1000),
+      );
+      expect(f.controller.view!.connector, isNot(contains(testPoint(1000))));
+      expect(meetingErrorText('ENDPOINT_MISMATCH'), contains('도로'));
+      expect(meetingErrorText('NO_ROUTE'), contains('경로'));
+    },
+  );
   test('r10 stop evidence rejects a window longer than 15 seconds', () {
     final f = MeetingFixture();
     addTearDown(f.dispose);

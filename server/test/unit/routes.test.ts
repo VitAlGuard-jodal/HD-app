@@ -197,6 +197,30 @@ test("S3 malformed shapes, units and coordinates are rejected; long road segment
   assert.throws(() => parseNaverRoute(large, origin, destination), error("ROUTE_TOO_LARGE"));
 });
 
+test("r11 A1: only D accepts 25-100 m endpoint gaps; origins and all reference routes stay at 25 m", () => {
+  for (const gap of [24.9, 25.1, 99.9, 100.1]) {
+    const end = { ...destination, lat: destination.lat + gap / 111195 };
+    const body = naverBody(origin, end);
+    if (gap < 100) {
+      const result = parseNaverRoute(body, origin, destination, "destination");
+      assert.deepEqual(result.points.at(-1), end);
+      assert.ok(Math.abs(result.endGapMeters! - gap) < .01);
+    } else assert.throws(() => parseNaverRoute(body, origin, destination, "destination"), error("ENDPOINT_MISMATCH"));
+    if (gap > 25) assert.throws(() => parseNaverRoute(body, origin, destination), error("ENDPOINT_MISMATCH"));
+  }
+  const shiftedStart = { ...origin, lat: origin.lat - 26 / 111195 };
+  assert.throws(() => parseNaverRoute(naverBody(shiftedStart, destination), origin, destination, "destination"), error("ENDPOINT_MISMATCH"));
+  for (const part of ["summary", "path"]) {
+    const body = naverBody();
+    const end = { ...destination, lat: destination.lat + 101 / 111195 };
+    if (part === "summary") body.route.traoptimal[0].summary.goal.location = [end.lng, end.lat];
+    else {
+      body.route.traoptimal[0].path[1] = [end.lng, end.lat];
+      body.route.traoptimal[0].summary.distance += 102;
+    }
+    assert.throws(() => parseNaverRoute(body, origin, destination, "destination"), error("ENDPOINT_MISMATCH"));
+  }
+});
 test("S4 no route, same point, zero distance and true path endpoint mismatch stay distinct", () => {
   for (const code of [2, 3, 4, 5]) {
     assert.throws(() => parseNaverRoute({ code }, origin, origin), error("NO_ROUTE"));

@@ -10,6 +10,9 @@ enum FollowRouteKind { initial, rejoin }
 
 enum FollowPhase { approaching, onTrace }
 
+// Keep D-only endpoint tolerance in sync with server/route_providers/naver.ts.
+const destinationEndpointGapMeters = 100.0;
+
 class RoutePoint {
   const RoutePoint(this.lat, this.lng);
   factory RoutePoint.fromFix(LocationFix fix) => RoutePoint(fix.lat, fix.lng);
@@ -149,7 +152,10 @@ class FollowRouteResult {
   }
 
   /// Shared geometry parser. Schema-specific callers validate their own identity.
-  FollowRouteResult.fromPayload(JsonMap json) {
+  FollowRouteResult.fromPayload(
+    JsonMap json, {
+    bool destinationEndpoint = false,
+  }) {
     if (json['provider'] != 'naver' || json['routeOption'] != 'traoptimal') {
       throw const FormatException('경로 제공처 오류');
     }
@@ -186,7 +192,8 @@ class FollowRouteResult {
           points.toSet().length < 2 ||
           meters <= 0 ||
           number('startGapMeters') > 25 ||
-          number('endGapMeters') > 25) {
+          number('endGapMeters') >
+              (destinationEndpoint ? destinationEndpointGapMeters : 25)) {
         throw const FormatException('경로 형상 오류');
       }
       actualStart = RoutePoint.fromJson(json['actualStart']);

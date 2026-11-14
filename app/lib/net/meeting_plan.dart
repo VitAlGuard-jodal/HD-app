@@ -381,7 +381,10 @@ class PlanRouteRequest {
         ? RouteAnchor.fromJson(a) != traceAnchor
         : a.length != 1 || a['kind'] != anchor['kind'])
       throw const FormatException('계획 경로 목표 오류');
-    return FollowRouteResult.fromPayload(j);
+    return FollowRouteResult.fromPayload(
+      j,
+      destinationEndpoint: routeKind == PlanRouteKind.planDestination,
+    );
   }
 }
 
@@ -439,6 +442,8 @@ class MeetingRecommendation {
 }
 
 String meetingErrorText(String code) => switch (code) {
+  'NO_ROUTE' => '경로를 찾을 수 없습니다. 지도에서 목적지와 합류 지점을 확인해 주세요',
+  'ENDPOINT_MISMATCH' => '요청 지점이 도로에서 멀어 경로를 만들 수 없습니다. 지도에서 도로 쪽으로 옮겨 주세요',
   'STOP_REQUIRED' => '정차가 확인된 뒤 설정할 수 있습니다',
   'LOCATION_NOT_READY' => '위치와 정차 상태를 확인하고 있습니다',
   'PLAN_LOCKED' => '참여한 차량이 있어 수정할 수 없습니다. 정차 후 계획을 취소해 주세요',

@@ -24,6 +24,108 @@ LocationFix _fix(String handle, double lat, double lng, {double? heading}) =>
     );
 
 void main() {
+  for (final readyFirst in [true, false]) {
+    testWidgets(
+      'r11 A2 first self fix centers once without following (map ready first=$readyFirst)',
+      (tester) async {
+        final controller = NaverRoomMapController();
+        final camera = _StartupCamera();
+        late NaverMap map;
+        Future<void> show(Map<String, RoomMapPosition> positions) =>
+            tester.pumpWidget(
+              MaterialApp(
+                home: SizedBox(
+                  width: 400,
+                  height: 400,
+                  child: NaverRoomMap(
+                    controller: controller,
+                    positions: positions,
+                    trail: const [],
+                    targetHandle: null,
+                    selfHandle: 'leader',
+                    following: false,
+                    brightness: Brightness.light,
+                    mapBuilder: (value) {
+                      map = value;
+                      return const SizedBox.expand();
+                    },
+                  ),
+                ),
+              ),
+            );
+        final rear = RoomMapPosition(_fix('rear', 37, 127), displayName: '뒷차');
+        await show({'rear': rear});
+        expect(
+          map.options.initialCameraPosition.target,
+          const NLatLng(37, 127),
+        );
+        if (readyFirst) map.onMapReady!(camera);
+        await show({
+          'rear': rear,
+          'leader': RoomMapPosition(
+            _fix('leader', 37.01, 127),
+            displayName: '나',
+          ),
+        });
+        if (!readyFirst) map.onMapReady!(camera);
+        expect(camera.updates, hasLength(1));
+        expect(
+          camera.updates.single.toNPayload().map['target'],
+          const NLatLng(37.01, 127).toNPayload().map,
+        );
+        await show({
+          'rear': rear,
+          'leader': RoomMapPosition(
+            _fix('leader', 37.02, 127),
+            displayName: '나',
+          ),
+        });
+        expect(camera.updates, hasLength(1));
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+  testWidgets(
+    'r11 A2 user interaction prevents a later automatic first-self recenter',
+    (tester) async {
+      final controller = NaverRoomMapController();
+      final camera = _StartupCamera();
+      late NaverMap map;
+      Future<void> show(Map<String, RoomMapPosition> positions) =>
+          tester.pumpWidget(
+            MaterialApp(
+              home: SizedBox(
+                width: 400,
+                height: 400,
+                child: NaverRoomMap(
+                  controller: controller,
+                  positions: positions,
+                  trail: const [],
+                  targetHandle: null,
+                  selfHandle: 'leader',
+                  following: false,
+                  brightness: Brightness.light,
+                  mapBuilder: (value) {
+                    map = value;
+                    return const SizedBox.expand();
+                  },
+                ),
+              ),
+            ),
+          );
+      await show({});
+      map.onMapReady!(camera);
+      map.onCameraChange!(NCameraUpdateReason.gesture, false);
+      await tester.pump(const Duration(seconds: 6));
+      await show({
+        'leader': RoomMapPosition(_fix('leader', 37.01, 127), displayName: '나'),
+      });
+      expect(camera.updates, isEmpty);
+      controller.recenter();
+      expect(camera.updates, hasLength(1));
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
   test('실패 마커는 30초 동안 캡처 한 번을 재사용하고 다음 sync에서 성공 아이콘으로 바뀐다', () {
     fakeAsync((clock) {
       final cache = RoomMarkerIconCache(
@@ -570,4 +672,19 @@ void main() {
     expect(roomPathPoints([first, second]), [first, second]);
     expect(roomPathPoints([first, second, first]), [first, second, first]);
   });
+}
+
+class _StartupCamera implements NaverMapController {
+  final updates = <NCameraUpdate>[];
+  @override
+  Stream<OnCameraChangedParams> get nowCameraPositionStream =>
+      const Stream.empty();
+  @override
+  Future<bool> updateCamera(NCameraUpdate update) async {
+    updates.add(update);
+    return false;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => Future<void>.value();
 }

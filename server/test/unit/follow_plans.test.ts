@@ -9,10 +9,56 @@ import { RoomEventHub } from "../../src/rooms.ts";
 import { RoomLocationStore } from "../../src/locations.ts";
 import { FollowPlanService } from "../../src/follow_plans.ts";
 import { updateUserConsent } from "../../src/store.ts";
-import { dispatch, naverConfig } from "../helpers/route_fixture.ts";
+import { dispatch, naverBody, naverConfig } from "../helpers/route_fixture.ts";
+import { naverProvider } from "../../src/route_providers/naver.ts";
 import { at, pin, planFixture } from "../helpers/plan_fixture.ts";
 
 function error(code: string) { return (e: unknown) => e instanceof RouteError && e.code === code; }
+test("r11 A1: address destination 60 m from the road accepts recommendation and destination guidance only", async (t) => {
+  const f = planFixture(t); f.plans.close();
+  const roadEnd = at(1000), destination = { ...at(1000, 60), label: "시험 건물 중심", source: "address" };
+  f.setProvider(naverProvider(async (url) => {
+    const start = new URL(String(url)).searchParams.get("start")!.split(",").map(Number);
+    return Response.json(naverBody({ lat: start[1], lng: start[0] }, roadEnd));
+  }));
+  const app = createApp({ ...f, routeOptions: f.routeOptions });
+  const api = (path: string, body: unknown, method = "POST") =>
+    dispatch(app, f.tokens.get("leader")!, body, { path: `/v1/rooms/${f.room.code}/${path}`, method }).done;
+  const recommended = await api("follow-plans/self/recommend", { requestId: "address-recommend", draftGeneration: 1,
+    planId: null, expectedRevision: 0, destination, participantFollowRequestIds: [f.relation.requestId] });
+  assert.equal(recommended.statusCode, 200, JSON.stringify(recommended.json()));
+  const saved = await api("follow-plans/self", { operationId: "address-plan", expectedPlanId: null, expectedRevision: 0,
+    destination, joinPoint: destination, policy: "proceed", participantFollowRequestIds: [f.relation.requestId], waitingPlaceConfirmed: false }, "PUT");
+  const plan = saved.json().plan;
+  await dispatch(app, f.tokens.get("follower")!, { operationId: "address-enroll", planId: plan.planId, planRevision: 1,
+    followRequestId: f.relation.requestId, enabled: true }, { path: `/v1/rooms/${f.room.code}/follow-plans/leader/participation`, method: "PUT" }).done;
+  for (let i = 0; i < 7; i++) parkedStep(f);
+  const fix = f.locations.position(f.room.code, "leader")!;
+  const guided = await api("follow-route", { schemaVersion: 2, planId: plan.planId, planRevision: 1,
+    followRequestId: null, guidanceGeneration: 1, calculationId: "address-route", requestId: "address-route",
+    routeKind: "planDestination", originRef: { stream: fix.stream, seq: fix.seq }, anchor: { kind: "destination" } });
+  assert.equal(guided.statusCode, 200, JSON.stringify(guided.json()));
+  assert.deepEqual(guided.json().requestedAnchor, { lat: destination.lat, lng: destination.lng });
+  assert.deepEqual(guided.json().actualEnd, roadEnd);
+  assert.deepEqual(guided.json().points.at(-1), roadEnd, "never connect the road endpoint to the building pin");
+});
+test("r11 A1: route failure logs contain only the sanitized code and no address or coordinates", async (t) => {
+  const f = planFixture(t); f.plans.close();
+  f.setProvider(naverProvider(async () => Response.json(naverBody(at(0), at(1000)))));
+  const app = createApp({ ...f, routeOptions: f.routeOptions });
+  const logs: string[] = [];
+  const write = process.stdout.write.bind(process.stdout);
+  t.mock.method(process.stdout, "write", (value: string | Uint8Array) => {
+    if (typeof value === "string" && value.startsWith("follow-route ")) { logs.push(value); return true; }
+    return write(value);
+  });
+  const result = await dispatch(app, f.tokens.get("leader")!, { requestId: "far-address", draftGeneration: 1,
+    planId: null, expectedRevision: 0, destination: { ...at(1000, 150), label: "PRIVATE_ADDRESS", source: "address" },
+    participantFollowRequestIds: [f.relation.requestId] }, { path: `/v1/rooms/${f.room.code}/follow-plans/self/recommend` }).done;
+  assert.equal(result.statusCode, 422); assert.equal(result.json().error.code, "ENDPOINT_MISMATCH");
+  assert.match(logs.join(""), /code=ENDPOINT_MISMATCH/);
+  assert.doesNotMatch(logs.join(""), /PRIVATE_ADDRESS|37\.5|127|leader|ABC234/);
+});
 test("r10: editing stays available between 5-second parked uploads with receipt delay", (t) => {
   const f = planFixture(t);
   for (let i = 0; i < 3; i++) {
@@ -30,6 +76,105 @@ function parkedStep(f: ReturnType<typeof planFixture>, changes: Record<string, n
   f.elapse(elapsed);
   for (const [handle, meters] of f.positions) f.publish(handle, { ...at(meters), speed: 0, at: f.now() - 200 });
 }
+test("r11 B1: announced departure survives further parked uploads and uses the last waiting fix", (t) => {
+  const f = planFixture(t); const saved = f.save(); f.enroll(saved);
+  for (let i = 0; i < 3; i++) parkedStep(f, { leader: 100, follower: 100 });
+  const prepared = f.plans.depart(f.room.code, "leader", { operationId: "prepare", planId: saved.plan!.planId,
+    planRevision: 1, expectedRuntimeRevision: f.get().runtime!.runtimeRevision });
+  for (let i = 0; i < 3; i++) parkedStep(f);
+  assert.deepEqual(f.get().runtime!.departureCohort, prepared.runtime!.departureCohort, "the captured cohort is immutable while still parked");
+  assert.equal(f.get().runtime!.runtimeRevision, prepared.runtime!.runtimeRevision, "parked fixes alone are not progress events");
+  const waiting = f.locations.position(f.room.code, "leader")!;
+  for (const meters of [120, 140, 160, 180, 200]) f.step({ leader: meters, follower: meters }, 20);
+  const after = f.get().runtime!;
+  assert.equal(after.phase, "departed");
+  assert.ok(after.departedAtMs);
+  assert.deepEqual(after.traceStartRef, { kind: "sample", ref: { stream: waiting.stream, seq: waiting.seq } });
+  assert.equal(after.vehicles[1].phase, "tracePriming");
+});
+for (const ready of [false, true]) test(`r11 B2: a slow first roll cannot strand departure (all ready=${ready})`, (t) => {
+  const f = planFixture(t); const saved = f.save(); f.enroll(saved);
+  f.rest({ leader: 100, follower: ready ? 100 : 0 });
+  f.elapse(1000); f.publish("leader", { ...at(104), speed: 1.5 });
+  for (const meters of [124, 144, 164, 184, 204]) {
+    f.elapse(1000); f.publish("leader", { ...at(meters), speed: 20 });
+    f.publish("follower", { ...at(ready ? 100 : 0), speed: 0 });
+  }
+  const after = f.get().runtime!;
+  assert.equal(after.phase, ready ? "departed" : "leftEarly");
+  assert.equal(after.departedAtMs !== null, ready);
+  assert.equal(after.traceStartRef !== null, ready);
+});
+test("r11 B3: parked phone jitter with known zero speed preserves arrival and departure readiness", (t) => {
+  const f = planFixture(t); const saved = f.save(); f.enroll(saved);
+  f.rest({ leader: 100, follower: 100 });
+  for (const meters of [104, 99, 103]) {
+    parkedStep(f, { leader: meters, follower: meters });
+    assert.ok(f.get().runtime!.vehicles.every((v) => v.phase === "atJoinWaiting"));
+  }
+  assert.doesNotThrow(() => f.plans.depart(f.room.code, "leader", { operationId: "jitter-depart", planId: saved.plan!.planId,
+    planRevision: 1, expectedRuntimeRevision: f.get().runtime!.runtimeRevision }));
+});
+for (const action of ["reject", "switch", "unfollow"] as const) test(`r11 B4: ${action} of an outgoing follow preserves the owner's stop evidence and route origin`, (t) => {
+  const f = planFixture(t); const saved = f.save(); f.enroll(saved);
+  const pending = f.locations.requestFollow(f.room.code, "leader", "third");
+  f.rest({ leader: 100, follower: 100 });
+  const fix = f.locations.position(f.room.code, "leader")!;
+  if (action === "reject") f.locations.respondFollow(f.room.code, "third", pending.requestId, false);
+  else if (action === "switch") f.locations.requestFollow(f.room.code, "leader", "outsider");
+  else f.locations.unfollow(f.room.code, "leader");
+  assert.doesNotThrow(() => f.plans.assertEditable(f.room.code, "leader"));
+  assert.ok(f.locations.recentSample(f.room.code, "leader", fix));
+  assert.ok(f.get().runtime!.vehicles.every((v) => v.phase === "atJoinWaiting"));
+  assert.equal(f.get().plan!.planId, saved.plan!.planId);
+});
+for (const channel of ["events", "positions", "hello"] as const) test(`r11 B5: ${channel} follows the GET consent gate without changing v6`, async (t) => {
+  const f = planFixture(t); f.plans.close();
+  const app = createApp({ ...f, routeOptions: f.routeOptions });
+  const events: { name: string; data: any }[] = [];
+  t.after(f.hub.subscribe(f.room.code, "follower", tokenHash(f.tokens.get("follower")!), (name, data) => events.push({ name, data })));
+  const api = (handle: string, path: string, body?: unknown, method = "GET") =>
+    dispatch(app, f.tokens.get(handle)!, body, { path: `/v1/rooms/${f.room.code}/${path}`, method }).done;
+  const setConsent = (version: string) => updateUserConsent(f.db, f.users[1].id, { privacyVersion: version, locationVersion: version });
+  const saved = (await api("leader", "follow-plans/self", { operationId: "consent-plan", expectedPlanId: null, expectedRevision: 0,
+    destination: pin(1000), joinPoint: pin(100), policy: "wait", participantFollowRequestIds: [f.relation.requestId], waitingPlaceConfirmed: true }, "PUT")).json();
+  assert.ok(events.some((e) => e.name === "follow-plan-updated"));
+  setConsent("5"); events.length = 0;
+  const denied = await api("follower", "follow-plans/leader");
+  assert.equal(denied.statusCode, 403); assert.equal(denied.json().error.code, "CONSENT_REQUIRED_SELF");
+  if (channel === "events") {
+    await api("leader", "follow-plans/self", { operationId: "consent-change", expectedPlanId: saved.plan.planId, expectedRevision: 1,
+      destination: pin(1000), joinPoint: pin(110), policy: "wait", participantFollowRequestIds: [f.relation.requestId], waitingPlaceConfirmed: true }, "PUT");
+    assert.deepEqual(events.filter((e) => e.name.startsWith("follow-plan-")), []);
+  } else if (channel === "positions") {
+    const snapshot = (await api("follower", "positions")).json();
+    assert.deepEqual(snapshot.followPlans, []); assert.deepEqual(snapshot.acceptedPlanFollowers, []);
+  } else {
+    const stream = dispatch(app, f.tokens.get("follower")!, undefined, { path: `/v1/rooms/${f.room.code}/events?resume=1`, method: "GET" });
+    const frame = Buffer.concat(stream.response.chunks).toString();
+    stream.response.destroy();
+    const hello = JSON.parse(frame.split("\n").find((line) => line.startsWith("data: "))!.slice(6));
+    assert.deepEqual(hello.followPlans, []); assert.deepEqual(hello.acceptedPlanFollowers, []);
+  }
+  setConsent("6");
+  const restored = (await api("follower", "positions")).json();
+  assert.equal(restored.followPlans[0].plan.planId, saved.plan.planId);
+});
+test("r11 B7: an unexpected plan failure is retryable and logs only source stack frames", async (t) => {
+  const f = planFixture(t); f.plans.close();
+  const app = createApp({ ...f, routeOptions: f.routeOptions });
+  const logs: string[] = [];
+  t.mock.method(process.stderr, "write", (value: string | Uint8Array) => { logs.push(String(value)); return true; });
+  t.mock.method(f.locations, "recentSamples", () => { throw new Error("PRIVATE_ADDRESS 37.5,127 SECRET_KEY"); });
+  const response = await dispatch(app, f.tokens.get("leader")!, { operationId: "crash", expectedPlanId: null, expectedRevision: 0,
+    destination: pin(1000), joinPoint: pin(100), policy: "wait", participantFollowRequestIds: [f.relation.requestId], waitingPlaceConfirmed: true },
+    { path: `/v1/rooms/${f.room.code}/follow-plans/self`, method: "PUT" }).done;
+  assert.equal(response.statusCode, 502);
+  assert.equal(response.json().error.code, "PROVIDER_UNAVAILABLE");
+  assert.equal(response.json().error.retryable, true);
+  assert.match(logs.join(""), /server\/src\/follow_plans\.ts:\d+:\d+/);
+  assert.doesNotMatch(JSON.stringify(response.json()) + logs.join(""), /PRIVATE_ADDRESS|37\.5|127|SECRET_KEY/);
+});
 for (const first of ["leader", "follower"]) test(`r10: 5-second wait arrival (${first} first) permits departure preparation`, (t) => {
   const f = planFixture(t); const saved = f.save(); f.enroll(saved);
   for (let i = 0; i < 3; i++) parkedStep(f, { [first]: 100 });

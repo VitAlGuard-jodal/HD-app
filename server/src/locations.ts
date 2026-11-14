@@ -230,7 +230,8 @@ export class RoomLocationStore extends EventEmitter {
       room.trails.delete(relation.target);
     }
     room.revision++;
-    room.recent.delete(requester);
+    // Outgoing follow state does not own the requester's shared GPS history.
+    // stop/remove/resetDevice still erase it when that location stream ends.
     this.emit("invalidated", { code, requester } satisfies LocationInvalidation);
     this.emit("relations-changed", { code, target: relation.target });
     return relation;

@@ -35,6 +35,22 @@ bool stopped(
 );
 
 void main() {
+  test(
+    'r11 B3 known low speed tolerates phone jitter within location quality',
+    () {
+      for (final speed in [0.0, 1.5]) {
+        expect(
+          stopped(fixes(positions: [0, 4, -1], speed: speed, acc: 5)),
+          isTrue,
+        );
+      }
+      expect(
+        stopped(fixes(positions: [0, 4, -1], speed: null, acc: 5)),
+        isFalse,
+      );
+      expect(stopped(fixes(positions: [0, 4, -1], speed: 2, acc: 5)), isFalse);
+    },
+  );
   test('r10 parked evidence survives the whole 5-second upload interval', () {
     final samples = fixes();
     for (final age in [200.0, 5199.0, 10000.0]) {
@@ -65,8 +81,14 @@ void main() {
     'speed at 2 m/s': fixes(speed: 2),
     'negative speed': fixes(speed: -1),
     'non-finite speed': fixes(speed: double.nan),
-    'displacement despite zero speed': fixes(positions: [0, 0, 3.1]),
-    'excursion then return': fixes(positions: [0, 3.1, 0]),
+    'displacement with unknown speed': fixes(
+      speed: null,
+      positions: [0, 0, 3.1],
+    ),
+    'unknown-speed excursion then return': fixes(
+      speed: null,
+      positions: [0, 3.1, 0],
+    ),
   }.entries) {
     test('r10 stop evidence rejects ${entry.key}', () {
       expect(stopped(entry.value), isFalse);

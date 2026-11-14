@@ -399,7 +399,7 @@ export class FollowPlanService extends EventEmitter {
         }
         if (destinationOnly(plan) || plan.policy !== "wait" || r.departedAtMs !== null) continue;
         const near = distance(current, plan.joinPoint) <= 25;
-        if (!r.departureCohort && samples.every((s) => distance(s, plan.joinPoint!) <= 25) && stopEvidence) {
+        if (samples.every((s) => distance(s, plan.joinPoint!) <= 25) && stopEvidence) {
           v.phase = "atJoinWaiting"; v.arrivedAtMs ??= this.#now(); evidence.waitingFix = current; evidence.movingFrom = undefined;
           if (v.handle === plan.leaderHandle) r.phase = "waiting";
         }
@@ -418,7 +418,9 @@ export class FollowPlanService extends EventEmitter {
             if (!r.departureCohort) { r.phase = "leftEarly"; v.phase = "toJoin"; }
             else {
               r.departedAtMs = this.#now(); r.phase = "departed";
-              r.traceStartRef = { kind: "sample", ref: { ...r.departureCohort.leaderWaitingRef } };
+              // The cohort stays fixed at preparation; the trace starts at the
+              // last actual waiting fix immediately before continuous movement.
+              r.traceStartRef = { kind: "sample", ref: sampleRef(evidence.waitingFix) };
               v.phase = "toDestination"; v.branch = "destination";
               for (const follower of r.vehicles) if (r.enrollments.some((e) => e.handle === follower.handle)) {
                 follower.phase = "tracePriming"; follower.branch = "trace";

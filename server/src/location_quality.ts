@@ -41,6 +41,8 @@ export function stopped(samples: LocationFix[], now: number): boolean {
   return measuredSpan >= STOP_EVIDENCE_MIN_SPAN_MS && measuredSpan <= STOP_EVIDENCE_MAX_SPAN_MS
     && receivedSpan >= STOP_EVIDENCE_MIN_SPAN_MS && receivedSpan <= STOP_EVIDENCE_MAX_SPAN_MS
     && samples.every((s, i) => quality(s) && (i === 0 || continuous(samples[i - 1], s))
-      && (s.speed === undefined || finite(s.speed) && s.speed >= 0 && s.speed < STOP_SPEED_LIMIT_MPS)
-      && distance(samples[0], s) < STOP_MAX_DISPLACEMENT_METERS);
+      // Known speed is the contract's primary stop signal. Only unknown speed
+      // needs the conservative position fallback; quality/continuity still apply.
+      && (s.speed === undefined ? distance(samples[0], s) < STOP_MAX_DISPLACEMENT_METERS
+        : finite(s.speed) && s.speed >= 0 && s.speed < STOP_SPEED_LIMIT_MPS));
 }

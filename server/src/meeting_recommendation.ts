@@ -287,7 +287,7 @@ export class MeetingRecommendationService {
     controller.signal.addEventListener("abort", reject, { once: true });
     reservation.start(input.handle);
     const transport = (async () => this.#provider({ lat: input.origin.lat, lng: input.origin.lng },
-      { lat: batch.request.destination.lat, lng: batch.request.destination.lng }, controller.signal, config))();
+      { lat: batch.request.destination.lat, lng: batch.request.destination.lng }, controller.signal, config, "destination"))();
     const release = () => reservation.release(input.handle);
     void transport.then(release, release);
     try {

@@ -238,7 +238,8 @@ export class FollowRouteService {
       const transport = (async () => {
         controller.signal.throwIfAborted();
         reservation.start(requester); input!.attempts++;
-        return this.#provider({ ...input!.origin }, { ...input!.anchor }, controller.signal, config);
+        return this.#provider({ ...input!.origin }, { ...input!.anchor }, controller.signal, config,
+          request.schemaVersion === 2 && request.routeKind === "planDestination" ? "destination" : "reference");
       })();
       const release = () => { reservation.release(requester); if (this.#active.get(requester) === active) this.#active.delete(requester); };
       void transport.then(release, release);

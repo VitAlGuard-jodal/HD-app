@@ -1113,15 +1113,18 @@ class MeetingPlanController extends ChangeNotifier {
       final goal = r.routeKind == PlanRouteKind.planJoin
           ? active!.plan.joinPoint!.point
           : active!.plan.destination.point;
+      final endGapLimit = r.routeKind == PlanRouteKind.planDestination
+          ? destinationEndpointGapMeters + .000001
+          : 25.000001;
       if (routeDistance(result.origin, _originPoint!) > 1 ||
           routeDistance(result.anchor, goal) > 1 ||
           (result.atAnchor
               ? routeDistance(result.origin, goal) > 25.000001
               : routeDistance(result.points.first, result.origin) > 25.000001 ||
-                    routeDistance(result.points.last, goal) > 25.000001 ||
+                    routeDistance(result.points.last, goal) > endGapLimit ||
                     routeDistance(result.actualStart!, result.origin) >
                         25.000001 ||
-                    routeDistance(result.actualEnd!, goal) > 25.000001)) {
+                    routeDistance(result.actualEnd!, goal) > endGapLimit)) {
         throw const FollowRouteException('ENDPOINT_MISMATCH');
       }
       final p = projectRoute(RoutePoint.fromFix(_input!.self!), result.points);

@@ -61,8 +61,9 @@ bool meetingStopped(
             (!fix.speed!.isFinite ||
                 fix.speed! < 0 ||
                 fix.speed! >= meetingStopSpeedLimitMps) ||
-        routeDistance(origin, RoutePoint.fromFix(fix)) >=
-            meetingStopMaxDisplacementMeters) {
+        fix.speed == null &&
+            routeDistance(origin, RoutePoint.fromFix(fix)) >=
+                meetingStopMaxDisplacementMeters) {
       return false;
     }
   }

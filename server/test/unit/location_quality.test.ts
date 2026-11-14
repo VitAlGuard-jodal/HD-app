@@ -37,8 +37,8 @@ for (const [name, change] of [
   ["speed at 2 m/s", (s: LocationFix[]) => { s[2].speed = 2; }],
   ["negative speed", (s: LocationFix[]) => { s[2].speed = -1; }],
   ["non-finite speed", (s: LocationFix[]) => { s[2].speed = NaN; }],
-  ["displacement despite zero speed", (s: LocationFix[]) => { s[2].lat += 3.1 / 111195; }],
-  ["excursion then return", (s: LocationFix[]) => { s[1].lat += 3.1 / 111195; }],
+  ["displacement with unknown speed", (s: LocationFix[]) => { s[2].speed = undefined; s[2].lat += 3.1 / 111195; }],
+  ["unknown-speed excursion then return", (s: LocationFix[]) => { s[1].speed = undefined; s[1].lat += 3.1 / 111195; }],
 ] as const) test(`r10: stop evidence rejects ${name}`, () => {
   const samples = fixes(); change(samples);
   assert.equal(stopped(samples, Math.max(20_200, samples.at(-1)!.receivedAt)), false);

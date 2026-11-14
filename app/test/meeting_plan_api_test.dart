@@ -23,6 +23,50 @@ const planRequest = PlanRouteRequest(
 );
 
 void main() {
+  for (final kind in PlanRouteKind.values) {
+    test(
+      'r11 A1 $kind keeps its endpoint limit and always keeps the 25 m origin limit',
+      () {
+        final request = PlanRouteRequest(
+          planId: 'plan-1',
+          planRevision: 1,
+          followRequestId: null,
+          guidanceGeneration: 1,
+          calculationId: 'gap',
+          requestId: 'gap',
+          routeKind: kind,
+          originRef: const SampleRef('0123456789abcdef', 1),
+          traceAnchor: const RouteAnchor.segment(
+            SampleRef('fedcba9876543210', 1),
+            SampleRef('fedcba9876543210', 2),
+            .5,
+          ),
+        );
+        final call = PlanRouteCall(
+          request,
+          RouteCancellation(),
+          testPoint(0),
+          testPoint(1000),
+        );
+        for (final gap in [24.9, 25.1, 99.9, 100.1]) {
+          final body = call.json..['endGapMeters'] = gap;
+          if (gap <= (kind == PlanRouteKind.planDestination ? 100 : 25)) {
+            expect(() => request.parseResult(body), returnsNormally);
+          } else {
+            expect(() => request.parseResult(body), throwsFormatException);
+          }
+        }
+        expect(
+          () => request.parseResult(call.json..['startGapMeters'] = 25.1),
+          throwsFormatException,
+        );
+        expect(
+          () => FollowRouteResult.fromPayload(call.json..['endGapMeters'] = 60),
+          throwsFormatException,
+        );
+      },
+    );
+  }
   test(
     'schema 2 owner uses explicit null and reference only; HTTP preserves identity and seconds',
     () async {
