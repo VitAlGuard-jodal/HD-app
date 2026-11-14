@@ -36,6 +36,17 @@ class NaverRoomMapController implements RoomMapController {
 
 NLatLng _point(LocationFix fix) => NLatLng(fix.lat, fix.lng);
 
+NPolylineOverlay roomNaverRejoinPath(List<RoutePoint> points) =>
+    NPolylineOverlay(
+      id: 'rejoin',
+      coords: points.map((p) => NLatLng(p.lat, p.lng)),
+      color: const Color(0x80808080),
+      width: 6,
+      pattern: const [12, 8],
+      lineCap: NLineCap.round,
+      lineJoin: NLineJoin.round,
+    );
+
 /// The SDK boundary uses the same immutable route/trace data as VWorld.
 NPathOverlay roomNaverRoutePath({
   required String id,
@@ -226,6 +237,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   StreamSubscription<OnCameraChangedParams>? _cameraSubscription;
   double _cameraBearing = 0, _cameraTilt = 0;
   final _paths = <String, NPathOverlay>{};
+  NPolylineOverlay? _rejoinPath;
   NMarker? _anchorMarker;
   bool _syncing = false, _syncAgain = false, _loggedError = false;
   final _clock = Stopwatch()..start();
@@ -336,6 +348,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       _updateDirectionAngles();
     });
     _paths.clear();
+    _rejoinPath = null;
     _anchorMarker = null;
     unawaited(_syncOverlays());
     if (_headingAligned == true &&
@@ -593,7 +606,9 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
         guidance?.trace ??
         [widget.trail.map((fix) => RoutePoint(fix.lat, fix.lng)).toList()];
     final lines = <String, List<RoutePoint>>{
-      if (guidance != null && guidance.connector.length >= 2)
+      if (guidance != null &&
+          !guidance.rejoining &&
+          guidance.connector.length >= 2)
         'connector': guidance.connector,
       for (var i = 0; i < traces.length; i++)
         if (traces[i].length >= 2) 'trace:$i': traces[i],
@@ -634,6 +649,24 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
         existing.setColor(color);
         existing.setOutlineColor(outline);
       }
+    }
+    if (guidance?.rejoining == true && guidance!.connector.length >= 2) {
+      final existing = _rejoinPath;
+      if (existing == null) {
+        final line = roomNaverRejoinPath(guidance.connector);
+        await camera.addOverlay(line);
+        if (!_isCurrent(camera)) return;
+        _rejoinPath = line;
+      } else {
+        existing.setCoords(
+          guidance.connector.map((p) => NLatLng(p.lat, p.lng)),
+        );
+      }
+    } else if (_rejoinPath != null) {
+      final line = _rejoinPath!;
+      _rejoinPath = null;
+      await camera.deleteOverlay(line.info);
+      if (!_isCurrent(camera)) return;
     }
     final anchor = guidance?.anchor;
     if (anchor == null) {

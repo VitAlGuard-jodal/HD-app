@@ -15,8 +15,10 @@ FollowRouteView view({
   bool merged = false,
   bool failed = false,
   bool delayed = false,
+  bool rejoining = false,
 }) => FollowRouteView(
-  mode: FollowMode.b,
+  mode: FollowMode.a,
+  rejoining: rejoining,
   phase: merged ? FollowPhase.onTrace : FollowPhase.approaching,
   condition: failed
       ? FollowRouteCondition.noRoute
@@ -94,8 +96,7 @@ void main() {
             expect(find.byKey(const ValueKey('follow-anchor')), findsOneWidget);
             final selected = tester.widget<RoomMapButton>(
               find.byWidgetPredicate(
-                (widget) =>
-                    widget is RoomMapButton && widget.label == '합류 후 따라가기',
+                (widget) => widget is RoomMapButton && widget.label == '따라가기',
               ),
             );
             expect(selected.selected, isTrue);
@@ -111,7 +112,20 @@ void main() {
               (container.decoration! as BoxDecoration).color,
               UnavoColors.gold,
             );
-            expect(find.byTooltip('합류 후 따라가기'), findsOneWidget);
+            expect(find.byTooltip('합류 후 따라가기'), findsNothing);
+            final reserved = tester.widget<RoomMapButton>(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is RoomMapButton &&
+                    widget.label == '합류 지점 따라가기 · 준비 중',
+              ),
+            );
+            expect(reserved.onPressed, isNull);
+            expect(reserved.selected, isFalse);
+            await pump(view(rejoining: true));
+            expect(lines()[0].color, const Color(0x80808080));
+            expect(lines()[0].color.a, closeTo(.5, .01));
+            expect(lines()[0].pattern.segments, [12, 8]);
             await pump(view(delayed: true));
             expect(lines()[0].color.a, closeTo(.35, .01));
             await pump(view(merged: true));
@@ -141,19 +155,19 @@ void main() {
               car: false,
               fullscreen: false,
               headingAligned: false,
-              mode: FollowMode.b,
+              mode: FollowMode.a,
             ),
           ),
         ),
       );
       final button = find.byWidgetPredicate(
-        (widget) => widget is RoomMapButton && widget.label == '합류 후 따라가기',
+        (widget) => widget is RoomMapButton && widget.label == '따라가기',
       );
       final state = tester.getSemantics(button);
       expect(
         state,
         matchesSemantics(
-          label: '합류 후 따라가기',
+          label: '따라가기',
           isButton: true,
           isSelected: true,
           hasSelectedState: true,
@@ -170,6 +184,12 @@ void main() {
     () {
       for (final brightness in Brightness.values) {
         final data = view();
+        final rejoin = roomNaverRejoinPath(data.connector);
+        expect(rejoin.coords[1].latitude, data.connector[1].lat);
+        expect(rejoin.coords[1].longitude, data.connector[1].lng);
+        expect(rejoin.color, const Color(0x80808080));
+        expect(rejoin.color.a, closeTo(.5, .01));
+        expect(rejoin.pattern, [12, 8]);
         final connector = roomNaverRoutePath(
           id: 'connector',
           points: data.connector,

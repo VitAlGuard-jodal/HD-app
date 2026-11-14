@@ -18,7 +18,7 @@ const request = FollowRouteRequest(
   guidanceGeneration: 3,
   calculationId: 'calc-1',
   requestId: 'request-1',
-  mode: FollowMode.a,
+  mode: FollowRouteKind.initial,
   originRef: SampleRef('0123456789abcdef', 1),
   anchor: RouteAnchor.sample(SampleRef('fedcba9876543210', 8)),
 );
@@ -70,6 +70,41 @@ void main() {
       expect(response.seconds, 12.345);
       expect(response.points, [testPoint(0), testPoint(100)]);
       expect(response.atAnchor, isFalse);
+    },
+  );
+  test(
+    'automatic rejoin preserves schema 1 B segment contract and response identity',
+    () async {
+      const rejoin = FollowRouteRequest(
+        followRequestId: 'follow-1',
+        guidanceGeneration: 4,
+        calculationId: 'rejoin-1',
+        requestId: 'request-2',
+        mode: FollowRouteKind.rejoin,
+        originRef: SampleRef('0123456789abcdef', 2),
+        anchor: RouteAnchor.segment(
+          SampleRef('fedcba9876543210', 8),
+          SampleRef('fedcba9876543210', 9),
+          .6,
+        ),
+      );
+      final http = AvatarTestHttp()
+        ..jsonResponse = (_) => routeJson(rejoin, testPoint(0), testPoint(100));
+      final api = http.api(AvatarTestTokenStore());
+      addTearDown(api.close);
+      await api.followRoute('ROOM', rejoin, RouteCancellation());
+      final json =
+          jsonDecode(utf8.decode(http.requests.single.body)) as JsonMap;
+      expect(json['mode'], 'B');
+      expect(json['schemaVersion'], 1);
+      expect(json['anchor'], rejoin.anchor.toJson());
+      expect(json.containsKey('origin'), isFalse);
+      final wrongMode = routeJson(rejoin, testPoint(0), testPoint(100))
+        ..['mode'] = 'A';
+      expect(
+        () => FollowRouteResult.fromJson(wrongMode, rejoin),
+        throwsFormatException,
+      );
     },
   );
   test('atAnchor is an empty route, not a fabricated line or merge', () {

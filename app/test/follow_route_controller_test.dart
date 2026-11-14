@@ -21,9 +21,10 @@ void main() {
       final joined = RouteFixture();
       addTearDown(joined.dispose);
       await joined.join();
-      joined.drive(-45, elapsed: 2000);
-      joined.drive(-45, elapsed: 3000);
-      joined.drive(-45, elapsed: 2000);
+      joined.drive(18);
+      joined.drive(-70, elapsed: 2000);
+      joined.drive(-80, elapsed: 3000);
+      joined.drive(-90, elapsed: 2000);
       expect(joined.state.condition, FollowRouteCondition.offRoute);
       expect(joined.calls, hasLength(1));
     },
@@ -33,7 +34,6 @@ void main() {
     final f = RouteFixture();
     addTearDown(f.dispose);
     await f.join();
-    f.controller.changeMode(FollowMode.b);
     f.drive(30, y: 60, elapsed: 2000);
     f.drive(40, y: 60, elapsed: 3000);
     f.drive(50, y: 60, elapsed: 2000);
@@ -43,25 +43,21 @@ void main() {
     expect(f.state.condition, isNot(FollowRouteCondition.offRoute));
   });
   test(
-    'C8 B unusable response remains hidden and needs sustained departure before rejoin',
+    'unusable initial response waits for sustained moving departure before rejoin',
     () async {
       final f = RouteFixture();
       addTearDown(f.dispose);
       f.update();
-      f.grow();
-      f.controller.changeMode(FollowMode.b);
-      final request = f.calls.last;
+      f.grow(500);
       f.drive(-50, y: 100, elapsed: 2000);
-      request.succeed();
+      f.calls.single.succeed();
       await flush();
       expect(f.state.connector, isEmpty);
-      f.drive(-40, y: 100);
-      f.drive(-30, y: 100, elapsed: 3000);
+      expect(f.departures, isEmpty);
+      f.depart(y: 100);
+      f.driveUntil(30000, y: 100);
       expect(f.calls, hasLength(2));
-      f.drive(-20, y: 100, elapsed: 2000);
-      f.time = 30000;
-      f.update();
-      expect(f.calls, hasLength(3));
+      expect(f.calls.last.request.mode, FollowRouteKind.rejoin);
     },
   );
   test(
@@ -90,7 +86,6 @@ void main() {
       expect(f.calls, isEmpty);
       expect(f.state.condition, FollowRouteCondition.disabled);
       expect(f.state.activeTrace, isNotEmpty);
-      f.controller.changeMode(FollowMode.b);
       expect(f.calls, isEmpty);
       f.routingEnabled = true;
       f.update();
@@ -111,38 +106,37 @@ void main() {
       expect(f.state.progress, progress);
       expect(f.calls, hasLength(1));
       f.time = 30000;
-      f.controller.changeMode(FollowMode.b);
-      expect(f.calls, hasLength(2));
+      f.update();
+      expect(f.calls, hasLength(1));
       expect(f.state.progress, progress);
     },
   );
 
-  test('B actual rejoin remains B and emits the next round once', () async {
-    final f = RouteFixture();
-    addTearDown(f.dispose);
-    await f.join();
-    f.controller.changeMode(FollowMode.b);
-    f.drive(20, y: 80, elapsed: 2000);
-    f.drive(30, y: 80, elapsed: 3000);
-    f.drive(40, y: 80, elapsed: 2000);
-    f.time = 30000;
-    f.update();
-    final call = f.calls.last;
-    call.succeed();
-    await flush();
-    final anchor = f.state.anchorPoint!;
-    final x = anchor.lng * metersPerDegree;
-    f.drive(x - 20, y: 15, elapsed: 2000);
-    f.drive(x, elapsed: 1000);
-    f.drive(x + 6);
-    f.drive(x + 12);
-    f.drive(x + 18);
-    expect(f.state.phase, FollowPhase.onTrace);
-    expect(f.state.mode, FollowMode.b);
-    expect(f.joins, [('follow-1', 1), ('follow-1', 2)]);
-    f.update();
-    expect(f.joins, hasLength(2));
-  });
+  test(
+    'automatic rejoin keeps follow mode and emits the next round once',
+    () async {
+      final f = RouteFixture();
+      addTearDown(f.dispose);
+      await f.join();
+      f.depart();
+      f.driveUntil(30000);
+      final call = f.calls.last;
+      call.succeed();
+      await flush();
+      final anchor = f.state.anchorPoint!;
+      final x = anchor.lng * metersPerDegree;
+      f.drive(x - 20, y: 15, elapsed: 2000);
+      f.drive(x, elapsed: 1000);
+      f.drive(x + 6);
+      f.drive(x + 12);
+      f.drive(x + 18);
+      expect(f.state.phase, FollowPhase.onTrace);
+      expect(f.state.mode, FollowMode.a);
+      expect(f.joins, [('follow-1', 1), ('follow-1', 2)]);
+      f.update();
+      expect(f.joins, hasLength(2));
+    },
+  );
 
   test(
     'LOCATION_NOT_READY waits for a new measurement, not timer retry',
@@ -294,27 +288,21 @@ void main() {
     },
   );
   test(
-    'C4 approaching A to B to A changes inputs, keeps relationship and rejects old success',
+    'reserved meeting-point mode cannot start a route or invalidate A',
     () async {
       final f = RouteFixture();
       addTearDown(f.dispose);
       f.update();
-      final a = f.calls.single;
-      f.grow();
-      expect(f.controller.changeMode(FollowMode.b), isTrue);
-      final b = f.calls.last;
-      expect(b.request.anchor.end, isNotNull);
-      expect(b.request.followRequestId, a.request.followRequestId);
-      expect(a.cancellation.isCancelled, isTrue);
-      a.succeed();
+      final initial = f.calls.single;
+      final generation = f.state.generation;
+      expect(f.controller.changeMode(FollowMode.meetingPoint), isFalse);
+      expect(f.controller.changeMode(FollowMode.a), isFalse);
+      expect(f.state.generation, generation);
+      expect(f.calls, hasLength(1));
+      expect(initial.cancellation.isCancelled, isFalse);
+      initial.succeed();
       await flush();
-      expect(f.state.route, isNull);
-      expect(f.controller.changeMode(FollowMode.a), isTrue);
-      expect(f.state.anchor, RouteAnchor.sample(SampleRef.of(f.leader!)));
-      expect(
-        f.calls.last.request.calculationId,
-        isNot(b.request.calculationId),
-      );
+      expect(f.state.route, isNotNull);
     },
   );
   test(
@@ -324,7 +312,7 @@ void main() {
       addTearDown(f.dispose);
       await f.join();
       final progress = f.state.progress;
-      f.controller.changeMode(FollowMode.b);
+      expect(f.controller.changeMode(FollowMode.meetingPoint), isFalse);
       f.controller.changeMode(FollowMode.a);
       expect(f.state.phase, FollowPhase.onTrace);
       expect(f.state.progress, progress);
@@ -337,43 +325,38 @@ void main() {
     addTearDown(f.dispose);
     f.update();
     f.locked = true;
-    expect(f.controller.changeMode(FollowMode.b), isFalse);
+    expect(f.controller.changeMode(FollowMode.meetingPoint), isFalse);
     expect(f.controller.reset(), isFalse);
     expect(f.state.mode, FollowMode.a);
     expect(f.calls, hasLength(1));
   });
-  for (final mode in FollowMode.values) {
-    test(
-      'C5/C6 sustained off trace policy ${mode.name} and thirty-second cooldown',
-      () async {
-        final f = RouteFixture();
-        addTearDown(f.dispose);
-        await f.join();
-        if (mode == FollowMode.b) f.controller.changeMode(mode);
-        f.drive(20, y: 80, elapsed: 2000);
-        f.drive(30, y: 80, elapsed: 3000);
-        expect(f.calls, hasLength(1));
-        f.drive(40, y: 80, elapsed: 2000);
-        expect(f.state.condition, FollowRouteCondition.offRoute);
-        expect(f.calls, hasLength(1));
-        f.time = 30000;
-        f.update();
-        expect(f.calls, hasLength(mode == FollowMode.b ? 2 : 1));
-        if (mode == FollowMode.b) {
-          expect(f.state.phase, FollowPhase.approaching);
-          expect(f.state.mode, mode);
-          expect(f.state.progress, isNotNull);
-        }
-      },
-    );
-  }
+  test(
+    'sustained departure automatically rejoins after at least thirty seconds',
+    () async {
+      final f = RouteFixture();
+      addTearDown(f.dispose);
+      await f.join();
+      f.depart();
+      expect(f.state.condition, FollowRouteCondition.offRoute);
+      expect(f.calls, hasLength(1));
+      expect(f.departures, [('follow-1', 1)]);
+      f.driveUntil(29000);
+      expect(f.calls, hasLength(1));
+      f.driveUntil(30000);
+      expect(f.calls, hasLength(2));
+      expect(f.state.phase, FollowPhase.approaching);
+      expect(f.state.progress, isNotNull);
+      expect(f.calls.last.request.toJson()['mode'], 'B');
+      expect(f.calls.last.request.anchor.end, isNotNull);
+      expect(f.state.mode, FollowMode.a);
+    },
+  );
   test(
     'C6 a one-second excursion and normal return reset departure evidence',
     () async {
       final f = RouteFixture();
       addTearDown(f.dispose);
       await f.join();
-      f.controller.changeMode(FollowMode.b);
       f.drive(20, y: 61, elapsed: 2000);
       f.drive(30, elapsed: 2000);
       f.time = 31000;
@@ -383,7 +366,7 @@ void main() {
     },
   );
   test(
-    'C8 response projects current progress but a different road requires explicit A reset',
+    'response projects current progress but a different road hides the line until judged',
     () async {
       final f = RouteFixture();
       addTearDown(f.dispose);
@@ -397,51 +380,50 @@ void main() {
       f.drive(-25, y: 100, elapsed: 2000);
       next.succeed();
       await flush();
-      expect(f.state.condition, FollowRouteCondition.resetRequired);
+      expect(f.state.condition, FollowRouteCondition.offRoute);
       expect(f.state.connector, isEmpty);
     },
   );
   test(
-    'G9 B road failure tries only one distinct candidate after thirty seconds',
+    'road failure tries one distinct forward candidate after thirty seconds',
     () async {
       final f = RouteFixture();
       addTearDown(f.dispose);
-      f.update();
-      f.grow();
-      f.controller.changeMode(FollowMode.b);
+      await f.join();
+      f.grow(500);
+      f.depart();
+      f.driveUntil(30000);
       final first = f.calls.last;
       first.fail('NO_ROUTE');
       await flush();
-      f.time = 29999;
-      f.update();
+      f.driveUntil(59000);
       expect(f.calls, hasLength(2));
-      f.time = 30000;
-      f.update();
+      f.driveUntil(60000);
       expect(f.calls, hasLength(3));
       expect(f.calls.last.request.anchor, isNot(first.request.anchor));
       f.calls.last.fail('ENDPOINT_MISMATCH');
       await flush();
-      f.time = 60000;
-      f.update();
+      f.driveUntil(95000);
       expect(f.calls, hasLength(3));
       expect(f.state.condition, FollowRouteCondition.noRoute);
     },
   );
-  test(
-    'G9 candidate at trace end is not retried as a second candidate',
-    () async {
-      final f = RouteFixture();
-      addTearDown(f.dispose);
-      f.update();
-      f.grow(20);
-      f.controller.changeMode(FollowMode.b);
-      f.calls.last.fail('NO_ROUTE');
-      await flush();
-      f.time = 30000;
-      f.update();
-      expect(f.calls, hasLength(2));
-    },
-  );
+  test('candidate at trace end is not retried as a second candidate', () async {
+    final f = RouteFixture();
+    addTearDown(f.dispose);
+    await f.join();
+    f.grow(140);
+    f.depart();
+    f.driveUntil(30000);
+    expect(f.calls, hasLength(2));
+    expect(f.state.anchor!.end, SampleRef.of(f.leader!));
+    expect(f.state.anchor!.fraction, 1);
+    f.calls.last.fail('NO_ROUTE');
+    await flush();
+    f.driveUntil(95000);
+    expect(f.calls, hasLength(2));
+    expect(f.state.condition, FollowRouteCondition.noRoute);
+  });
   test(
     'retry budget is two, input stays frozen while self and leader move',
     () async {

@@ -117,7 +117,7 @@ class _RoomMapState extends State<RoomMap> {
         mode: widget.guidance?.mode,
         guidanceLabel: switch (widget.guidance) {
           final guidance? =>
-            '${guidance.mode == FollowMode.a ? '따라가기' : '합류 후 따라가기'} · ${guidance.status}\n'
+            '${guidance.mode == FollowMode.a ? '따라가기' : '합류 지점 따라가기'} · ${guidance.status}\n'
                 '${guidance.condition == FollowRouteCondition.disabled ? '추천 경로 제공 비활성' : '안내 시작·재계산 시 네이버 Maps에 좌표 제공'}',
           null => null,
         },

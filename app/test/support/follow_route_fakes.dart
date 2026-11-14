@@ -18,6 +18,7 @@ LocationFix testFix(
   String handle = 'leader',
   String stream = '0123456789abcdef',
   double? acc = 2,
+  double? speed,
 }) {
   final point = testPoint(x, y);
   return LocationFix(
@@ -26,6 +27,7 @@ LocationFix testFix(
     lat: point.lat,
     lng: point.lng,
     acc: acc,
+    speed: speed,
     seq: seq,
     at: at ?? routeEpoch + seq * 1000,
     receivedAt: handle == 'self' ? 0 : at ?? routeEpoch + seq * 1000,
@@ -103,7 +105,11 @@ class RouteCall {
 }
 
 class RouteFixture {
-  RouteFixture() {
+  RouteFixture({
+    void Function(String, int, bool)? onJoined,
+    void Function(String, int)? onDeparted,
+    void Function()? onInvalidated,
+  }) {
     controller = FollowRouteController(
       load: (room, request, cancellation) {
         final state = controller.state!;
@@ -119,8 +125,19 @@ class RouteFixture {
       },
       canChange: () => !locked,
       now: () => time,
-      onJoined: (id, round) => joins.add((id, round)),
-      onInvalidated: () => invalidations++,
+      onJoined: (id, round, rejoined) {
+        joins.add((id, round));
+        rejoinedEvents.add(rejoined);
+        onJoined?.call(id, round, rejoined);
+      },
+      onDeparted: (id, round) {
+        departures.add((id, round));
+        onDeparted?.call(id, round);
+      },
+      onInvalidated: () {
+        invalidations++;
+        onInvalidated?.call();
+      },
     );
   }
   late final FollowRouteController controller;
@@ -137,6 +154,8 @@ class RouteFixture {
   double selfAge = 0, leaderAge = 0, originAge = 0;
   final calls = <RouteCall>[];
   final joins = <(String, int)>[];
+  final departures = <(String, int)>[];
+  final rejoinedEvents = <bool>[];
   FollowGuidance get state => controller.state!;
   void update() => controller.update(
     FollowRouteInput(
@@ -165,7 +184,13 @@ class RouteFixture {
     update();
   }
 
-  void drive(double x, {double y = 0, int elapsed = 1000, double? acc = 2}) {
+  void drive(
+    double x, {
+    double y = 0,
+    int elapsed = 1000,
+    double? acc = 2,
+    double? speed,
+  }) {
     time += elapsed;
     self = testFix(
       x,
@@ -174,6 +199,7 @@ class RouteFixture {
       seq: ++selfSeq,
       at: routeEpoch + time,
       acc: acc,
+      speed: speed,
     );
     update();
   }
@@ -190,6 +216,28 @@ class RouteFixture {
     for (final x in [-20.0, 0.0, 6.0, 12.0, 18.0]) {
       drive(x);
     }
+  }
+
+  // Keep distinct, continuous measurements while waiting for the route cooldown.
+  void depart({double y = 80}) {
+    for (var i = 0; i < 7; i++) {
+      drive(30.0 + i * 3, y: y);
+    }
+  }
+
+  void driveUntil(int until, {double y = 80}) {
+    while (time < until) {
+      drive(self!.lng * metersPerDegree + 3, y: y);
+    }
+  }
+
+  Future<void> rejoinRoute() async {
+    await join();
+    grow(500);
+    depart();
+    driveUntil(30000);
+    calls.last.succeed();
+    await flush();
   }
 
   void dispose() => controller.dispose();

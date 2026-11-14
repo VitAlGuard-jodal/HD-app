@@ -138,6 +138,32 @@ double routeLength(List<RoutePoint> points) {
   return length;
 }
 
+/// Only a locally aligned extension of the latest recorded segment suggests
+/// passing its end. It is not proof of which vehicle is on which physical road.
+bool isBeyondTraceEnd(
+  RoutePoint self,
+  List<RoutePoint> points,
+  double direction,
+) {
+  if (points.length < 2) return false;
+  final end = points.last;
+  RoutePoint? before;
+  for (var i = points.length - 2; i >= 0; i--) {
+    if (routeDistance(points[i], end) >= 3) {
+      before = points[i];
+      break;
+    }
+  }
+  if (before == null) return false;
+  final tangent = routeBearing(before, end);
+  if (routeDirectionDifference(direction, tangent) > 60) return false;
+  final distance = routeDistance(end, self);
+  final angle =
+      routeDirectionDifference(tangent, routeBearing(end, self)) * _radians;
+  return distance * math.cos(angle) > 25 &&
+      (distance * math.sin(angle)).abs() <= 25;
+}
+
 class TracePath {
   TracePath(List<LocationFix> fixes)
     : fixes = List.unmodifiable(fixes),

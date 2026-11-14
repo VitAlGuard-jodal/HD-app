@@ -110,13 +110,22 @@ class RoomSession extends ChangeNotifier {
     followRoute = FollowRouteController(
       load: api.followRoute,
       canChange: () => !followNeedsStop && !state.isLeaving && !_deviceReplaced,
-      onJoined: (relationship, round) {
+      onJoined: (relationship, round, rejoined) {
         final code = state.code;
         if (code != null)
           _routeVoice.announceOnce(
             room: code,
-            key: '$relationship:$round',
-            text: '앞차가 지나간 경로를 따라갑니다',
+            key: '$relationship:joined:$round',
+            text: rejoined ? '앞차가 지나간 경로를 다시 따라갑니다' : '앞차가 지나간 경로를 따라갑니다',
+          );
+      },
+      onDeparted: (relationship, round) {
+        final code = state.code;
+        if (code != null)
+          _routeVoice.announceOnce(
+            room: code,
+            key: '$relationship:departed:$round',
+            text: '경로를 벗어났습니다. 다시 합류할 길을 안내합니다',
           );
       },
       onInvalidated: _routeVoice.clear,

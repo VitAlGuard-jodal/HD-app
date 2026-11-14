@@ -254,9 +254,14 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
                         points: guidance.connector
                             .map((p) => LatLng(p.lat, p.lng))
                             .toList(),
-                        color: const Color(0xff1a9eb5).withValues(alpha: alpha),
+                        color: guidance.rejoining
+                            ? const Color(0x80808080)
+                            : const Color(0xff1a9eb5).withValues(alpha: alpha),
                         borderColor: Colors.white.withValues(alpha: alpha),
-                        borderStrokeWidth: 2,
+                        borderStrokeWidth: guidance.rejoining ? 0 : 2,
+                        pattern: guidance.rejoining
+                            ? StrokePattern.dashed(segments: const [12, 8])
+                            : const StrokePattern.solid(),
                         strokeWidth: 6,
                         strokeCap: StrokeCap.round,
                         strokeJoin: StrokeJoin.round,

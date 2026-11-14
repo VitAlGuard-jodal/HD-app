@@ -2,7 +2,11 @@ import 'dart:async';
 
 import 'models.dart';
 
-enum FollowMode { a, b }
+enum FollowMode { a, meetingPoint }
+
+/// Schema 1 still calls these A/B. They describe the route input, not the
+/// user's follow mode: B is now used only for automatic trace rejoining.
+enum FollowRouteKind { initial, rejoin }
 
 enum FollowPhase { approaching, onTrace }
 
@@ -107,7 +111,7 @@ class FollowRouteRequest {
   });
   final String followRequestId, calculationId, requestId;
   final int guidanceGeneration;
-  final FollowMode mode;
+  final FollowRouteKind mode;
   final SampleRef originRef;
   final RouteAnchor anchor;
   JsonMap toJson() => {
@@ -116,7 +120,7 @@ class FollowRouteRequest {
     'guidanceGeneration': guidanceGeneration,
     'calculationId': calculationId,
     'requestId': requestId,
-    'mode': mode == FollowMode.a ? 'A' : 'B',
+    'mode': mode == FollowRouteKind.initial ? 'A' : 'B',
     'originRef': originRef.toJson(),
     'anchor': anchor.toJson(),
   };
@@ -131,7 +135,7 @@ class FollowRouteResult {
   FollowRouteResult.fromJson(JsonMap json, FollowRouteRequest request) {
     if (!request.matches(json) ||
         json['schemaVersion'] != 1 ||
-        json['mode'] != (request.mode == FollowMode.a ? 'A' : 'B') ||
+        json['mode'] != (request.mode == FollowRouteKind.initial ? 'A' : 'B') ||
         SampleRef.fromJson(json['originRef']) != request.originRef ||
         RouteAnchor.fromJson(json['anchor']) != request.anchor ||
         json['provider'] != 'naver' ||

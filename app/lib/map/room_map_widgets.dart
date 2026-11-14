@@ -244,12 +244,10 @@ class RoomMapControls extends StatelessWidget {
           ),
           RoomMapButton(
             icon: 'route',
-            label: '합류 후 따라가기',
+            label: '합류 지점 따라가기 · 준비 중',
             car: car,
-            selected: mode == FollowMode.b,
-            onPressed: onModeChanged == null
-                ? null
-                : () => onModeChanged!(FollowMode.b),
+            selected: false,
+            onPressed: null,
           ),
           RoomMapButton(
             icon: 'refresh',
