@@ -28,7 +28,7 @@ const _timeout = Timeout(Duration(seconds: 30));
 void main() {
   for (final incoming in [false, true]) {
     testWidgets(
-      'v4 ${incoming ? '앞차' : '뒷차'} 동의 저장 실패는 공유와 수락을 차단하고 재시도할 수 있다',
+      'v5 ${incoming ? '앞차' : '뒷차'} 동의 저장 실패는 공유와 수락을 차단하고 재시도할 수 있다',
       (tester) async {
         final f = await _Fixture.create(
           tester,
@@ -72,7 +72,7 @@ void main() {
     );
   }
 
-  testWidgets('v4 기록 응답 대기 중에는 위치·follow를 시작하지 않는다', (tester) async {
+  testWidgets('v5 기록 응답 대기 중에는 위치·follow를 시작하지 않는다', (tester) async {
     final f = await _Fixture.create(tester);
     final gate = Completer<void>();
     try {
@@ -377,7 +377,7 @@ void main() {
       expect(consentRequests.single.method, 'PUT');
       expect(consentRequests.single.uri.path, '/v1/me/consent');
       expect(jsonDecode(utf8.decode(consentRequests.single.body)), {
-        'location': {'version': '4'},
+        'location': {'version': '5'},
       });
       expect(f.services.rooms.followTarget, 'alice');
       expect(find.byType(RoomMap), findsOneWidget);
@@ -479,7 +479,7 @@ void main() {
           expect(consentRequests.single.method, 'PUT');
           expect(consentRequests.single.uri.path, '/v1/me/consent');
           expect(jsonDecode(utf8.decode(consentRequests.single.body)), {
-            'location': {'version': '4'},
+            'location': {'version': '5'},
           });
         } else {
           expect(f.services.api.http.requests, isEmpty);

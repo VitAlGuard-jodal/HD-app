@@ -110,6 +110,42 @@ test("C1 유한수·범위와 안전 정수 seq를 검증한다", () => {
     { ok: true, dropped: false });
 });
 
+test("source accepts only omitted or vehicle; bad accuracy cannot hide behind the source", () => {
+  const store = new RoomLocationStore(() => 1000);
+  for (const src of [null, "phone", "Vehicle", "unknown", 1, true, {}]) {
+    assert.deepEqual(store.accept("ROOM", { ...sample, src }), { ok: false, reason: "invalid" });
+  }
+  for (const acc of [null, -1, NaN, Infinity, "25"]) {
+    assert.deepEqual(store.accept("ROOM", { ...sample, src: "vehicle", acc }), { ok: false, reason: "invalid" });
+  }
+  follow(store);
+  const vehicle = { ...sample, acc: undefined, src: "vehicle" };
+  assert.deepEqual(store.accept("ROOM", vehicle), { ok: true, dropped: false });
+  const ref = { stream: sample.stream, seq: sample.seq };
+  for (const fix of [store.position("ROOM", "alice"), store.recentSample("ROOM", "alice", ref),
+    store.trail("ROOM", "alice")[0], store.snapshot("ROOM", "bob").trails.alice[0]]) {
+    assert.equal(fix?.src, "vehicle");
+    assert.equal(Object.hasOwn(fix!, "acc"), false);
+  }
+  assert.deepEqual(store.accept("ROOM", { ...sample, seq: 1 }, 2000), { ok: true, dropped: false });
+  assert.equal(Object.hasOwn(store.position("ROOM", "alice")!, "src"), false);
+});
+
+test("vehicle source and absent accuracy survive location SSE and reconnect hello", async (t) => {
+  const { api, send } = fixture(t);
+  const events = send("GET", "/v1/rooms/ABC234/events", "bob");
+  assert.equal((await api("POST", "/location", "alice", { ...sample, src: "vehicle", acc: undefined })).status, 202);
+  const update = events.events().find((event) => event.name === "location")!.data;
+  assert.equal(update.src, "vehicle");
+  assert.equal(Object.hasOwn(update, "acc"), false);
+  events.emit("close");
+  const reconnect = send("GET", "/v1/rooms/ABC234/events", "bob");
+  const hello = reconnect.events().find((event) => event.name === "hello")!.data;
+  assert.equal(hello.positions[0].src, "vehicle");
+  assert.equal(hello.trails.alice[0].src, "vehicle");
+  assert.equal(Object.hasOwn(hello.trails.alice[0], "acc"), false);
+});
+
 test("위치 stream별 중복·역순과 handle별 400ms 제한은 독립적으로 유지한다", () => {
   const store = new RoomLocationStore(() => 0);
   follow(store);

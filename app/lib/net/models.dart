@@ -169,6 +169,7 @@ class LocationFix {
     required this.lat,
     required this.lng,
     this.acc,
+    this.src,
     this.speed,
     this.heading,
     required this.at,
@@ -192,6 +193,10 @@ class LocationFix {
         json[key] == null ? null : number(key, min: 0, max: max).toDouble();
     final handle = json['handle'];
     final stream = json['stream'];
+    final src = json['src'];
+    if (json.containsKey('src') && src != 'vehicle') {
+      throw const FormatException('위치 표본 출처 오류');
+    }
     if (handle is! String ||
         handle.isEmpty ||
         stream is! String ||
@@ -203,7 +208,8 @@ class LocationFix {
       stream: stream,
       lat: number('lat', min: -90, max: 90).toDouble(),
       lng: number('lng', min: -180, max: 180).toDouble(),
-      acc: optional('acc'),
+      acc: json.containsKey('acc') ? number('acc', min: 0).toDouble() : null,
+      src: src as String?,
       speed: optional('speed'),
       heading: optional('heading', max: 360),
       at: number('at', min: 0),
@@ -215,6 +221,8 @@ class LocationFix {
   final String stream;
   final double lat, lng;
   final double? acc, speed, heading;
+  // Optional client-reported source; it grants no identity or permissions.
+  final String? src;
   final num at;
   final int seq;
   // 송신 쪽은 서버 수신 시각을 아직 모르므로 0으로 둔다.
@@ -225,6 +233,7 @@ class LocationFix {
     'lat': lat,
     'lng': lng,
     if (acc != null) 'acc': acc,
+    if (src != null) 'src': src,
     if (speed != null) 'speed': speed,
     if (heading != null) 'heading': heading,
     'at': at,
@@ -232,7 +241,7 @@ class LocationFix {
   };
 
   Object get _values =>
-      (handle, stream, lat, lng, acc, speed, heading, at, seq, receivedAt);
+      (handle, stream, lat, lng, acc, src, speed, heading, at, seq, receivedAt);
   @override
   bool operator ==(Object other) =>
       other is LocationFix && _values == other._values;

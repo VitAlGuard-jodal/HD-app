@@ -40,8 +40,15 @@ interface ActiveCall {
   controller: AbortController;
 }
 
+function accuracyAllowance(fix: LocationFix): number | undefined {
+  // Pleos supplies no documented metre accuracy. 25 m is only an assumed
+  // jump allowance, never a measured acc or proof of vehicle provenance.
+  // Keep in sync with app/lib/location/follow_route_geometry.dart.
+  if (fix.acc === undefined) return fix.src === "vehicle" ? 25 : undefined;
+  return finite(fix.acc) && fix.acc >= 0 && fix.acc <= 25 ? fix.acc : undefined;
+}
 function quality(fix: LocationFix): boolean {
-  return finite(fix.acc) && fix.acc >= 0 && fix.acc <= 25
+  return accuracyAllowance(fix) !== undefined
     && fix.at <= fix.receivedAt && fix.receivedAt - fix.at <= ROUTE_LOCATION_AGE_MS;
 }
 function fresh(fix: LocationFix | undefined, now: number): fix is LocationFix {
@@ -52,7 +59,7 @@ function continuous(a: LocationFix, b: LocationFix): boolean {
   const elapsed = b.at - a.at;
   return a.stream === b.stream && b.seq === a.seq + 1 && quality(a) && quality(b)
     && elapsed > 0 && elapsed <= ROUTE_LOCATION_AGE_MS && b.receivedAt >= a.receivedAt
-    && distance(a, b) <= 70 * elapsed / 1000 + a.acc! + b.acc!;
+    && distance(a, b) <= 70 * elapsed / 1000 + accuracyAllowance(a)! + accuracyAllowance(b)!;
 }
 function coordinates(fix: Point): Point { return { lat: fix.lat, lng: fix.lng }; }
 function fingerprint(request: FollowRouteRequest): string {

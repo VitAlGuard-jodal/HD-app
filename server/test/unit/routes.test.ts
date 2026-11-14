@@ -27,6 +27,126 @@ function httpFixture(t: TestContext) {
   return { ...f, app, post };
 }
 
+test("vehicle fixes without metre accuracy pass A routing", async (t) => {
+  const f = serviceFixture(t);
+  f.elapse(1000);
+  f.publish("leader", { acc: undefined, src: "vehicle" });
+  f.publish("follower", { acc: undefined, src: "vehicle" });
+  const result = await f.run();
+  assert.equal(result.result, "route");
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.calls[0].origin, origin);
+  assert.deepEqual(f.calls[0].destination, destination);
+});
+
+for (const mode of ["A", "B"] as const) test(`vehicle location POST, snapshot and ${mode} route preserve the contract`, async (t) => {
+  const f = httpFixture(t);
+  f.elapse(1000);
+  for (const handle of ["leader", "follower"]) {
+    const current = f.locations.position(f.room.code, handle)!;
+    const { acc: _acc, receivedAt: _receivedAt, ...sample } = current;
+    const response = await f.post({ ...sample, src: "vehicle", seq: 1, at: f.now() }, handle,
+      { path: `/v1/rooms/${f.room.code}/location` }).done;
+    assert.equal(response.statusCode, 202);
+  }
+  const snapshot = (await f.post(undefined, "follower", { method: "GET", path: `/v1/rooms/${f.room.code}/positions` }).done).json();
+  for (const fix of snapshot.positions) {
+    assert.equal(fix.src, "vehicle");
+    assert.equal(Object.hasOwn(fix, "acc"), false);
+  }
+  assert.equal(snapshot.trails.leader.at(-1).src, "vehicle");
+  let input = f.request();
+  if (mode === "B") {
+    f.elapse(1000);
+    f.publish("leader", { seq: 2, lat: destination.lat + .0001, acc: undefined, src: "vehicle" });
+    input = f.request({ mode, anchor: { kind: "segment", startRef: { stream: leaderStream, seq: 1 },
+      endRef: { stream: leaderStream, seq: 2 }, fraction: .5 } });
+  }
+  const result = await f.post(input).done;
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.json().mode, mode);
+  assert.equal(f.calls.length, 1);
+  // Source and assumed allowance never reach the external provider.
+  assert.deepEqual(Object.keys(f.calls[0].origin).sort(), ["lat", "lng"]);
+  assert.deepEqual(Object.keys(f.calls[0].destination).sort(), ["lat", "lng"]);
+});
+
+test("phone/vehicle accuracy gates agree for both current participants", async (t) => {
+  for (const handle of ["leader", "follower"]) for (const src of [undefined, "vehicle"] as const) {
+    for (const acc of [undefined, 0, 25, 25.01]) {
+      const f = serviceFixture(t);
+      f.elapse(1000);
+      f.publish(handle, { src, acc });
+      const allowed = acc === undefined ? src === "vehicle" : acc <= 25;
+      if (allowed) assert.equal((await f.run()).result, "route");
+      else await assert.rejects(f.run(), error("LOCATION_NOT_READY"));
+      assert.equal(f.calls.length, allowed ? 1 : 0, `${handle} src=${src} acc=${acc}`);
+    }
+  }
+});
+
+test("vehicle B continuity uses 25 m only for missing accuracy and still rejects discontinuities", async (t) => {
+  for (const change of [
+    { meters: 119, acc: undefined, allowed: true },
+    { meters: 121, acc: undefined, allowed: false },
+    { meters: 96, acc: 2, allowed: true },
+    { meters: 98, acc: 2, allowed: false },
+    { meters: 10, acc: undefined, seq: 3, allowed: false },
+    { meters: 10, acc: undefined, stream: selfStream, allowed: false },
+    { meters: 10, acc: undefined, gap: 10001, allowed: false },
+  ]) {
+    const f = serviceFixture(t);
+    f.elapse(1000);
+    f.publish("leader", { acc: undefined, src: "vehicle" });
+    f.elapse(change.gap ?? 1000);
+    f.publish("leader", { acc: change.acc, src: "vehicle", seq: change.seq ?? 2,
+      stream: change.stream ?? leaderStream, lat: destination.lat + change.meters / (6371000 * Math.PI / 180) });
+    f.publish("follower", { acc: undefined, src: "vehicle" });
+    const input = f.request({ mode: "B", anchor: { kind: "segment", startRef: { stream: leaderStream, seq: 1 },
+      endRef: { stream: change.stream ?? leaderStream, seq: change.seq ?? 2 }, fraction: .5 } });
+    if (change.allowed) assert.equal((await f.run(input)).result, "route");
+    else await assert.rejects(f.run(input), error("TRACE_DISCONTINUITY"));
+    assert.equal(f.calls.length, change.allowed ? 1 : 0);
+  }
+});
+
+test("vehicle source cannot bypass freshness, consent, membership, device or follow authorization", async (t) => {
+  for (const blocked of ["stale", "consent", "member", "device", "follow"]) {
+    const f = httpFixture(t);
+    f.elapse(1000);
+    f.publish("leader", { acc: undefined, src: "vehicle" });
+    f.publish("follower", { acc: undefined, src: "vehicle" });
+    const input = f.request();
+    if (blocked === "stale") f.elapse(10001);
+    if (blocked === "consent") updateUserConsent(f.db, f.users[0].id, { locationVersion: "4" });
+    if (blocked === "follow") f.locations.unfollow(f.room.code, "follower");
+    const result = await f.post(input, blocked === "member" ? "outsider" : "follower",
+      blocked === "device" ? { device: "a".repeat(32) } : {}).done;
+    assert.equal(result.json().error.code, {
+      stale: "LOCATION_NOT_READY", consent: "CONSENT_REQUIRED_TARGET", member: "NOT_ROOM_MEMBER",
+      device: "NOT_ACTIVE_SENDER", follow: "FOLLOW_NOT_ACTIVE",
+    }[blocked]);
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test("valid vehicle fixes cannot repair a historical unmarked or inaccurate sample", async (t) => {
+  for (const bad of [{ acc: undefined }, { acc: 26, src: "vehicle" }] as const) {
+    const f = serviceFixture(t);
+    f.elapse(1000);
+    f.publish("leader", { acc: undefined, src: "vehicle" });
+    f.elapse(1000);
+    f.publish("leader", { lat: destination.lat + .0001, ...bad });
+    f.elapse(1000);
+    f.publish("leader", { lat: destination.lat + .0002, acc: undefined, src: "vehicle" });
+    f.publish("follower", { acc: undefined, src: "vehicle" });
+    const request = f.request({ mode: "B", anchor: { kind: "segment", startRef: { stream: leaderStream, seq: 1 },
+      endRef: { stream: leaderStream, seq: 2 }, fraction: .5 } });
+    await assert.rejects(f.run(request), error("TRACE_DISCONTINUITY"));
+    assert.equal(f.calls.length, 0);
+  }
+});
+
 test("S2 Naver traoptimal normalizes lng/lat and 12,345 ms without synthetic seq", () => {
   const body = naverBody();
   body.route.traoptimal[0].path.splice(1, 0, [...body.route.traoptimal[0].path[0]]);
@@ -358,10 +478,10 @@ test("S5 HTTP checks authentication, room membership, sender and follow state be
   }
 });
 
-test("S6 HTTP requires both persisted v4 records and timestamps, even for automatic follow acceptance", async (t) => {
+test("S6 HTTP requires both persisted v5 records and timestamps, even for automatic follow acceptance", async (t) => {
   for (const userIndex of [0, 1]) for (const column of ["privacy_version", "location_version", "privacy_consented_at", "location_consented_at"]) {
     const f = httpFixture(t);
-    f.db.prepare(`UPDATE users SET ${column} = ? WHERE id = ?`).run(column.endsWith("version") ? "3" : null, f.users[userIndex].id);
+    f.db.prepare(`UPDATE users SET ${column} = ? WHERE id = ?`).run(column.endsWith("version") ? "4" : null, f.users[userIndex].id);
     const response = await f.post().done;
     assert.equal(response.statusCode, 403);
     assert.equal(response.json().error.code, userIndex === 0 ? "CONSENT_REQUIRED_TARGET" : "CONSENT_REQUIRED_SELF");
@@ -379,11 +499,11 @@ test("S6 failed consent storage cannot authorize routing; successful record perm
   const f = httpFixture(t);
   updateUserConsent(f.db, f.users[1].id, { locationVersion: "3" });
   f.db.exec("CREATE TRIGGER fail_consent BEFORE UPDATE OF location_version ON users BEGIN SELECT RAISE(FAIL, 'synthetic storage failure'); END");
-  const failure = await f.post({ location: { version: "4" } }, "follower", { method: "PUT", path: "/v1/me/consent" }).done;
+  const failure = await f.post({ location: { version: "5" } }, "follower", { method: "PUT", path: "/v1/me/consent" }).done;
   assert.equal(failure.statusCode, 500);
   assert.equal((await f.post().done).json().error.code, "CONSENT_REQUIRED_SELF"); assert.equal(f.calls.length, 0);
   f.db.exec("DROP TRIGGER fail_consent");
-  assert.equal((await f.post({ location: { version: "4" } }, "follower", { method: "PUT", path: "/v1/me/consent" }).done).statusCode, 200);
+  assert.equal((await f.post({ location: { version: "5" } }, "follower", { method: "PUT", path: "/v1/me/consent" }).done).statusCode, 200);
   assert.equal((await f.post().done).statusCode, 200); assert.equal(f.calls.length, 1);
 });
 

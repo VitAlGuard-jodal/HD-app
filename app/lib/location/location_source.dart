@@ -3,6 +3,7 @@ class LocationSample {
     required this.lat,
     required this.lng,
     this.accuracy,
+    this.src,
     this.speed,
     this.heading,
     this.altitude,
@@ -11,6 +12,8 @@ class LocationSample {
   });
   final double lat, lng;
   final double? accuracy, speed, heading;
+  // Set only by the Pleos decoder, never by the UI's car/phone mode.
+  final String? src;
   // Pleos confidence has no documented metre unit; never send it as accuracy.
   final double? altitude, confidence;
   final DateTime at;

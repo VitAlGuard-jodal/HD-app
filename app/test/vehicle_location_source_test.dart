@@ -70,6 +70,8 @@ void main() {
     final samples = <LocationSample>[];
     final subscription = f.source.watch().listen(samples.add);
     await pumpEventQueue();
+    await f.emit(_fix());
+    expect(samples.single.src, 'vehicle');
     await f.error();
     expect(f.eventMethods, ['listen', 'cancel']);
     expect(f.fallback.requests, 1);
@@ -77,7 +79,9 @@ void main() {
     final sample = LocationSample(lat: 38, lng: 128, at: DateTime.utc(2026));
     f.fallback.add(sample);
     await pumpEventQueue();
-    expect(samples.single, same(sample));
+    expect(samples.last, same(sample));
+    expect(samples.last.src, isNull);
+    expect(samples.last.accuracy, isNull);
     await subscription.cancel();
     expect(f.fallback.cancellations, 1);
     await f.close();
@@ -134,7 +138,13 @@ void main() {
     await pumpEventQueue();
     await f.emit(_fix(at: 123456));
     expect(http.posts.single.body['at'], 123456);
+    expect(http.posts.single.body['src'], 'vehicle');
+    expect(http.posts.single.body.containsKey('acc'), isFalse);
+    expect(http.posts.single.body.containsKey('confidence'), isFalse);
+    expect(http.posts.single.body.containsKey('altitude'), isFalse);
     expect(share.lastSent?.at, 123456);
+    expect(share.lastSent?.src, 'vehicle');
+    expect(share.lastSent?.acc, isNull);
     await share.stop();
     await pumpEventQueue();
     expect(f.eventMethods, ['listen', 'cancel']);
@@ -154,6 +164,7 @@ void main() {
     expect(first.altitude, 32);
     expect(first.confidence, 0.8);
     expect(first.accuracy, isNull);
+    expect(first.src, 'vehicle');
     final second = decoder.decode(_fix(lat: 37.00003, at: 3000))!;
     expect(second.speed, closeTo(1.668, 0.01));
     expect(second.heading, 5);

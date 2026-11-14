@@ -6,6 +6,83 @@ import 'package:unavo/net/models.dart';
 import 'support/follow_route_fakes.dart';
 
 void main() {
+  test('only an omitted vehicle accuracy gets the assumed jump allowance', () {
+    for (final src in [null, 'vehicle']) {
+      for (final acc in <double?>[
+        null,
+        0,
+        25,
+        25.01,
+        -1,
+        double.nan,
+        double.infinity,
+      ]) {
+        final fix = testFix(0, src: src, acc: acc);
+        final accepted = acc == null
+            ? src == 'vehicle'
+            : acc.isFinite && acc >= 0 && acc <= 25;
+        expect(routeQuality(fix), accepted, reason: 'src=$src acc=$acc');
+        expect(routeAccuracyAllowance(fix), accepted ? acc ?? 25 : null);
+        expect(
+          fix.acc,
+          acc == null
+              ? isNull
+              : acc.isNaN
+              ? isNaN
+              : acc,
+        );
+      }
+    }
+    expect(routeQuality(testFix(0, src: 'unknown', acc: null)), isFalse);
+    expect(
+      routeQuality(testFix(0, y: double.infinity, src: 'vehicle', acc: null)),
+      isFalse,
+    );
+  });
+  test(
+    'vehicle and mixed traces keep jump, sequence, stream and time guards',
+    () {
+      final start = testFix(0, src: 'vehicle', acc: null);
+      // At 1 s: 70 m travel + 25 m assumed allowance for each vehicle fix.
+      expect(
+        traceContinuous(start, testFix(119, seq: 1, src: 'vehicle', acc: null)),
+        isTrue,
+      );
+      expect(
+        traceContinuous(start, testFix(121, seq: 1, src: 'vehicle', acc: null)),
+        isFalse,
+      );
+      // A reported 2 m accuracy keeps its own allowance, even with src=vehicle.
+      expect(
+        traceContinuous(start, testFix(98, seq: 1, src: 'vehicle', acc: 2)),
+        isFalse,
+      );
+      expect(traceContinuous(start, testFix(96, seq: 1)), isTrue);
+      for (final next in [
+        testFix(10, seq: 2, src: 'vehicle', acc: null),
+        testFix(10, seq: 1, at: routeEpoch, src: 'vehicle', acc: null),
+        testFix(10, seq: 1, at: routeEpoch + 10001, src: 'vehicle', acc: null),
+        testFix(
+          10,
+          seq: 1,
+          stream: 'fedcba9876543210',
+          src: 'vehicle',
+          acc: null,
+        ),
+        testFix(10, seq: 1, src: 'vehicle', acc: 26),
+        testFix(10, seq: 1, acc: null),
+      ]) {
+        expect(traceContinuous(start, next), isFalse);
+        expect(
+          splitFollowTrace([
+            start,
+            next,
+          ]).every((path) => path.points.length == 1),
+          isTrue,
+        );
+      }
+    },
+  );
   test(
     'G1 empty, singleton and duplicate coordinates have no direction or B candidate',
     () {

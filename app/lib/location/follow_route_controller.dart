@@ -419,7 +419,10 @@ class FollowRouteController extends ChangeNotifier {
             fix.seq <= previous.seq ||
             dt <= 0 ||
             dt > 10 ||
-            moved > 70 * dt + previous.acc! + fix.acc!) {
+            moved >
+                70 * dt +
+                    routeAccuracyAllowance(previous)! +
+                    routeAccuracyAllowance(fix)!) {
           _resetEvidence();
           _offRoute = false;
           _directionBase = fix;

@@ -33,15 +33,21 @@ double routeDirectionDifference(double a, double b) =>
 RoutePoint interpolateRoute(RoutePoint a, RoutePoint b, double t) =>
     RoutePoint(a.lat + (b.lat - a.lat) * t, a.lng + (b.lng - a.lng) * t);
 
+/// Pleos has no documented metre accuracy. The 25 m fallback is an assumed
+/// jump allowance only, never a measured accuracy or verified source identity.
+/// Keep in sync with server/src/routes.ts. Explicit bad acc never falls back.
+double? routeAccuracyAllowance(LocationFix fix) {
+  final acc = fix.acc;
+  if (acc == null) return fix.src == 'vehicle' ? 25 : null;
+  return acc.isFinite && acc >= 0 && acc <= 25 ? acc : null;
+}
+
 bool routeQuality(LocationFix fix) =>
     fix.lat.isFinite &&
     fix.lng.isFinite &&
     fix.lat.abs() <= 90 &&
     fix.lng.abs() <= 180 &&
-    fix.acc != null &&
-    fix.acc!.isFinite &&
-    fix.acc! >= 0 &&
-    fix.acc! <= 25;
+    routeAccuracyAllowance(fix) != null;
 
 bool traceContinuous(LocationFix a, LocationFix b) {
   final seconds = (b.at - a.at) / 1000;
@@ -53,7 +59,9 @@ bool traceContinuous(LocationFix a, LocationFix b) {
       seconds > 0 &&
       seconds <= 10 &&
       routeDistance(RoutePoint.fromFix(a), RoutePoint.fromFix(b)) <=
-          70 * seconds + a.acc! + b.acc!;
+          70 * seconds +
+              routeAccuracyAllowance(a)! +
+              routeAccuracyAllowance(b)!;
 }
 
 class RouteProjection {

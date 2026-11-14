@@ -281,6 +281,7 @@ class LocationShare extends ChangeNotifier {
       lat: sample.lat,
       lng: sample.lng,
       acc: sample.accuracy,
+      src: sample.src,
       speed: sample.speed,
       heading: sample.heading,
       at: sample.at.millisecondsSinceEpoch,

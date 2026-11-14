@@ -1,10 +1,105 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:unavo/location/follow_route_controller.dart';
 import 'package:unavo/net/follow_route.dart';
+import 'package:unavo/net/models.dart';
 
 import 'support/follow_route_fakes.dart';
 
 void main() {
+  test('vehicle fixes without metre accuracy start A and join once', () async {
+    final f = RouteFixture(mapFix: vehicleFix);
+    addTearDown(f.dispose);
+    f.update();
+    expect(f.calls, hasLength(1));
+    expect(f.calls.single.request.mode, FollowRouteKind.initial);
+    f.calls.single.succeed();
+    await flush();
+    expect(f.state.connector, isNotEmpty);
+    f.grow();
+    f.drive(-20);
+    f.drive(0);
+    f.drive(6);
+    f.update(); // Duplicate delivery adds no join evidence.
+    expect(f.state.phase, FollowPhase.approaching);
+    expect(f.joins, isEmpty);
+    f.drive(12);
+    f.drive(18);
+    expect(f.state.phase, FollowPhase.onTrace);
+    expect(f.state.connector, isEmpty);
+    expect(f.joins, [('follow-1', 1)]);
+    f.update();
+    expect(f.joins, hasLength(1));
+  });
+
+  test(
+    'vehicle fixes support automatic B rejoining with the same cooldown',
+    () async {
+      final f = RouteFixture(mapFix: vehicleFix);
+      addTearDown(f.dispose);
+      await f.join();
+      f.grow(500);
+      f.depart();
+      expect(f.calls, hasLength(1));
+      f.driveUntil(30000);
+      expect(f.calls, hasLength(2));
+      expect(f.calls.last.request.mode, FollowRouteKind.rejoin);
+      f.calls.last.succeed();
+      await flush();
+      final x = f.state.anchorPoint!.lng * metersPerDegree;
+      f.drive(x - 20, y: 15, elapsed: 2000);
+      f.drive(x);
+      f.drive(x + 6);
+      f.drive(x + 12);
+      f.drive(x + 18);
+      expect(f.state.phase, FollowPhase.onTrace);
+      expect(f.state.mode, FollowMode.a);
+      expect(f.state.connector, isEmpty);
+      expect(f.joins, [('follow-1', 1), ('follow-1', 2)]);
+    },
+  );
+
+  test(
+    'vehicle stationary, reverse, jump and stale samples cannot merge',
+    () async {
+      final f = RouteFixture(mapFix: vehicleFix);
+      addTearDown(f.dispose);
+      await f.start();
+      f.grow();
+      f.drive(-20);
+      for (var i = 0; i < 5; i++) f.drive(0, speed: 0);
+      expect(f.joins, isEmpty);
+      f.drive(-6);
+      f.drive(-12);
+      f.drive(-18);
+      expect(f.joins, isEmpty);
+      f.drive(500);
+      expect(f.state.anchorReached, isFalse);
+      expect(f.joins, isEmpty);
+      f.selfAge = 10001;
+      f.update();
+      expect(f.state.condition, FollowRouteCondition.locationDelayed);
+      expect(f.joins, isEmpty);
+    },
+  );
+
+  for (final leader in [false, true]) {
+    test(
+      'missing phone accuracy still holds ${leader ? 'leader' : 'self'}',
+      () {
+        final f = RouteFixture(mapFix: vehicleFix);
+        addTearDown(f.dispose);
+        if (leader) {
+          f.leader = testFix(0, acc: null);
+        } else {
+          f.self = testFix(-50, handle: 'self', acc: null);
+        }
+        f.update();
+        expect(f.state.condition, FollowRouteCondition.poorAccuracy);
+        expect(f.calls, isEmpty);
+      },
+    );
+  }
+
   test(
     'C5 approach accepts the connector; onTrace no longer accepts the old connector',
     () async {
@@ -618,3 +713,10 @@ void main() {
     },
   );
 }
+
+LocationFix vehicleFix(LocationFix fix) => LocationFix.fromJson({
+  ...fix.toJson()..remove('acc'),
+  'handle': fix.handle,
+  'receivedAt': fix.receivedAt,
+  'src': 'vehicle',
+});

@@ -22,6 +22,20 @@ import 'support/car_shell_expectations.dart';
 import 'support/icon_bundle.dart';
 
 void main() {
+  test(
+    'v4 consent cannot authorize the added source field; v5 is required on both documents',
+    () {
+      const old = ConsentRecord(
+        privacy: (version: '4', at: 'now'),
+        location: (version: '4', at: 'now'),
+      );
+      expect(hasPrivacyConsent(old), isFalse);
+      expect(hasLocationConsent(old), isFalse);
+      expect(hasPrivacyConsent(testConsent()), isTrue);
+      expect(hasLocationConsent(testConsent()), isTrue);
+    },
+  );
+
   for (final car in [false, true]) {
     testWidgets(
       '${car ? "차량 주 패널" : "360dp 폰"}에서 접힌 문서의 요약 라벨은 굵게·gold이며 줄바꿈한다',
@@ -73,7 +87,7 @@ void main() {
   for (final location in [false, true]) {
     for (final serverFails in [false, true]) {
       testWidgets(
-        '동의는 PUT 1회로 개인정보 4·위치 ${location ? "4" : "생략"}을 보내고 ${serverFails ? "서버 500이면 재시도하고 " : ""}성공 후에만 onAccepted를 호출한다',
+        '동의는 PUT 1회로 개인정보 5·위치 ${location ? "5" : "생략"}을 보내고 ${serverFails ? "서버 500이면 재시도하고 " : ""}성공 후에만 onAccepted를 호출한다',
         (tester) async {
           final services = await ConsentTestServices.create(tester);
           services.api.http.status = serverFails ? 500 : 200;
@@ -88,8 +102,8 @@ void main() {
             expect(requests.single.method, 'PUT');
             expect(requests.single.uri.path, '/v1/me/consent');
             expect(jsonDecode(utf8.decode(requests.single.body)), {
-              'privacy': {'version': '4'},
-              if (location) 'location': {'version': '4'},
+              'privacy': {'version': '5'},
+              if (location) 'location': {'version': '5'},
             });
             expect(accepted, serverFails ? 0 : 1);
             expect(hasPrivacyConsent(services.store.consent), !serverFails);
@@ -280,6 +294,7 @@ void main() {
 
   for (final restoring in [false, true]) {
     for (final (consent, accepted) in <(ConsentRecord?, bool)>[
+      (testConsent(version: '4'), false),
       (const ConsentRecord(privacy: (version: legalVersion, at: 'now')), true),
       (
         const ConsentRecord(

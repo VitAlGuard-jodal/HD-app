@@ -8,6 +8,8 @@ export interface LocationFix {
   lat: number;
   lng: number;
   acc?: number;
+  // Client-reported sample source, not device identity or an authorization claim.
+  src?: "vehicle";
   speed?: number;
   heading?: number;
   at: number;
@@ -65,6 +67,7 @@ function valid(value: unknown): value is Omit<LocationFix, "receivedAt"> {
     && finite(fix.lat) && fix.lat >= -90 && fix.lat <= 90
     && finite(fix.lng) && fix.lng >= -180 && fix.lng <= 180
     && (fix.acc === undefined || finite(fix.acc) && fix.acc >= 0)
+    && (fix.src === undefined || fix.src === "vehicle")
     && (fix.speed === undefined || finite(fix.speed) && fix.speed >= 0)
     && (fix.heading === undefined || finite(fix.heading) && fix.heading >= 0 && fix.heading <= 360)
     && finite(fix.at) && fix.at >= 0 && Number.isSafeInteger(fix.seq) && (fix.seq as number) >= 0;
@@ -236,6 +239,7 @@ export class RoomLocationStore extends EventEmitter {
     const stored: LocationFix = {
       handle: fix.handle, stream: fix.stream, lat: fix.lat, lng: fix.lng,
       ...(fix.acc === undefined ? {} : { acc: fix.acc }),
+      ...(fix.src === undefined ? {} : { src: fix.src }),
       ...(fix.speed === undefined ? {} : { speed: fix.speed }),
       ...(fix.heading === undefined ? {} : { heading: fix.heading }),
       at: fix.at, seq: fix.seq, receivedAt: now,

@@ -147,6 +147,7 @@ class FusedLocationSamples {
     final sample = LocationSample(
       lat: lat,
       lng: lng,
+      src: 'vehicle',
       at: at,
       altitude: number('altitude'),
       confidence: number('confidence'),

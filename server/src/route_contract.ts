@@ -6,7 +6,7 @@ export const ROUTE_INTERVAL_MS = 30_000;
 export const ROUTE_INPUT_TTL_MS = 120_000;
 export const ROUTE_LOCATION_AGE_MS = 10_000;
 export const ROUTE_ENDPOINT_GAP_METERS = 25;
-export const ROUTE_CONSENT_VERSION = "4";
+export const ROUTE_CONSENT_VERSION = "5";
 
 export interface Point { lat: number; lng: number }
 export interface SampleRef { stream: string; seq: number }

@@ -22,6 +22,99 @@ const _fixJson = <String, dynamic>{
 };
 
 void main() {
+  test(
+    'vehicle source round-trips without fabricating accuracy and participates in equality',
+    () {
+      final json = {..._fixJson}..remove('acc');
+      final legacy = LocationFix.fromJson(json);
+      final vehicle = LocationFix.fromJson({...json, 'src': 'vehicle'});
+      expect(legacy.src, isNull);
+      expect(vehicle.src, 'vehicle');
+      expect(vehicle.acc, isNull);
+      expect(vehicle.toJson()['src'], 'vehicle');
+      expect(vehicle.toJson().containsKey('acc'), isFalse);
+      expect(vehicle, isNot(legacy));
+      expect({legacy, vehicle}, hasLength(2));
+      expect(
+        LocationFix.fromJson({
+          ...vehicle.toJson(),
+          'handle': vehicle.handle,
+          'receivedAt': vehicle.receivedAt,
+        }),
+        vehicle,
+      );
+      for (final src in [
+        null,
+        'phone',
+        'Vehicle',
+        'unknown',
+        1,
+        true,
+        <String, Object?>{},
+      ]) {
+        expect(
+          () => LocationFix.fromJson({...json, 'src': src}),
+          throwsFormatException,
+        );
+      }
+      for (final acc in [null, -1, double.nan, double.infinity, '25']) {
+        expect(
+          () => LocationFix.fromJson({...json, 'src': 'vehicle', 'acc': acc}),
+          throwsFormatException,
+        );
+      }
+    },
+  );
+
+  test(
+    'vehicle source survives location POST, positions, hello, trail and location SSE',
+    () {
+      fakeAsync((clock) {
+        final json = {..._fixJson, 'src': 'vehicle'}..remove('acc');
+        final fix = LocationFix.fromJson(json);
+        final http = FakeLocationHttp();
+        final api = ApiClient(
+          tokenStore: LocationTestTokenStore(),
+          clientFactory: http.client,
+        );
+        _finish(clock, api.sendLocation('ABC123', fix));
+        expect(http.posts.single.body['src'], 'vehicle');
+        expect(http.posts.single.body.containsKey('acc'), isFalse);
+        final snapshot = <String, dynamic>{
+          'positions': [json],
+          'trails': {
+            'alice': [json],
+          },
+        };
+        http.snapshot = snapshot;
+        final positions = _finish(clock, api.positions('ABC123'));
+        expect(positions.positions.single, fix);
+        expect(positions.trails['alice']!.single, fix);
+        final events = <RoomEvent>[];
+        final subscription = api.subscribeEvents('ABC123').listen(events.add);
+        clock.flushMicrotasks();
+        http.event('hello', {...snapshot, 'self': 'bob'});
+        http.event('location', json);
+        http.event('trail', {
+          'handle': 'alice',
+          'points': [json],
+          'revision': 1,
+        });
+        clock.flushMicrotasks();
+        final hello = events.whereType<Hello>().single;
+        expect(hello.positions.single, fix);
+        expect(hello.trails['alice']!.single, fix);
+        expect(events.whereType<LocationUpdated>().single.fix, fix);
+        expect(events.whereType<TrailUpdated>().single.points.single, fix);
+        unawaited(subscription.cancel());
+        unawaited(http.close());
+        api.close();
+        clock.flushMicrotasks();
+        expect(clock.pendingTimers, isEmpty);
+      });
+    },
+  );
+
   test('LocationFix는 서버 필드를 읽고 송신 JSON에서는 handle·receivedAt을 뺀다', () {
     final fix = LocationFix.fromJson(_fixJson);
     expect(fix.lng, 127.0);

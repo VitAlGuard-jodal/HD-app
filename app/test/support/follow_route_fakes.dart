@@ -18,6 +18,7 @@ LocationFix testFix(
   String handle = 'leader',
   String stream = '0123456789abcdef',
   double? acc = 2,
+  String? src,
   double? speed,
 }) {
   final point = testPoint(x, y);
@@ -27,6 +28,7 @@ LocationFix testFix(
     lat: point.lat,
     lng: point.lng,
     acc: acc,
+    src: src,
     speed: speed,
     seq: seq,
     at: at ?? routeEpoch + seq * 1000,
@@ -106,10 +108,14 @@ class RouteCall {
 
 class RouteFixture {
   RouteFixture({
+    this.mapFix,
     void Function(String, int, bool)? onJoined,
     void Function(String, int)? onDeparted,
     void Function()? onInvalidated,
   }) {
+    self = _map(self!);
+    leader = _map(leader!);
+    trace = trace.map(_map).toList();
     controller = FollowRouteController(
       load: (room, request, cancellation) {
         final state = controller.state!;
@@ -141,6 +147,8 @@ class RouteFixture {
     );
   }
   late final FollowRouteController controller;
+  final LocationFix Function(LocationFix)? mapFix;
+  LocationFix _map(LocationFix fix) => mapFix?.call(fix) ?? fix;
   int time = 0, selfSeq = 0, invalidations = 0;
   bool locked = false, consent = true, connected = true, restored = false;
   bool routingEnabled = true;
@@ -179,7 +187,9 @@ class RouteFixture {
     ),
   );
   void grow([int meters = 200]) {
-    trace = [for (var i = 0; i <= meters ~/ 10; i++) testFix(i * 10.0, seq: i)];
+    trace = [
+      for (var i = 0; i <= meters ~/ 10; i++) _map(testFix(i * 10.0, seq: i)),
+    ];
     leader = trace.last;
     update();
   }
@@ -192,14 +202,16 @@ class RouteFixture {
     double? speed,
   }) {
     time += elapsed;
-    self = testFix(
-      x,
-      y: y,
-      handle: 'self',
-      seq: ++selfSeq,
-      at: routeEpoch + time,
-      acc: acc,
-      speed: speed,
+    self = _map(
+      testFix(
+        x,
+        y: y,
+        handle: 'self',
+        seq: ++selfSeq,
+        at: routeEpoch + time,
+        acc: acc,
+        speed: speed,
+      ),
     );
     update();
   }
