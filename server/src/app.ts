@@ -378,7 +378,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         if (!routes.feature().enabled) throw new RouteError("ROUTING_DISABLED");
         if (!routeConsent(user.id)) throw new RouteError("CONSENT_REQUIRED_SELF");
         let targetHandle: string;
-        if (input!.schemaVersion === 2) targetHandle = plans.routeContext(code, user.handle, input!).target;
+        if (input!.schemaVersion === 2) targetHandle = routes.planRouteContext(code, user.handle, input!).target;
         else {
           const relation = locations.relationOf(code, user.handle);
           if (relation?.requestId !== input!.followRequestId || locations.targetOf(code, user.handle) !== relation.target) {

@@ -142,7 +142,7 @@ GuidanceRouteProjection projectGuidanceRoute(
       self,
       route.points,
       minimum: progress,
-      maximum: progress + fallbackAdvance,
+      maximum: progress + math.max(advance, fallbackAdvance),
     );
   }
   final distance = route.atAnchor

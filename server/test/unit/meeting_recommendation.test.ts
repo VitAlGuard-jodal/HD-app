@@ -19,7 +19,7 @@ function inputs(n: number): RecommendationInput[] {
   return Array.from({ length: n }, (_, i) => ({ handle: `car-${i}`, followRequestId: i ? `follow-${i}` : null,
     origin: { ...at(0), stream: "1".repeat(16), seq: 0, at: 0, receivedAt: 0, handle: `car-${i}`, acc: 3 } }));
 }
-test("R14.5 a failed forward clamp retains the verified common-corridor candidate", async () => {
+test("R18.5 a failed forward clamp selects the next verified point after the participant floor", async () => {
   const current = inputs(3);
   current[1].origin = { ...current[1].origin, ...at(320) };
   const routes = [road([at(0), at(2000)]), road([at(315), at(2000)]),
@@ -31,8 +31,21 @@ test("R14.5 a failed forward clamp retains the verified common-corridor candidat
   assert.ok(distance(beforeClamp.joinPoint, at(300)) < .01);
   const result = await recommendCorridor(routes, current, at(2000));
   assert.equal(result.result, "candidate");
-  assert.ok(distance(result.joinPoint, beforeClamp.joinPoint) < .01);
-  assert.deepEqual(result.arrivals, beforeClamp.arrivals);
+  assert.ok(result.joinPoint.lat >= at(320).lat, "do not restore J behind the participant");
+  assert.ok(distance(result.joinPoint, at(340)) < .01);
+  assert.ok(result.arrivals[1].etaToJoinSeconds > beforeClamp.arrivals[1].etaToJoinSeconds);
+});
+test("R18.5 if no valid segment remains after the floor the original candidate is retained", async () => {
+  const current = inputs(2);
+  const goal = at(1995, 5);
+  current[1].origin = { ...current[1].origin, ...goal };
+  const result = await recommendCorridor([
+    road([at(0), at(1995), goal]),
+    road([at(1995, -20), at(1995, -19.9), at(1800, -19.9), at(1800, 5), goal]),
+  ], current, goal);
+  assert.equal(result.result, "candidate");
+  assert.ok(result.joinPoint.lat < at(1900).lat);
+  assert.ok(result.remainingToDestinationMeters > 100);
 });
 test("R1 recommended J never trails a participant already on the common corridor", async () => {
   const current = inputs(3);

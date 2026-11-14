@@ -175,12 +175,20 @@ export async function recommendCorridor(routes: ProviderRoute[], inputs: Recomme
     const t = (floor - a.s) / (b.s - a.s);
     const shifted = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t,
       x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, s: floor };
-    // A clamp can land in a tolerated gap between valid samples. Retain the
-    // verified candidate unless this exact point still belongs to every road.
-    if (valid[shiftedSegment] && !detourBarrier[shiftedSegment]
-      && prepared.slice(1).every((p) => match(p, shifted, b.x - a.x, b.y - a.y))) {
+    const usable = (point: Vertex, segment: number) => valid[segment] && !detourBarrier[segment]
+      && prepared.slice(1).every((p) => match(p, point,
+        vertices[segment + 1].x - vertices[segment].x, vertices[segment + 1].y - vertices[segment].y));
+    // A clamp can land in a tolerated gap. Prefer the next verified segment
+    // after the participant floor; retain the original only if none remains.
+    if (usable(shifted, shiftedSegment)) {
       selected = shifted;
       selectedSegment = shiftedSegment;
+    } else {
+      for (let i = shiftedSegment + 1; i < valid.length; i++) {
+        await yieldWork();
+        if (!usable(vertices[i], i)) continue;
+        selected = vertices[i]; selectedSegment = i; break;
+      }
     }
   }
   const nearDestination = selected !== null && lead.length - selected.s <= 100;

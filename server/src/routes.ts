@@ -1,7 +1,7 @@
 import type { LocationInvalidation, RoomLocationStore } from "./locations.ts";
 import { canonicalJson, distance, parseAnyRouteRequest, RouteError, sameRef, ROUTE_INPUT_TTL_MS,
   ROUTE_INTERVAL_MS, ROUTE_TIMEOUT_MS, ROUTE_ENDPOINT_GAP_METERS } from "./route_contract.ts";
-import type { AnyRouteRequest, AnyRouteResponse, Point, RouteAnchor, RouteErrorCode } from "./route_contract.ts";
+import type { AnyRouteRequest, AnyRouteResponse, PlanRouteRequest, Point, RouteAnchor, RouteErrorCode } from "./route_contract.ts";
 import { fresh, quality, recordedTraceContinuous } from "./location_quality.ts";
 import { CallBudget, DEFAULT_ROUTE_LIMITS } from "./call_budget.ts";
 import type { Reservation } from "./call_budget.ts";
@@ -33,6 +33,8 @@ interface Input {
   fingerprint: string;
   origin: Point;
   anchor: Point;
+  // Input geometry owned by this 120 s pin, never cached provider geometry.
+  endpoint: RouteEndpoint;
   expiresAt: number;
   deadline: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -124,6 +126,14 @@ export class FollowRouteService {
     this.#locations.off("invalidated", this.#onInvalidated);
   }
 
+  planRouteContext(code: string, requester: string, request: PlanRouteRequest): { target: string; anchor: Point } {
+    if (!this.#plans) throw new RouteError("PLAN_NOT_READY");
+    const input = this.#inputs.get(requester);
+    const pinnedTrace = !!input && input.code === code && typeof input.endpoint === "object"
+      && input.fingerprint === fingerprint(request) && this.#clock() < input.deadline;
+    return this.#plans.routeContext(code, requester, request, { pinnedTrace });
+  }
+
   assertCurrent(code: string, requester: string, request: AnyRouteRequest, authorize: () => string): void {
     const { target } = this.#check(code, requester, request, authorize);
     const input = this.#inputs.get(requester);
@@ -134,7 +144,7 @@ export class FollowRouteService {
       this.#drop(input, "REFERENCE_EXPIRED");
       throw new RouteError("REFERENCE_EXPIRED");
     }
-    this.#requestAnchor(code, requester, target, request, false);
+    if (typeof input.endpoint !== "object") this.#requestAnchor(code, requester, target, request, false);
   }
 
   #check(code: string, requester: string, request: AnyRouteRequest, authorize: () => string): { target: string; config: RouteConfig & { provider: "naver" } } {
@@ -147,7 +157,7 @@ export class FollowRouteService {
     if (!this.#locations.isSharing(code, requester) || !this.#locations.isSharing(code, target)
       || !fresh(this.#locations.position(code, requester), this.#now())
       || !fresh(this.#locations.position(code, target), this.#now())) throw new RouteError("LOCATION_NOT_READY");
-    if (request.schemaVersion === 2 && this.#plans?.routeContext(code, requester, request).target !== target) throw new RouteError("PLAN_CHANGED");
+    if (request.schemaVersion === 2 && (!this.#plans || this.planRouteContext(code, requester, request).target !== target)) throw new RouteError("PLAN_CHANGED");
     return { target, config };
   }
 
@@ -189,7 +199,7 @@ export class FollowRouteService {
     }
     if (previous && previous.request.calculationId === request.calculationId) {
       if (previous.code !== code || previous.target !== target || previous.fingerprint !== fingerprint(request)) throw new RouteError("CONTEXT_MISMATCH");
-      this.#requestAnchor(code, requester, target, request, false);
+      if (typeof previous.endpoint !== "object") this.#requestAnchor(code, requester, target, request, false);
       return previous;
     }
     if (previous && previous.request.followRequestId === request.followRequestId && previous.request.schemaVersion === request.schemaVersion
@@ -198,8 +208,9 @@ export class FollowRouteService {
     const origin = this.#locations.recentSample(code, requester, request.originRef);
     if (!fresh(origin, this.#now())) throw new RouteError("REFERENCE_EXPIRED");
     const anchor = this.#requestAnchor(code, requester, target, request, true);
+    const endpoint = this.#endpoint({ code, target, request, anchor });
     if (previous) this.#drop(previous, "CONTEXT_MISMATCH");
-    const input: Input = { code, requester, target, request, fingerprint: fingerprint(request), origin: coordinates(origin), anchor,
+    const input: Input = { code, requester, target, request, fingerprint: fingerprint(request), origin: coordinates(origin), anchor, endpoint,
       expiresAt: this.#now() + ROUTE_INPUT_TTL_MS, deadline: this.#clock() + ROUTE_INPUT_TTL_MS,
       attempts: 0, requestIds: new Set(), done: false, retryAt: 0 };
     input.timer = setTimeout(() => this.#drop(input, "REFERENCE_EXPIRED"), ROUTE_INPUT_TTL_MS).unref();
@@ -217,7 +228,7 @@ export class FollowRouteService {
       ? null : this.#budget.reserve([input.requester]);
   }
 
-  #endpoint(input: Input): RouteEndpoint {
+  #endpoint(input: Pick<Input, "code" | "target" | "request" | "anchor">): RouteEndpoint {
     const request = input.request;
     const rejoining = request.schemaVersion === 1 ? request.mode === "B" : request.routeKind === "traceRejoin";
     if (!rejoining || request.anchor.kind !== "segment") {
@@ -227,12 +238,17 @@ export class FollowRouteService {
     const trail = this.#locations.trail(input.code, input.target);
     const index = trail.findIndex((s) => sameRef(s, anchor.startRef));
     if (index < 0 || !trail[index + 1] || !sameRef(trail[index + 1], anchor.endRef)) throw new RouteError("TRACE_DISCONTINUITY");
+    // Match the app's splitFollowTrace branch, including its continuous prefix
+    // for ambiguity checks but never joining separate GPS sections with a line.
+    let first = index, last = index + 1;
+    while (first > 0 && recordedTraceContinuous(trail[first - 1], trail[first])) first--;
+    while (last + 1 < trail.length && recordedTraceContinuous(trail[last], trail[last + 1])) last++;
     let minimum = 0;
-    for (let i = 0; i <= index; i++) {
+    for (let i = first; i <= index; i++) {
       const length = distance(trail[i], trail[i + 1]);
       if (length >= .01) minimum += length * (i === index ? anchor.fraction : 1);
     }
-    return { kind: "traceRejoin", points: trail.map(coordinates), minimum, anchor: { ...input.anchor } };
+    return { kind: "traceRejoin", points: trail.slice(first, last + 1).map(coordinates), minimum, anchor: { ...input.anchor } };
   }
 
   async calculate(code: string, requester: string, raw: unknown, authorize: () => string, signal?: AbortSignal): Promise<AnyRouteResponse> {
@@ -265,7 +281,7 @@ export class FollowRouteService {
         }
         reservation.start(requester);
         return this.#provider({ ...input!.origin }, { ...input!.anchor }, controller.signal, config,
-          this.#endpoint(input!));
+          input!.endpoint);
       })();
       const release = () => { reservation?.release(requester); if (this.#active.get(requester) === active) this.#active.delete(requester); };
       void transport.then(release, release);
@@ -273,7 +289,7 @@ export class FollowRouteService {
         const result = await Promise.race([transport, aborted]);
         this.assertCurrent(code, requester, request, authorize);
         if (controller.signal.aborted) throw new RouteError("CONTEXT_MISMATCH");
-        const endpoint = this.#endpoint(input);
+        const endpoint = input.endpoint;
         if (typeof endpoint === "object" && result.result !== "atAnchor"
           && (!result.actualEnd || !projectTraceRejoinEndpoint(result.actualEnd, result.points, endpoint)
             || !projectTraceRejoinEndpoint(result.points.at(-1)!, result.points, endpoint))) {
@@ -289,7 +305,7 @@ export class FollowRouteService {
         // Late failures must not describe a no-longer-authorized calculation.
         this.#check(code, requester, request, authorize);
         if (this.#inputs.get(requester) !== input) throw new RouteError("CONTEXT_MISMATCH");
-        this.#requestAnchor(code, requester, target, request, false);
+        if (typeof input.endpoint !== "object") this.#requestAnchor(code, requester, target, request, false);
         let failure = error instanceof RouteError ? error : new RouteError("PROVIDER_UNAVAILABLE", ROUTE_INTERVAL_MS);
         if (failure.retryable && failure.code !== "RATE_LIMITED") {
           input.retryAt = this.#clock() + Math.max(ROUTE_INTERVAL_MS, failure.retryAfterMs ?? 0);
