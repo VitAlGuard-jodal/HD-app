@@ -9,10 +9,147 @@ import { RoomEventHub } from "../../src/rooms.ts";
 import { RoomLocationStore } from "../../src/locations.ts";
 import { FollowPlanService } from "../../src/follow_plans.ts";
 import { updateUserConsent } from "../../src/store.ts";
-import { dispatch } from "../helpers/route_fixture.ts";
+import { dispatch, naverConfig } from "../helpers/route_fixture.ts";
 import { at, pin, planFixture } from "../helpers/plan_fixture.ts";
 
 function error(code: string) { return (e: unknown) => e instanceof RouteError && e.code === code; }
+test("r10: editing stays available between 5-second parked uploads with receipt delay", (t) => {
+  const f = planFixture(t);
+  for (let i = 0; i < 3; i++) {
+    f.elapse(5000);
+    f.publish("leader", { ...at(0), speed: 0, at: f.now() - 200 });
+  }
+  // Like the app, the server sees only the uploaded fixes, not every 1 Hz sensor fix.
+  assert.doesNotThrow(() => f.plans.assertEditable(f.room.code, "leader"));
+  f.elapse(4999);
+  assert.doesNotThrow(() => f.plans.assertEditable(f.room.code, "leader"));
+  assert.equal(f.save().plan!.status, "ready");
+});
+function parkedStep(f: ReturnType<typeof planFixture>, changes: Record<string, number> = {}, elapsed = 5000) {
+  for (const [handle, meters] of Object.entries(changes)) f.positions.set(handle, meters);
+  f.elapse(elapsed);
+  for (const [handle, meters] of f.positions) f.publish(handle, { ...at(meters), speed: 0, at: f.now() - 200 });
+}
+for (const first of ["leader", "follower"]) test(`r10: 5-second wait arrival (${first} first) permits departure preparation`, (t) => {
+  const f = planFixture(t); const saved = f.save(); f.enroll(saved);
+  for (let i = 0; i < 3; i++) parkedStep(f, { [first]: 100 });
+  assert.equal(f.get().runtime!.vehicles.find((v) => v.handle === first)!.phase, "atJoinWaiting");
+  for (let i = 0; i < 3; i++) parkedStep(f, { leader: 100, follower: 100 });
+  f.elapse(4999);
+  const ready = f.get();
+  assert.ok(ready.runtime!.vehicles.every((v) => v.phase === "atJoinWaiting"));
+  const announced = f.plans.depart(f.room.code, "leader", { operationId: "parked-depart", planId: saved.plan!.planId,
+    planRevision: 1, expectedRuntimeRevision: ready.runtime!.runtimeRevision });
+  assert.equal(announced.runtime!.departureAnnouncedAtMs, f.now());
+  assert.equal(announced.runtime!.departedAtMs, null);
+  assert.equal(announced.runtime!.traceStartRef, null);
+});
+for (const announced of [false, true]) test(`r10: first 1-second movement after parked evidence captures departure (announced=${announced})`, (t) => {
+  const f = planFixture(t); const saved = f.save(); f.enroll(saved);
+  for (let i = 0; i < 3; i++) parkedStep(f, { leader: 100, follower: 100 });
+  const waiting = f.locations.position(f.room.code, "leader")!;
+  if (announced) f.plans.depart(f.room.code, "leader", { operationId: "prepare", planId: saved.plan!.planId,
+    planRevision: 1, expectedRuntimeRevision: f.get().runtime!.runtimeRevision });
+  f.elapse(4000); // Motion starts just before the next parked upload would be due.
+  for (const meters of [120, 140, 160]) f.step({ leader: meters, follower: meters }, 20);
+  const after = f.get().runtime!;
+  assert.equal(after.phase, "departed");
+  assert.deepEqual(after.traceStartRef, { kind: "sample", ref: { stream: waiting.stream, seq: waiting.seq } });
+});
+for (const leaderMeters of [0, 100]) test(`r10: proceed follower first rechecks the parked leader outside/at J (${leaderMeters})`, (t) => {
+  const f = planFixture(t); const saved = f.save("proceed"); f.enroll(saved);
+  for (let i = 0; i < 3; i++) parkedStep(f, { leader: leaderMeters });
+  for (const meters of [70, 100, 130]) {
+    f.elapse(1000); f.publish("follower", { ...at(meters), speed: 30, at: f.now() - 200 });
+  }
+  f.pass(saved.plan!, "follower");
+  assert.equal(f.get().runtime!.vehicles[1].branch, "pending");
+  f.elapse(2000);
+  assert.equal(f.get().runtime!.vehicles[1].branch, "pending", "the 2 s leader freshness limit still applies");
+  f.publish("leader", { ...at(leaderMeters), speed: 0, at: f.now() - 200 });
+  assert.equal(f.get().runtime!.vehicles[1].branch, leaderMeters === 0 ? "destination" : "pending");
+});
+test("r10: a fresh follower with broken stop evidence must re-establish wait arrival before preparation", (t) => {
+  const f = planFixture(t); const saved = f.save(); f.enroll(saved);
+  for (let i = 0; i < 3; i++) parkedStep(f, { leader: 100, follower: 100 });
+  f.elapse(5000);
+  f.publish("leader", { ...at(100), speed: 0, at: f.now() - 200 });
+  const follower = f.locations.position(f.room.code, "follower")!;
+  f.publish("follower", { ...at(100), seq: follower.seq + 2, speed: 0, at: f.now() - 200 });
+  const current = f.get();
+  assert.equal(current.runtime!.vehicles[1].phase, "toJoin");
+  assert.throws(() => f.plans.depart(f.room.code, "leader", { operationId: "broken-wait", planId: saved.plan!.planId,
+    planRevision: 1, expectedRuntimeRevision: current.runtime!.runtimeRevision }), error("DEPARTURE_NOT_READY"));
+  for (let i = 0; i < 2; i++) parkedStep(f);
+  assert.equal(f.get().runtime!.vehicles[1].phase, "atJoinWaiting");
+});
+test("r10: pruning and route-reference lookups preserve bounded parked evidence without extending route origins", (t) => {
+  const f = planFixture(t);
+  for (let i = 0; i < 3; i++) parkedStep(f);
+  const oldest = f.locations.recentSamples(f.room.code, "leader").at(-3)!;
+  f.elapse(4999);
+  assert.equal(f.locations.recentSample(f.room.code, "leader", oldest), undefined);
+  f.locations.pruneReferences();
+  assert.doesNotThrow(() => f.plans.assertEditable(f.room.code, "leader"));
+  f.elapse(20_002);
+  f.locations.pruneReferences();
+  assert.deepEqual(f.locations.recentSamples(f.room.code, "leader"), []);
+});
+for (const policy of ["wait", "proceed"] as const) test(`r10: parked J=D arrival completes each vehicle (${policy})`, (t) => {
+  const f = planFixture(t); f.enroll(f.save(policy, 100, 100));
+  for (let i = 0; i < 3; i++) parkedStep(f, { leader: 100 });
+  assert.equal(f.get().runtime!.vehicles[0].phase, "completed");
+  assert.equal(f.get().runtime!.vehicles[1].phase, "toJoin");
+  for (let i = 0; i < 3; i++) parkedStep(f, { follower: 100 });
+  assert.equal(f.get().runtime!.phase, "completed");
+  assert.equal(f.get().runtime!.traceStartRef, null);
+  assert.equal(f.get().runtime!.departedAtMs, null);
+});
+test("r10: parked allowance cannot authorize a sparse moving pass or departure", (t) => {
+  for (const policy of ["wait", "proceed"] as const) {
+    const f = planFixture(t); const saved = f.save(policy); f.enroll(saved);
+    if (policy === "wait") for (let i = 0; i < 3; i++) parkedStep(f, { leader: 100, follower: 100 });
+    for (const meters of policy === "wait" ? [120, 140, 160] : [70, 100, 130]) {
+      f.elapse(5000);
+      f.publish("leader", { ...at(meters), speed: 20, at: f.now() - 200 });
+      f.publish("follower", { ...at(100), speed: 0, at: f.now() - 200 });
+    }
+    assert.equal(f.get().runtime!.departedAtMs, null);
+    assert.equal(f.get().runtime!.traceStartRef, null);
+    if (policy === "proceed") assert.throws(() => f.pass(saved.plan!, "leader"), error("PASS_NOT_CONFIRMED"));
+  }
+});
+test("r10: parked HTTP search, recommendation, save, policy, participation and cancellation share the stop gate", async (t) => {
+  const f = planFixture(t); f.plans.close();
+  let searches = 0;
+  const app = createApp({ ...f, routeOptions: f.routeOptions, geocodingOptions: {
+    config: () => naverConfig, provider: async () => { searches++; f.elapse(400); return []; },
+  } });
+  for (let i = 0; i < 3; i++) parkedStep(f);
+  f.elapse(4000);
+  const api = (handle: string, path: string, body: unknown, method = "POST") =>
+    dispatch(app, f.tokens.get(handle)!, body, { path: `/v1/rooms/${f.room.code}/${path}`, method }).done;
+  const search = await api("leader", "geocoding", { requestId: "parked-search", query: "시험로 123" });
+  assert.equal(search.statusCode, 200); assert.equal(searches, 1);
+  const recommendation = await api("leader", "follow-plans/self/recommend", { requestId: "parked-recommend", draftGeneration: 1,
+    planId: null, expectedRevision: 0, destination: pin(1000), participantFollowRequestIds: [f.relation.requestId] });
+  assert.equal(recommendation.statusCode, 200); assert.equal(f.calls.length, 2);
+  const input = { operationId: "parked-save", expectedPlanId: null, expectedRevision: 0, destination: pin(1000), joinPoint: pin(100),
+    policy: "wait", participantFollowRequestIds: [f.relation.requestId], waitingPlaceConfirmed: true };
+  const saved = await api("leader", "follow-plans/self", input, "PUT");
+  assert.equal(saved.statusCode, 200);
+  const plan = saved.json().plan;
+  const changed = await api("leader", "follow-plans/self", { ...input, operationId: "parked-policy", expectedPlanId: plan.planId,
+    expectedRevision: 1, policy: "proceed" }, "PUT");
+  assert.equal(changed.statusCode, 200); assert.equal(changed.json().plan.policy, "proceed");
+  for (const enabled of [true, false]) {
+    const result = await api("follower", "follow-plans/leader/participation", { operationId: `parked-enroll-${enabled}`,
+      planId: plan.planId, planRevision: 2, followRequestId: f.relation.requestId, enabled }, "PUT");
+    assert.equal(result.statusCode, 200);
+  }
+  const removed = await api("leader", "follow-plans/self", { operationId: "parked-delete", planId: plan.planId, expectedRevision: 2 }, "DELETE");
+  assert.equal(removed.statusCode, 200); assert.equal(removed.json().plan, null);
+});
 function route(f: ReturnType<typeof planFixture>, kind: PlanRouteRequest["routeKind"], handle = "leader"): PlanRouteRequest {
   const { plan } = f.get(); const fix = f.locations.position(f.room.code, handle)!;
   return { schemaVersion: 2, planId: plan!.planId, planRevision: plan!.revision,

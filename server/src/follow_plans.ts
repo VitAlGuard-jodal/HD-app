@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { LocationFix, LocationInvalidation, RoomLocationStore } from "./locations.ts";
-import { context, continuous, fresh, quality, stopped } from "./location_quality.ts";
+import { context, continuous, fresh, quality, stopped, STOP_EVIDENCE_MIN_SAMPLES, STOP_EVIDENCE_MIN_SPAN_MS } from "./location_quality.ts";
 import { canonicalJson, distance, RouteError, sameRef } from "./route_contract.ts";
 import type { PlanRouteRequest, Point, RouteAnchor, SampleRef } from "./route_contract.ts";
 import { parseDeletePlan, parseDepart, parseGuidanceStatus, parseParticipation, parsePassEvidence, parseSavePlan } from "./follow_plan_contract.ts";
@@ -146,7 +146,9 @@ export class FollowPlanService extends EventEmitter {
   #window(samples: LocationFix[]): LocationFix[] {
     if (!samples.length) return [];
     let start = samples.length - 1;
-    while (start > 0 && (samples.length - start < 3 || samples.at(-1)!.at - samples[start].at < 2000)) {
+    while (start > 0 && (samples.length - start < STOP_EVIDENCE_MIN_SAMPLES
+      || samples.at(-1)!.at - samples[start].at < STOP_EVIDENCE_MIN_SPAN_MS
+      || samples.at(-1)!.receivedAt - samples[start].receivedAt < STOP_EVIDENCE_MIN_SPAN_MS)) {
       if (!continuous(samples[start - 1], samples[start])) break;
       start--;
     }
@@ -294,18 +296,21 @@ export class FollowPlanService extends EventEmitter {
     if (entry.runtime.departedAtMs !== null) return;
     entry.runtime.departureAnnouncedAtMs = null; entry.runtime.departureCohort = null; entry.announcedClock = undefined;
   }
-  #allReady(entry: Entry): boolean {
+  #allReady(entry: Entry, leaderStarting = false): boolean {
     const r = entry.runtime;
     const handles = [entry.plan.leaderHandle, ...r.enrollments.map((e) => e.handle)];
     return r.enrollments.length > 0 && handles.every((h) => {
       const v = r.vehicles.find((v) => v.handle === h);
+      const samples = this.#samples(entry, h);
+      const waiting = leaderStarting && h === entry.plan.leaderHandle ? samples.slice(0, -1) : samples;
       return v?.phase === "atJoinWaiting" && v.condition === null && this.#options.eligible(entry.plan.roomCode, h)
-        && fresh(this.#locations.position(entry.plan.roomCode, h), this.#now());
+        && fresh(this.#locations.position(entry.plan.roomCode, h), this.#now())
+        && stopped(this.#window(waiting), this.#now());
     });
   }
-  #prepare(entry: Entry): void {
+  #prepare(entry: Entry, leaderStarting = false): void {
     const waiting = entry.evidence.get(entry.plan.leaderHandle)?.waitingFix;
-    if (!waiting || !this.#allReady(entry)) throw new RouteError("DEPARTURE_NOT_READY");
+    if (!waiting || !this.#allReady(entry, leaderStarting)) throw new RouteError("DEPARTURE_NOT_READY");
     entry.runtime.departureCohort = { followRequestIds: entry.runtime.enrollments.map((e) => e.followRequestId),
       runtimeRevision: entry.runtime.runtimeRevision, capturedAtMs: this.#now(), leaderWaitingRef: sampleRef(waiting) };
     entry.runtime.departureAnnouncedAtMs = this.#now(); entry.announcedClock = this.#clock();
@@ -369,26 +374,42 @@ export class FollowPlanService extends EventEmitter {
       for (const v of r.vehicles) {
         if (v.phase === "invited" || v.phase === "completed" || v.condition) continue;
         const samples = this.#window(this.#samples(entry, v.handle));
-        if (!context(samples, this.#now())) continue;
-        const current = samples.at(-1)!;
+        const motionContext = context(samples, this.#now());
+        const stopEvidence = stopped(samples, this.#now());
+        const current = samples.at(-1);
+        if (!current) continue;
         const evidence = entry.evidence.get(v.handle)!;
-        if (plan.policy === "proceed" && (samples.some((s) => distance(s, plan.joinPoint!) <= 25)
+        // Capture the first moving fix after a proven wait even when older
+        // parked fixes are >10 s old. Actual departure below still needs the
+        // unchanged, all-fresh moving context (3 samples / 2 s).
+        const leavingStop = v.handle === plan.leaderHandle && !!evidence.waitingFix
+          && fresh(evidence.waitingFix, this.#now()) && continuous(evidence.waitingFix, current);
+        if (!motionContext && !stopEvidence && !leavingStop) {
+          if (!r.departureCohort && v.phase === "atJoinWaiting") {
+            v.phase = "toJoin"; v.arrivedAtMs = null;
+            evidence.waitingFix = undefined; evidence.movingFrom = undefined;
+          }
+          continue;
+        }
+        if ((motionContext || stopEvidence) && plan.policy === "proceed" && (samples.some((s) => distance(s, plan.joinPoint!) <= 25)
           || samples.slice(1).some((s, i) => segmentProjection(samples[i], s, plan.joinPoint!).distance <= 25))) evidence.nearJoin = true;
         const atDestination = destinationOnly(plan) || v.phase === "toDestination" || v.branch === "trace";
-        if (atDestination && samples.every((s) => distance(s, plan.destination) <= 25)) {
+        if (atDestination && (motionContext || stopEvidence) && samples.every((s) => distance(s, plan.destination) <= 25)) {
           v.phase = "completed"; v.arrivedAtMs ??= this.#now(); continue;
         }
         if (destinationOnly(plan) || plan.policy !== "wait" || r.departedAtMs !== null) continue;
         const near = distance(current, plan.joinPoint) <= 25;
-        if (!r.departureCohort && samples.every((s) => distance(s, plan.joinPoint!) <= 25) && stopped(samples, this.#now())) {
+        if (!r.departureCohort && samples.every((s) => distance(s, plan.joinPoint!) <= 25) && stopEvidence) {
           v.phase = "atJoinWaiting"; v.arrivedAtMs ??= this.#now(); evidence.waitingFix = current; evidence.movingFrom = undefined;
           if (v.handle === plan.leaderHandle) r.phase = "waiting";
         }
-        const moving = current.speed === undefined ? distance(samples.at(-2)!, current) / ((current.at - samples.at(-2)!.at) / 1000) >= 2 : current.speed >= 2;
+        const moving = current.speed === undefined ? samples.length >= 2
+          && distance(samples.at(-2)!, current) / ((current.at - samples.at(-2)!.at) / 1000) >= 2 : current.speed >= 2;
         if (v.handle === plan.leaderHandle && evidence.waitingFix && moving) {
           if (!evidence.movingFrom) {
+            if (!leavingStop) continue;
             evidence.movingFrom = sampleRef(current);
-            if (!r.departureCohort && this.#allReady(entry)) this.#prepare(entry);
+            if (!r.departureCohort && this.#allReady(entry, true)) this.#prepare(entry, true);
           }
           const movement = this.#samples(entry, v.handle).filter((s) => s.stream === evidence.movingFrom!.stream && s.seq >= evidence.movingFrom!.seq);
           if (context(movement, this.#now()) && movement.every((s, i) => s.speed === undefined
@@ -405,7 +426,7 @@ export class FollowPlanService extends EventEmitter {
             }
           }
         }
-        if (!near && !r.departureCohort && v.phase === "atJoinWaiting") { v.phase = "toJoin"; v.arrivedAtMs = null; }
+        if ((!near || !stopEvidence) && !r.departureCohort && v.phase === "atJoinWaiting") { v.phase = "toJoin"; v.arrivedAtMs = null; }
       }
       this.#resolveOrder(entry);
       if (r.traceStartRef && !this.#traceValid(entry)) {
@@ -437,7 +458,7 @@ export class FollowPlanService extends EventEmitter {
         const near = entry.evidence.get(entry.plan.leaderHandle)?.nearJoin || leaderSamples.some((s) => distance(s, entry.plan.joinPoint!) <= 25)
           || leaderSamples.slice(1).some((s, i) => segmentProjection(leaderSamples[i], s, entry.plan.joinPoint!).distance <= 25);
         if (fresh(leader, this.#now()) && this.#now() - leader.receivedAt <= 2000 && this.#now() - leader.at <= 2000
-          && context(leaderSamples, this.#now()) && !near) { v.branch = "destination"; v.phase = "toDestination"; }
+          && (context(leaderSamples, this.#now()) || stopped(leaderSamples, this.#now())) && !near) { v.branch = "destination"; v.phase = "toDestination"; }
       }
     }
   }

@@ -7,6 +7,103 @@ import 'support/follow_route_fakes.dart';
 import 'support/meeting_plan_fakes.dart';
 
 void main() {
+  test('r10 stop evidence rejects a window longer than 15 seconds', () {
+    final f = MeetingFixture();
+    addTearDown(f.dispose);
+    for (var i = 0; i < 3; i++) f.drive(0, elapsed: 8000);
+    expect(f.controller.canEditMeetingPlan, isFalse);
+    expect(f.controller.beginEditing(), isFalse);
+    f.drive(0, elapsed: 5000);
+    expect(f.controller.canEditMeetingPlan, isTrue);
+  });
+
+  test(
+    'r10 stop evidence includes all continuous fixes needed to span 2 seconds',
+    () {
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      for (var i = 0; i < 5; i++) f.drive(0, elapsed: 400);
+      expect(f.controller.canEditMeetingPlan, isTrue);
+    },
+  );
+
+  test(
+    'r10 5-second parked uploads keep editing available between uploads',
+    () {
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      f.age = 200;
+      for (var i = 0; i < 3; i++) f.drive(0, elapsed: 5000);
+      expect(f.controller.canEditMeetingPlan, isTrue);
+      f.time += 4999;
+      f.age += 4999;
+      f.update();
+      expect(f.controller.canEditMeetingPlan, isTrue);
+      f.age = 10001;
+      f.update();
+      expect(f.controller.canEditMeetingPlan, isFalse);
+    },
+  );
+
+  test(
+    'r10 wait arrival display and preparation follow server runtime at parked cadence',
+    () async {
+      final f = MeetingFixture(
+        account: 'leader',
+        target: null,
+        relationship: null,
+      );
+      addTearDown(f.dispose);
+      for (var i = 0; i < 3; i++) f.drive(0, elapsed: 5000);
+      f.controller.applyPlan(
+        snapshot(runtime: runtimeJson(follower: 'follower')),
+      );
+      await f.controller.selectOwnGuidance();
+      f.routes.single.succeed();
+      await flush();
+      for (var i = 0; i < 3; i++) f.drive(100, elapsed: 5000);
+      // Local proximity/stop evidence never invents arrival, passage or a trace.
+      expect(f.controller.ownRuntime!.phase, 'toJoin');
+      expect(f.controller.canDepart, isFalse);
+      expect(f.calls.where((c) => c.path.endsWith('/pass-evidence')), isEmpty);
+      final waiting = MeetingRuntime.fromJson(
+        runtimeJson(
+          runtimeRevision: 2,
+          follower: 'follower',
+          leaderPhase: 'atJoinWaiting',
+          followerPhase: 'atJoinWaiting',
+        ),
+      );
+      f.controller.applyRuntime(waiting);
+      expect(f.controller.status, contains('대기'));
+      expect(f.controller.canDepart, isTrue);
+      expect(f.controller.traceContext, isNull);
+      final notices = f.notices.length;
+      f.time += 4999;
+      f.age = 4999;
+      f.update();
+      f.controller.applyRuntime(waiting);
+      expect(f.controller.canDepart, isTrue);
+      expect(f.notices, hasLength(notices));
+      final departure = f.controller.depart();
+      final call = f.calls.last;
+      expect(call.path, endsWith('/depart'));
+      expect(call.body!['expectedRuntimeRevision'], 2);
+      call.complete({
+        'runtime': runtimeJson(
+          runtimeRevision: 3,
+          follower: 'follower',
+          leaderPhase: 'atJoinWaiting',
+          followerPhase: 'atJoinWaiting',
+          announced: routeEpoch + f.time,
+        ),
+      });
+      await departure;
+      expect(f.controller.status, '출발 준비');
+      expect(f.controller.traceContext, isNull);
+    },
+  );
+
   for (final owner in [false, true]) {
     test(
       'r8 approach ETA reports once for ${owner ? 'leader' : 'follower'}',

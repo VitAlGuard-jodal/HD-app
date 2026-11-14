@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { SampleRef } from "./route_contract.ts";
+import { STOP_EVIDENCE_RETENTION_MS } from "./location_quality.ts";
 
 export interface LocationFix {
   handle: string;
@@ -160,7 +161,7 @@ export class RoomLocationStore extends EventEmitter {
 
   recentSamples(code: string, handle: string): LocationFix[] {
     return (this.#rooms.get(code)?.recent.get(handle) ?? [])
-      .filter((fix) => this.#now() - fix.receivedAt <= LOCATION_REFERENCE_AGE_MS).map((fix) => ({ ...fix }));
+      .filter((fix) => this.#now() - fix.receivedAt <= STOP_EVIDENCE_RETENTION_MS).map((fix) => ({ ...fix }));
   }
 
   requestById(code: string, target: string, requestId: string): FollowRelation | undefined {
@@ -263,7 +264,7 @@ export class RoomLocationStore extends EventEmitter {
       at: fix.at, seq: fix.seq, receivedAt: now,
     };
     room.positions.set(fix.handle, stored);
-    const recent = (room.recent.get(fix.handle) ?? []).filter((sample) => now - sample.receivedAt <= LOCATION_REFERENCE_AGE_MS);
+    const recent = (room.recent.get(fix.handle) ?? []).filter((sample) => now - sample.receivedAt <= STOP_EVIDENCE_RETENTION_MS);
     recent.push(stored);
     if (recent.length > LOCATION_REFERENCE_LIMIT) recent.splice(0, recent.length - LOCATION_REFERENCE_LIMIT);
     room.recent.set(fix.handle, recent);
@@ -319,11 +320,10 @@ export class RoomLocationStore extends EventEmitter {
   }
 
   recentSample(code: string, handle: string, ref: SampleRef): LocationFix | undefined {
-    const room = this.#rooms.get(code);
-    const recent = room?.recent.get(handle)?.filter((fix) => this.#now() - fix.receivedAt <= LOCATION_REFERENCE_AGE_MS);
-    if (recent?.length) room!.recent.set(handle, recent);
-    else room?.recent.delete(handle);
-    const fix = recent?.find((fix) => fix.stream === ref.stream && fix.seq === ref.seq);
+    // Route origins still expire at 10 s. Looking one up must not trim the
+    // longer stop evidence used by editing and wait arrival.
+    const fix = this.#rooms.get(code)?.recent.get(handle)?.find((fix) => fix.stream === ref.stream && fix.seq === ref.seq
+      && this.#now() - fix.receivedAt <= LOCATION_REFERENCE_AGE_MS);
     return fix ? { ...fix } : undefined;
   }
 
@@ -334,7 +334,7 @@ export class RoomLocationStore extends EventEmitter {
   pruneReferences(): void {
     const now = this.#now();
     for (const room of this.#rooms.values()) for (const [handle, samples] of room.recent) {
-      const recent = samples.filter((fix) => now - fix.receivedAt <= LOCATION_REFERENCE_AGE_MS);
+      const recent = samples.filter((fix) => now - fix.receivedAt <= STOP_EVIDENCE_RETENTION_MS);
       if (recent.length) room.recent.set(handle, recent);
       else room.recent.delete(handle);
     }

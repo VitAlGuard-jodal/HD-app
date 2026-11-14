@@ -1,6 +1,15 @@
 import type { LocationFix } from "./locations.ts";
 import { distance, finite, ROUTE_LOCATION_AGE_MS } from "./route_contract.ts";
 
+// Keep the stop rule in sync with app/lib/location/meeting_stop_evidence.dart.
+export const STOP_EVIDENCE_MIN_SAMPLES = 3;
+export const STOP_EVIDENCE_MIN_SPAN_MS = 2_000;
+// Three parked uploads span 10 s; allow 5 s of cadence/receipt jitter.
+export const STOP_EVIDENCE_MAX_SPAN_MS = 15_000;
+export const STOP_EVIDENCE_RETENTION_MS = STOP_EVIDENCE_MAX_SPAN_MS + ROUTE_LOCATION_AGE_MS;
+export const STOP_MAX_DISPLACEMENT_METERS = 3;
+export const STOP_SPEED_LIMIT_MPS = 2;
+
 export function accuracyAllowance(fix: LocationFix): number | undefined {
   // r6: this is an assumed jump allowance, not measured accuracy or provenance.
   if (fix.acc === undefined) return fix.src === "vehicle" ? 25 : undefined;
@@ -26,7 +35,12 @@ export function context(samples: LocationFix[], now: number): boolean {
     && samples.every((s, i) => fresh(s, now) && (i === 0 || continuous(samples[i - 1], s)));
 }
 export function stopped(samples: LocationFix[], now: number): boolean {
-  if (!context(samples, now)) return false;
-  return samples.every((s, i) => s.speed !== undefined ? s.speed < 2
-    : i === 0 || distance(samples[i - 1], s) < 2 * (s.at - samples[i - 1].at) / 1000);
+  if (samples.length < STOP_EVIDENCE_MIN_SAMPLES || !fresh(samples.at(-1), now)) return false;
+  const measuredSpan = samples.at(-1)!.at - samples[0].at;
+  const receivedSpan = samples.at(-1)!.receivedAt - samples[0].receivedAt;
+  return measuredSpan >= STOP_EVIDENCE_MIN_SPAN_MS && measuredSpan <= STOP_EVIDENCE_MAX_SPAN_MS
+    && receivedSpan >= STOP_EVIDENCE_MIN_SPAN_MS && receivedSpan <= STOP_EVIDENCE_MAX_SPAN_MS
+    && samples.every((s, i) => quality(s) && (i === 0 || continuous(samples[i - 1], s))
+      && (s.speed === undefined || finite(s.speed) && s.speed >= 0 && s.speed < STOP_SPEED_LIMIT_MPS)
+      && distance(samples[0], s) < STOP_MAX_DISPLACEMENT_METERS);
 }

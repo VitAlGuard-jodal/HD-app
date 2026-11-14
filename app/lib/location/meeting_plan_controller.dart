@@ -7,6 +7,7 @@ import '../net/meeting_plan.dart';
 import '../net/models.dart';
 import 'follow_route_controller.dart';
 import 'follow_route_geometry.dart';
+import 'meeting_stop_evidence.dart';
 
 typedef MeetingRequest =
     Future<JsonMap> Function(
@@ -84,6 +85,7 @@ class MeetingPlanController extends ChangeNotifier {
   final _retired = <String>{};
   List<PlanParticipant> participants = const [];
   final _samples = <LocationFix>[];
+  final _sampleReceipts = <num>[];
   List<LocationFix> get ownSamples => List.unmodifiable(_samples);
   String? selectedLeader;
   String? _selectedPlanId;
@@ -152,7 +154,9 @@ class MeetingPlanController extends ChangeNotifier {
   bool get _freshSelf =>
       _input != null &&
       _input!.self != null &&
-      _input!.selfAgeMs <= 10000 &&
+      _input!.selfAgeMs.isFinite &&
+      _input!.selfAgeMs >= 0 &&
+      _input!.selfAgeMs <= meetingStopLocationAgeMs &&
       routeQuality(_input!.self!);
   bool get _fresh =>
       _freshSelf &&
@@ -172,30 +176,11 @@ class MeetingPlanController extends ChangeNotifier {
         i.restricted ||
         !_freshSelf)
       return false;
-    if (_samples.length < 3) return false;
-    final samples = _samples.sublist(_samples.length - 3);
-    if (samples.last.at - samples.first.at < 2000) return false;
-    if (samples.any(
-      (f) =>
-          f.speed != null &&
-          (!f.speed!.isFinite || f.speed! >= 2 || f.speed! < 0),
-    ))
-      return false;
-    // An unknown speed needs continuous, stationary fixes; never infer a stop
-    // from the absence of AAOS events, stale data, or a single GPS point.
-    final displacement = routeDistance(
-      RoutePoint.fromFix(samples.first),
-      RoutePoint.fromFix(samples.last),
+    return meetingStopped(
+      _samples,
+      latestAgeMs: i.selfAgeMs,
+      receivedAtMs: _sampleReceipts,
     );
-    return displacement < 3 &&
-        samples.every(
-          (f) =>
-              routeDistance(
-                RoutePoint.fromFix(samples.first),
-                RoutePoint.fromFix(f),
-              ) <
-              3,
-        );
   }
 
   bool get canEnroll =>
@@ -300,12 +285,25 @@ class MeetingPlanController extends ChangeNotifier {
         _freshSelf &&
         (_samples.isEmpty ||
             SampleRef.of(_samples.last) != SampleRef.of(self))) {
-      if (_samples.isNotEmpty && !traceContinuous(_samples.last, self))
+      if (_samples.isNotEmpty && !traceContinuous(_samples.last, self)) {
         _samples.clear();
+        _sampleReceipts.clear();
+      }
       _samples.add(self);
-      if (_samples.length > 6) _samples.removeAt(0);
+      // Own fixes have receivedAt=0. Remember the first successful upload
+      // acknowledgement; duplicate updates never refresh this evidence.
+      _sampleReceipts.add(
+        self.receivedAt > 0 ? self.receivedAt : self.at + input.selfAgeMs,
+      );
+      if (_samples.length > meetingEvidenceSampleLimit) {
+        _samples.removeAt(0);
+        _sampleReceipts.removeAt(0);
+      }
     }
-    if (!_freshSelf) _samples.clear();
+    if (!_freshSelf) {
+      _samples.clear();
+      _sampleReceipts.clear();
+    }
     if (!input.consent || !input.sharing) {
       final feature = capabilities;
       final selection = selectedLeader,
@@ -1600,6 +1598,7 @@ class MeetingPlanController extends ChangeNotifier {
     _plans.clear();
     _retired.clear();
     _samples.clear();
+    _sampleReceipts.clear();
     participants = const [];
     capabilities = const MeetingCapabilities();
     selectedLeader = null;
