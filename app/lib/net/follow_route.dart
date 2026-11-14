@@ -132,7 +132,10 @@ class FollowRouteRequest {
 }
 
 class FollowRouteResult {
-  FollowRouteResult.fromJson(JsonMap json, FollowRouteRequest request) {
+  FollowRouteResult.fromJson(JsonMap json, FollowRouteRequest request)
+    : this.fromPayload(_validate(json, request));
+
+  static JsonMap _validate(JsonMap json, FollowRouteRequest request) {
     if (!request.matches(json) ||
         json['schemaVersion'] != 1 ||
         json['mode'] != (request.mode == FollowRouteKind.initial ? 'A' : 'B') ||
@@ -141,6 +144,14 @@ class FollowRouteResult {
         json['provider'] != 'naver' ||
         json['routeOption'] != 'traoptimal') {
       throw const FormatException('경로 응답 문맥 오류');
+    }
+    return json;
+  }
+
+  /// Shared geometry parser. Schema-specific callers validate their own identity.
+  FollowRouteResult.fromPayload(JsonMap json) {
+    if (json['provider'] != 'naver' || json['routeOption'] != 'traoptimal') {
+      throw const FormatException('경로 제공처 오류');
     }
     double number(String key) {
       final value = json[key];

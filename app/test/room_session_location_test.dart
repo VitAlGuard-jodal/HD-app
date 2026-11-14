@@ -16,9 +16,12 @@ import 'package:unavo/location/location_source.dart';
 import 'package:unavo/location/follow_voice_guidance.dart';
 import 'package:unavo/net/api_client.dart';
 import 'package:unavo/net/models.dart';
+import 'package:unavo/net/meeting_plan.dart';
 import 'package:unavo/room/room_session.dart';
 
 import 'support/location_fakes.dart';
+import 'support/meeting_plan_fakes.dart' as meeting;
+import 'support/consent_fakes.dart' show testConsent;
 
 const _timeout = Timeout(Duration(seconds: 30));
 
@@ -39,6 +42,82 @@ LocationFix _fix(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('합류 계획 hello는 위치 revision과 독립이며 빈 재접속은 ②를 종료한다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.store.updateConsent(
+        testConsent(),
+        sessionRevision: f.store.sessionRevision,
+      );
+      f.open();
+      f.startSharing();
+      final plan = meeting.planJson(leader: 'alice')
+        ..['roomCode'] = 'ABC123'
+        ..['participantFollowRequestIds'] = ['alice-request'];
+      final runtime = meeting.runtimeJson(leader: 'alice', follower: 'bob');
+      runtime['enrollments'] = [
+        {'handle': 'bob', 'followRequestId': 'alice-request'},
+      ];
+      (runtime['vehicles'] as List)[1]['followRequestId'] = 'alice-request';
+      final snapshot = MeetingPlanSnapshot.fromJson({
+        'plan': plan,
+        'runtime': runtime,
+      });
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          const [],
+          const {},
+          'alice',
+          const [],
+          5000,
+          null,
+          'alice-request',
+          f.now().millisecondsSinceEpoch,
+          const FollowRouteFeature(enabled: true),
+          [snapshot],
+          const [],
+          meeting.planFeatures,
+        ),
+      );
+      expect(f.session.meetingPlan.selected, isTrue);
+      expect(f.session.meetingPlan.restored, isTrue);
+      expect(f.session.followRoute.state, isNull);
+      f.event(
+        FollowPlanProgress(
+          MeetingRuntime.fromJson(runtime..['runtimeRevision'] = 2),
+        ),
+      );
+      expect(f.session.meetingPlan.active!.runtime!.runtimeRevision, 2);
+      f.event(const Reconnected());
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          const [],
+          const {},
+          null,
+          const [],
+          0,
+          null,
+          null,
+          f.now().millisecondsSinceEpoch,
+          const FollowRouteFeature(enabled: true),
+          const [],
+          const [],
+          meeting.planFeatures,
+        ),
+      );
+      expect(f.session.meetingPlan.active, isNull);
+      expect(f.session.followRoute.state, isNull);
+      expect(f.session.locationShare.sharing, isTrue);
+      f.dispose();
+    });
+  });
 
   for (final reason in ['stopped', 'stale']) {
     test('D2 $reason SSE는 차량 음성과 기존 화면 알림에 각각 한 번 전달된다', () {

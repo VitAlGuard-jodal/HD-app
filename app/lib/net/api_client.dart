@@ -10,6 +10,7 @@ import '../auth/session_store.dart';
 import '../core/server_address.dart';
 import 'models.dart';
 import 'follow_route.dart';
+import 'meeting_plan.dart';
 import 'sse_parser.dart';
 
 class _AvatarPhotoEntry {
@@ -59,6 +60,112 @@ class ApiClient {
 
   // 서버 ping 15초 + 여유 5초
   static const sseSilenceTimeout = Duration(seconds: 20);
+
+  Future<FollowRouteResult> planRoute(
+    String code,
+    PlanRouteRequest body,
+    RouteCancellation cancellation,
+  ) async => body.parseResult(
+    await meetingRequest(
+      code,
+      'POST',
+      '/follow-route',
+      body.toJson(),
+      cancellation,
+    ),
+  );
+
+  /// Dedicated, cancellable no-retry connection for in-memory plans/search.
+  /// Provider errors never pass through the generic URL-bearing error mapper.
+  Future<JsonMap> meetingRequest(
+    String code,
+    String method,
+    String path,
+    JsonMap? body,
+    RouteCancellation cancellation, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final client = _clientFactory()..connectionTimeout = timeout;
+    var finished = false;
+    final cancelled = cancellation.whenCancelled.then<JsonMap>((_) {
+      if (!finished) client.close(force: true);
+      throw const FollowRouteException('CANCELLED');
+    });
+    Future<JsonMap> read() async {
+      if (cancellation.isCancelled)
+        throw const FollowRouteException('CANCELLED');
+      final base = ServerAddress.normalize(
+        tokenStore.baseUrl,
+        allowPrivateCleartext: allowPrivateCleartext,
+      );
+      final request = await client.openUrl(
+        method,
+        Uri.parse('$base/v1/rooms/${_segment(code)}$path'),
+      );
+      if (finished || cancellation.isCancelled) {
+        request.abort();
+        throw const FollowRouteException('CANCELLED');
+      }
+      request.followRedirects = false;
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set('x-unavo-device', deviceId);
+      request.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+      final token = tokenStore.token;
+      if (token != null)
+        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      if (body != null) {
+        final bytes = utf8.encode(jsonEncode(body));
+        if (bytes.length > 16384) {
+          request.abort();
+          throw const FollowRouteException('REQUEST_TOO_LARGE');
+        }
+        request.headers.set(
+          HttpHeaders.contentTypeHeader,
+          'application/json; charset=utf-8',
+        );
+        request.add(bytes);
+      }
+      final response = await request.close();
+      final bytes = BytesBuilder(copy: false);
+      await for (final chunk in response) {
+        if (finished || cancellation.isCancelled)
+          throw const FollowRouteException('CANCELLED');
+        bytes.add(chunk);
+        if (bytes.length > 2 * 1024 * 1024)
+          throw const FollowRouteException('ROUTE_TOO_LARGE');
+      }
+      if (response.statusCode == 204) return {};
+      final json = meetingObject(jsonDecode(utf8.decode(bytes.takeBytes())));
+      if (response.statusCode < 200 || response.statusCode >= 300)
+        throw FollowRouteException.fromJson(json);
+      return json;
+    }
+
+    try {
+      return await Future.any([read(), cancelled]).timeout(
+        timeout,
+        onTimeout: () {
+          client.close(force: true);
+          throw FollowRouteException(
+            path == '/geocoding' ? 'SEARCH_TIMEOUT' : 'ROUTE_TIMEOUT',
+            retryable: true,
+          );
+        },
+      );
+    } on FollowRouteException {
+      rethrow;
+    } on FormatException {
+      throw const FollowRouteException('INVALID_PROVIDER_RESPONSE');
+    } catch (_) {
+      throw FollowRouteException(
+        cancellation.isCancelled ? 'CANCELLED' : 'PROVIDER_UNAVAILABLE',
+        retryable: true,
+      );
+    } finally {
+      finished = true;
+      client.close(force: true);
+    }
+  }
 
   Future<FollowRouteResult> followRoute(
     String code,
@@ -634,6 +741,10 @@ class ApiClient {
       'ready-changed',
       'device-replaced',
       'member-device-changed',
+      'follow-plan-updated',
+      'follow-plan-participants',
+      'follow-plan-progress',
+      'follow-plan-cleared',
     }.contains(event.name))
       return null;
     JsonMap data;
@@ -650,6 +761,27 @@ class ApiClient {
       return null;
     }
     switch (event.name) {
+      case 'follow-plan-participants':
+        return FollowPlanParticipants(
+          List.unmodifiable(
+            (data['acceptedPlanFollowers'] as List).map(
+              PlanParticipant.fromJson,
+            ),
+          ),
+        );
+      case 'follow-plan-updated':
+        return FollowPlanUpdated(MeetingPlanSnapshot.fromJson(data));
+      case 'follow-plan-progress':
+        return FollowPlanProgress(
+          MeetingRuntime.fromJson(data['runtime'] ?? data),
+        );
+      case 'follow-plan-cleared':
+        return FollowPlanCleared(
+          meetingString(data['planId']),
+          meetingString(data['leaderHandle']),
+          meetingInt(data['revision']),
+          data['reason'] as String? ?? 'cancelled',
+        );
       case 'ready-changed':
         return ReadyChanged.fromJson(data);
       case 'device-replaced':

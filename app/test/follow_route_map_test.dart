@@ -117,7 +117,7 @@ void main() {
               find.byWidgetPredicate(
                 (widget) =>
                     widget is RoomMapButton &&
-                    widget.label == '합류 지점 따라가기 · 준비 중',
+                    widget.label == '합류 지점 따라가기 · 사용할 수 없음',
               ),
             );
             expect(reserved.onPressed, isNull);

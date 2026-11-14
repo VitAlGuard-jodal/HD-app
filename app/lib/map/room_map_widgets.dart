@@ -214,9 +214,13 @@ class RoomMapControls extends StatelessWidget {
     this.onModeChanged,
     this.onResetGuidance,
     this.guidanceLabel,
+    this.onMeetingPlan,
+    this.meetingAvailable = false,
   });
   final bool car, fullscreen, headingAligned;
   final FollowMode? mode;
+  final VoidCallback? onMeetingPlan;
+  final bool meetingAvailable;
   final ValueChanged<FollowMode>? onModeChanged;
   final VoidCallback? onResetGuidance;
   final String? guidanceLabel;
@@ -244,10 +248,12 @@ class RoomMapControls extends StatelessWidget {
           ),
           RoomMapButton(
             icon: 'route',
-            label: '합류 지점 따라가기 · 준비 중',
+            label: meetingAvailable ? '합류 지점 따라가기' : '합류 지점 따라가기 · 사용할 수 없음',
             car: car,
-            selected: false,
-            onPressed: null,
+            selected: mode == FollowMode.meetingPoint,
+            onPressed: !meetingAvailable || onModeChanged == null
+                ? null
+                : () => onModeChanged!(FollowMode.meetingPoint),
           ),
           RoomMapButton(
             icon: 'refresh',
@@ -256,6 +262,13 @@ class RoomMapControls extends StatelessWidget {
             onPressed: onResetGuidance,
           ),
         ],
+        if (onMeetingPlan != null)
+          RoomMapButton(
+            icon: 'map',
+            label: '합류 계획 보기',
+            car: car,
+            onPressed: onMeetingPlan,
+          ),
         RoomMapButton(
           icon: 'focus',
           label: '내 위치로',

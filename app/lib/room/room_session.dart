@@ -18,6 +18,7 @@ import '../location/location_source.dart';
 import '../location/follow_voice_guidance.dart';
 import '../location/follow_route_controller.dart';
 import '../location/follow_route_geometry.dart';
+import '../location/meeting_plan_controller.dart';
 import '../net/api_client.dart';
 import '../net/models.dart';
 
@@ -109,17 +110,24 @@ class RoomSession extends ChangeNotifier {
     );
     followRoute = FollowRouteController(
       load: api.followRoute,
+      loadPlan: api.planRoute,
       canChange: () => !followNeedsStop && !state.isLeaving && !_deviceReplaced,
       onJoined: (relationship, round, rejoined) {
+        meetingPlan.releaseApproach();
+        if (meetingPlan.traceContext != null)
+          unawaited(meetingPlan.reportTraceStage('onTrace'));
         final code = state.code;
         if (code != null)
           _routeVoice.announceOnce(
             room: code,
-            key: '$relationship:joined:$round',
+            key:
+                '${meetingPlan.traceContext?.identity}:$relationship:joined:$round',
             text: rejoined ? '앞차가 지나간 경로를 다시 따라갑니다' : '앞차가 지나간 경로를 따라갑니다',
           );
       },
       onDeparted: (relationship, round) {
+        if (meetingPlan.traceContext != null)
+          unawaited(meetingPlan.reportTraceStage('rejoining'));
         final code = state.code;
         if (code != null)
           _routeVoice.announceOnce(
@@ -142,6 +150,29 @@ class RoomSession extends ChangeNotifier {
       },
     );
     followRoute.addListener(_routeChanged);
+    meetingPlan = MeetingPlanController(
+      request: api.meetingRequest,
+      loadRoute: api.planRoute,
+      onInvalidated: _routeVoice.clear,
+      onNotice: (key, text) {
+        final code = state.code;
+        if (code != null)
+          _routeVoice.announceOnce(room: code, key: key, text: text);
+      },
+      onAuthorizationError: (code) {
+        if (code == 'NOT_ACTIVE_SENDER') unawaited(_handleDeviceReplaced());
+        if (code == 'FOLLOW_NOT_ACTIVE')
+          unawaited(_reconcileRouteRelationship());
+        if (code == 'NOT_ROOM_MEMBER')
+          unawaited(
+            _forgetInaccessibleRoom(
+              const ApiException(403, 'NOT_ROOM_MEMBER', '방 참여 권한이 없습니다'),
+            ),
+          );
+      },
+    );
+    meetingPlan.addListener(_meetingChanged);
+    driving?.addListener(_meetingChanged);
     locationShare = LocationShare(
       api: api,
       source: locationSource,
@@ -212,6 +243,44 @@ class RoomSession extends ChangeNotifier {
   late final FollowVoiceGuidance _followVoice;
   late final FollowVoiceGuidance _routeVoice;
   late final FollowRouteController followRoute;
+  late final MeetingPlanController meetingPlan;
+  bool get canEditMeetingPlan => meetingPlan.canEditMeetingPlan;
+  FollowRouteView? get activeGuidance => meetingPlan.selected
+      ? meetingPlan.traceContext != null
+            ? followRoute.state?.view ?? meetingPlan.view
+            : meetingPlan.view
+      : followRoute.state?.view;
+
+  Future<void> changeFollowMode(FollowMode mode) async {
+    if (mode == FollowMode.meetingPoint) {
+      if (await meetingPlan.enroll(true)) {
+        followRoute.clear();
+        _routeRestored = false;
+      }
+    } else if (meetingPlan.selected) {
+      if (await meetingPlan.enroll(false)) {
+        followRoute.clear();
+        _routeRestored = false;
+      }
+    }
+    _notify();
+  }
+
+  void resetActiveGuidance() {
+    if (meetingPlan.selected) {
+      if (meetingPlan.resetGuidance()) followRoute.clear();
+    } else {
+      followRoute.reset();
+    }
+    _notify();
+  }
+
+  void _meetingChanged() {
+    if (_disposed || _updatingRoute) return;
+    _updateFollowRoute();
+    notifyListeners();
+  }
+
   final _routeClock = Stopwatch()..start();
   late final _remoteRouteClock = FollowLocationClock(
     () => _routeClock.elapsedMilliseconds,
@@ -219,6 +288,15 @@ class RoomSession extends ChangeNotifier {
   Timer? _routeTimer;
   bool _updatingRoute = false, _routeRestored = false;
   FollowRouteFeature? _routeFeature;
+  num? _planServerNow;
+  int _planClockAt = 0;
+  void _observePlanClock(num? value) {
+    if (value != null && value.isFinite && value > 0) {
+      _planServerNow = value;
+      _planClockAt = _routeClock.elapsedMilliseconds;
+    }
+  }
+
   late final StreamSubscription<Map<String, MeshPeerState>> _peerSubscription;
   Map<String, MeshPeerState> get peerStates => mediaEngine.peerStates;
   RoomState _state = const RoomState();
@@ -820,6 +898,22 @@ class RoomSession extends ChangeNotifier {
 
   Future<void> _onEvent(String code, RoomEvent event, int generation) async {
     switch (event) {
+      case FollowPlanParticipants():
+        meetingPlan.setParticipants(event.participants);
+        _notify();
+        return;
+      case FollowPlanUpdated():
+        meetingPlan.applyPlan(event.snapshot);
+        _notify();
+        return;
+      case FollowPlanProgress():
+        meetingPlan.applyRuntime(event.runtime);
+        _notify();
+        return;
+      case FollowPlanCleared():
+        meetingPlan.planCleared(event.planId, event.leaderHandle);
+        _notify();
+        return;
       case DeviceReplaced():
         await _handleDeviceReplaced();
         return;
@@ -860,6 +954,7 @@ class RoomSession extends ChangeNotifier {
         _notify();
         return;
       case FollowCancelled():
+        unawaited(meetingPlan.refreshParticipants());
         _serverRevision = event.revision > _serverRevision
             ? event.revision
             : _serverRevision;
@@ -870,6 +965,7 @@ class RoomSession extends ChangeNotifier {
         if (_followRequests.remove(event.requestId) != null) _notify();
         return;
       case FollowResponse():
+        unawaited(meetingPlan.refreshParticipants());
         if (_followPostInFlight || _followStops.isNotEmpty) {
           if ((event.target == _pendingFollow ||
                   event.target == _deferredFollowIntent) &&
@@ -898,6 +994,7 @@ class RoomSession extends ChangeNotifier {
         _notify();
         return;
       case LocationUpdated():
+        _observePlanClock(event.serverNowMs);
         if (event.fix.handle == followTarget)
           _remoteRouteClock.observe(event.fix, event.serverNowMs);
         if (event.revision > _serverRevision) _serverRevision = event.revision;
@@ -952,9 +1049,17 @@ class RoomSession extends ChangeNotifier {
           }
         }
       case Hello():
+        _observePlanClock(event.serverNowMs);
         // The stream has now established ownership, including explicit entry.
         if (_cancelReadyPending) _sendReadyCancellation();
         if (event.revision < _serverRevision) {
+          _updateFollowRoute();
+          meetingPlan.applySnapshot(
+            event.plans,
+            event.acceptedPlanFollowers,
+            event.meetingCapabilities,
+            authoritative: true,
+          );
           state = state.copyWith(isConnected: true, error: null);
           _hasEntered = true;
           _vehicleChanged();
@@ -963,6 +1068,13 @@ class RoomSession extends ChangeNotifier {
           return;
         }
         _setLocationSnapshot(event);
+        _updateFollowRoute();
+        meetingPlan.applySnapshot(
+          event.plans,
+          event.acceptedPlanFollowers,
+          event.meetingCapabilities,
+          authoritative: true,
+        );
         await _setMembers(event.members);
         if (!_current(generation)) return;
         // Keep live peers; repair only offers lost while SSE was unavailable.
@@ -1698,11 +1810,13 @@ class RoomSession extends ChangeNotifier {
 
   void _clearLocations() {
     followRoute.clear();
+    meetingPlan.clear();
     _routeTimer?.cancel();
     _routeTimer = null;
     _remoteRouteClock.clear();
     _routeRestored = false;
     _routeFeature = null;
+    _planServerNow = null;
     _followVoice.clear();
     _followStops.clear();
     _serverRevision = 0;
@@ -2185,18 +2299,57 @@ class RoomSession extends ChangeNotifier {
           relationship = followRequestId;
       if (code == null ||
           account == null ||
-          target == null ||
-          relationship == null ||
-          !locationShare.sharing ||
           state.isLeaving ||
           _deviceReplaced ||
           _exitStopsLocation) {
         followRoute.update(null);
+        meetingPlan.update(null);
         _routeTimer?.cancel();
         _routeTimer = null;
         return;
       }
       final leader = positions[target];
+      meetingPlan.update(
+        MeetingInput(
+          room: code,
+          account: account,
+          device: '${store.sessionRevision}:${api.deviceId}',
+          connected: state.isConnected,
+          consent:
+              hasPrivacyConsent(store.consent) &&
+              hasLocationConsent(store.consent),
+          sharing: locationShare.sharing,
+          restricted: _carMode && (driving?.restricted ?? false),
+          self: locationShare.lastSent,
+          selfAgeMs: locationShare.lastSentAgeMs,
+          target: target,
+          relationship: relationship,
+          leader: leader,
+          leaderAgeMs: _remoteRouteClock.age(leader),
+          serverNowMs: _planServerNow == null
+              ? _remoteRouteClock.serverNowMs
+              : _planServerNow! +
+                    _routeClock.elapsedMilliseconds -
+                    _planClockAt,
+        ),
+      );
+      if (!locationShare.sharing) {
+        followRoute.update(null);
+        _routeTimer?.cancel();
+        _routeTimer = null;
+        return;
+      }
+      _routeTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+        _updateFollowRoute();
+        if (!_disposed) notifyListeners();
+      });
+      if (target == null ||
+          relationship == null ||
+          !locationShare.sharing ||
+          meetingPlan.selected && meetingPlan.traceContext == null) {
+        followRoute.update(null);
+        return;
+      }
       followRoute.update(
         FollowRouteInput(
           room: code,
@@ -2218,6 +2371,11 @@ class RoomSession extends ChangeNotifier {
           restored: _routeRestored,
           serverNowMs: _remoteRouteClock.serverNowMs,
           routingEnabled: _routeFeature?.enabled == true,
+          planTrace: meetingPlan.traceContext,
+          planApproachRoute: meetingPlan.approachRoute,
+          planCondition: meetingPlan.selected
+              ? meetingPlan.ownRuntime?.condition
+              : null,
         ),
       );
       _routeTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
@@ -2244,6 +2402,9 @@ class RoomSession extends ChangeNotifier {
     _routeTimer?.cancel();
     followRoute.removeListener(_routeChanged);
     followRoute.dispose();
+    driving?.removeListener(_meetingChanged);
+    meetingPlan.removeListener(_meetingChanged);
+    meetingPlan.dispose();
     _clearTransientVehicleNotice();
     vehicle.removeListener(_vehicleChanged);
     vehicle.dispose();

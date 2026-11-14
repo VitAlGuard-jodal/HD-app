@@ -10,6 +10,7 @@ import '../../core/app_services.dart';
 import '../../core/device_mode.dart';
 import '../../core/errors.dart';
 import '../../map/room_map.dart';
+import 'meeting_plan_panel.dart';
 import '../../net/models.dart';
 import '../../ui/control_scale.dart';
 import '../../ui/icons.dart';
@@ -42,6 +43,7 @@ class RoomScreen extends StatefulWidget {
 
 class _RoomScreenState extends State<RoomScreen> {
   bool _busy = false;
+  bool _meetingPanel = false;
   bool _volumeExpanded = false;
   bool _dragging = false;
   bool fullscreenMap = false;
@@ -120,8 +122,9 @@ class _RoomScreenState extends State<RoomScreen> {
                 '${member.displayName} 님의 위치를 따라갑니다',
                 '내 위치도 같은 방 참여자에게 보입니다',
                 '차량 위치 서비스 사용 여부도 같은 방에 전달해 위치 품질 확인에 사용합니다',
-                '안내 시작·이탈 후 재합류 경로 재계산 때 내 출발 좌표와 앞차 기준점 좌표(P0 또는 J)를 네이버 클라우드 플랫폼 Maps(Directions 5)에 제공합니다',
-                '앱 지도에 추천 경로를 그리기 위한 도로 경로 계산에 사용합니다',
+                '안내 시작·이탈 후 재합류 경로 재계산 때 내 출발 좌표와 앞차 기준점 좌표(P0 또는 실제 궤적 재합류 기준점)를 네이버 클라우드 플랫폼 Maps(Directions 5)에 제공합니다',
+                '합류 계획의 목적지·합류 지점·정책·참여·도착 상태는 해당 그룹에 공유합니다',
+                '추천 시 선택 차량의 현재 위치·목적지, 그룹장 포함 개별 안내·재계산 시 내 현재 위치·목표를 Directions 5에, 직접 제출한 주소를 Geocoding에 제공합니다',
                 '계정·이름·사진·방 코드는 보내지 않습니다. 제공처 보유 조건은 네이버 클라우드 플랫폼의 정책을 따릅니다',
                 '화면이 꺼져 있어도 공유 중에는 위치를 보냅니다',
                 '방을 나가거나 위치 공유를 중지하면 공유가 끝납니다',
@@ -252,8 +255,9 @@ class _RoomScreenState extends State<RoomScreen> {
                     '$name 님이 내 위치를 따라가려 합니다',
                     '동의하면 내 위치가 같은 방 참여자에게 보입니다',
                     '차량 위치 서비스 사용 여부도 같은 방에 전달해 위치 품질 확인에 사용합니다',
-                    '안내 시작·이탈 후 재합류 경로 재계산 때 따라오는 차의 출발 좌표와 내 기준점 좌표(P0 또는 J)를 네이버 클라우드 플랫폼 Maps(Directions 5)에 제공합니다',
-                    '앱 지도에 추천 경로를 그리기 위한 도로 경로 계산에 사용합니다',
+                    '안내 시작·이탈 후 재합류 경로 재계산 때 따라오는 차의 출발 좌표와 내 기준점 좌표(P0 또는 실제 궤적 재합류 기준점)를 네이버 클라우드 플랫폼 Maps(Directions 5)에 제공합니다',
+                    '합류 계획의 목적지·합류 지점·정책·참여·도착 상태는 해당 그룹에 공유합니다',
+                    '추천 시 선택 차량의 현재 위치·목적지, 그룹장 포함 개별 안내·재계산 시 내 현재 위치·목표를 Directions 5에, 직접 제출한 주소를 Geocoding에 제공합니다',
                     '계정·이름·사진·방 코드는 보내지 않습니다. 제공처 보유 조건은 네이버 클라우드 플랫폼의 정책을 따릅니다',
                     '화면이 꺼져 있어도 공유 중에는 위치를 보냅니다',
                     '방을 나가거나 위치 공유를 중지하면 끝납니다',
@@ -558,16 +562,46 @@ class _RoomScreenState extends State<RoomScreen> {
               ),
             ),
             trail: session.trailOf(session.followTarget),
-            guidance: session.followRoute.state?.view,
-            onModeChanged: _busy || session.followNeedsStop || state.isLeaving
+            guidance: session.activeGuidance,
+            meetingPins: session.meetingPlan.pins,
+            onPointSelected:
+                session.meetingPlan.editing && session.canEditMeetingPlan
+                ? session.meetingPlan.pickPoint
+                : null,
+            meetingAvailable: session.meetingPlan.capabilities.enabled,
+            onMeetingPlan:
+                session.meetingPlan.capabilities.enabled &&
+                    session.locationShare.sharing
+                ? () => setState(() => _meetingPanel = !_meetingPanel)
+                : null,
+            meetingPanel: _meetingPanel
+                ? MeetingPlanPanel(
+                    controller: session.meetingPlan,
+                    onClose: () => setState(() => _meetingPanel = false),
+                    onShowPoint: (lat, lng) => _mapController.moveTo(lat, lng),
+                    displayName: session.displayNameOf,
+                  )
+                : null,
+            onModeChanged:
+                _busy || !session.canEditMeetingPlan || state.isLeaving
                 ? null
-                : (mode) => session.followRoute.changeMode(mode),
-            onResetGuidance: _busy || session.followNeedsStop || state.isLeaving
+                : (mode) => unawaited(session.changeFollowMode(mode)),
+            onResetGuidance:
+                _busy ||
+                    (session.meetingPlan.selected
+                        ? !session.canEditMeetingPlan
+                        : session.followNeedsStop) ||
+                    state.isLeaving
                 ? null
-                : () => session.followRoute.reset(),
-            targetHandle: session.followTarget,
+                : session.resetActiveGuidance,
+            targetHandle:
+                session.meetingPlan.selected && session.meetingPlan.owner
+                ? null
+                : session.followTarget,
             selfHandle: widget.services.store.handle,
-            following: session.followTarget != null,
+            following:
+                session.followTarget != null &&
+                !(session.meetingPlan.selected && session.meetingPlan.owner),
             brightness: MediaQuery.platformBrightnessOf(context),
             car: car,
             fullscreen: fullscreenMap,
@@ -800,7 +834,7 @@ class _RoomScreenState extends State<RoomScreen> {
                             Padding(
                               padding: const EdgeInsets.symmetric(vertical: 8),
                               child: Text(
-                                '추천 경로 안내 시작·재계산 시 네이버 클라우드 플랫폼 Maps(Directions 5)에 뒷차 출발·앞차 기준점 좌표 제공',
+                                '네이버 Maps Directions 5 · 추천 시 선택 차량 현재 위치·목적지, 안내·재계산 시 내 현재 위치·목표 제공 / Geocoding · 검색 제출 시 입력 주소 제공',
                                 key: const ValueKey(
                                   'follow-route-provider-status',
                                 ),

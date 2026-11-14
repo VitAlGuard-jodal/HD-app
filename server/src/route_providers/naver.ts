@@ -5,6 +5,8 @@ import type { Point, ProviderRoute } from "../route_contract.ts";
 export interface NaverConfig { provider: "naver"; keyId: string; key: string }
 export type RouteConfig = NaverConfig | { provider: "disabled" };
 export type RouteProvider = (origin: Point, destination: Point, signal: AbortSignal, config: NaverConfig) => Promise<ProviderRoute>;
+export interface RouteTiming { quality: "guide" | "rough"; knots: { meters: number; seconds: number }[] }
+export interface TimedProviderRoute extends ProviderRoute { timing: RouteTiming }
 
 export function routeConfig(env: NodeJS.ProcessEnv = process.env): RouteConfig {
   const keyId = env.NAVER_DIRECTIONS_KEY_ID;
@@ -76,7 +78,7 @@ export function parseNaverRoute(value: unknown, origin: Point, destination: Poin
     actualStart, actualEnd, startGapMeters, endGapMeters };
 }
 
-async function readResponse(response: Response): Promise<unknown> {
+export async function readResponse(response: Response): Promise<unknown> {
   if (Number(response.headers.get("content-length")) > ROUTE_RESPONSE_LIMIT) {
     void response.body?.cancel().catch(() => {});
     throw new RouteError("ROUTE_TOO_LARGE");
@@ -109,7 +111,7 @@ function retryAfter(value: string | null, now: number): number {
   return Number.isFinite(delay) ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(ROUTE_INTERVAL_MS, Math.ceil(delay))) : ROUTE_INTERVAL_MS;
 }
 
-export function naverProvider(fetcher: typeof fetch = fetch, now = () => Date.now()): RouteProvider {
+export function naverProvider(fetcher: typeof fetch = fetch, now = () => Date.now(), includeTiming = false): RouteProvider {
   return async (origin, destination, signal, config) => {
     try {
       const url = new URL("https://maps.apigw.ntruss.com/map-direction/v1/driving");
@@ -128,11 +130,44 @@ export function naverProvider(fetcher: typeof fetch = fetch, now = () => Date.no
       }
       const value = await readResponse(response);
       if (response.status === 400 && (!record(value) || ![1, 2, 3, 4, 5].includes(value.code as number))) invalid();
-      return parseNaverRoute(value, origin, destination);
+      return includeTiming ? parseNaverRecommendationRoute(value, origin, destination) : parseNaverRoute(value, origin, destination);
     } catch (error) {
       if (signal.aborted && signal.reason instanceof RouteError) throw signal.reason;
       if (error instanceof RouteError) throw error;
       throw new RouteError("PROVIDER_UNAVAILABLE", ROUTE_INTERVAL_MS);
     }
   };
+}
+
+// Guide indices refer to the ORIGINAL path. Cumulative distances at those
+// indices preserve the mapping even when parseNaverRoute removes duplicates.
+// https://api.ncloud-docs.com/docs/application-maps-directions5
+export function parseNaverRecommendationRoute(value: unknown, origin: Point, destination: Point): TimedProviderRoute {
+  const result = parseNaverRoute(value, origin, destination);
+  const length = result.points.reduce((sum, p, i) => sum + (i ? distance(result.points[i - 1], p) : 0), 0);
+  const rough = (): TimedProviderRoute => ({ ...result, timing: { quality: "rough",
+    knots: [{ meters: 0, seconds: 0 }, { meters: length, seconds: result.seconds }] } });
+  if (result.result === "atAnchor") return rough();
+  const route = (value as { route: { traoptimal: { path: number[][]; guide?: unknown }[] } }).route.traoptimal[0];
+  if (!Array.isArray(route.guide) || route.guide.length === 0 || route.guide.length > ROUTE_POINT_LIMIT) return rough();
+  const rawDistances: number[] = [0];
+  for (let i = 1; i < route.path.length; i++) rawDistances.push(rawDistances[i - 1] + distance(coordinate(route.path[i - 1]), coordinate(route.path[i])));
+  const knots = [{ meters: 0, seconds: 0 }];
+  let index = -1, seconds = 0;
+  for (const guide of route.guide) {
+    if (!record(guide) || !Number.isSafeInteger(guide.pointIndex) || (guide.pointIndex as number) <= index
+      || (guide.pointIndex as number) >= rawDistances.length || (guide.pointIndex as number) < 0
+      || !finite(guide.duration) || guide.duration < 0) return rough();
+    index = guide.pointIndex as number; seconds += guide.duration / 1000;
+    const meters = rawDistances[index];
+    if (!Number.isFinite(seconds) || seconds > result.seconds + .001 || meters === knots.at(-1)!.meters && seconds !== knots.at(-1)!.seconds) return rough();
+    if (meters !== knots.at(-1)!.meters) knots.push({ meters, seconds });
+  }
+  const last = knots.at(-1)!;
+  if (last.meters < length) {
+    // The remaining summary duration is explicitly the unreported tail only.
+    if (result.seconds <= last.seconds) return rough();
+    knots.push({ meters: length, seconds: result.seconds });
+  } else if (Math.abs(last.seconds - result.seconds) > .001) return rough();
+  return { ...result, timing: { quality: "guide", knots } };
 }

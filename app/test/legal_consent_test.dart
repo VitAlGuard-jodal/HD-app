@@ -23,11 +23,11 @@ import 'support/icon_bundle.dart';
 
 void main() {
   test(
-    'v4 consent cannot authorize the added source field; v5 is required on both documents',
+    'v5 consent cannot authorize meeting plans and address search; v6 is required on both documents',
     () {
       const old = ConsentRecord(
-        privacy: (version: '4', at: 'now'),
-        location: (version: '4', at: 'now'),
+        privacy: (version: '5', at: 'now'),
+        location: (version: '5', at: 'now'),
       );
       expect(hasPrivacyConsent(old), isFalse);
       expect(hasLocationConsent(old), isFalse);
@@ -48,7 +48,7 @@ void main() {
           await _mount(tester, services, car: car, phoneWidth: 360);
           const labels = [
             ['항목', '목적', '보유', '제공', '경로', '거부'],
-            ['항목', '제공', '경로', '제공처 보유', '보유', '거부'],
+            ['항목', '제공', '경로', '계획·검색 보유', '제공처 보유', '보유', '거부'],
           ];
           for (var document = 0; document < labels.length; document++) {
             expect(
@@ -87,7 +87,7 @@ void main() {
   for (final location in [false, true]) {
     for (final serverFails in [false, true]) {
       testWidgets(
-        '동의는 PUT 1회로 개인정보 5·위치 ${location ? "5" : "생략"}을 보내고 ${serverFails ? "서버 500이면 재시도하고 " : ""}성공 후에만 onAccepted를 호출한다',
+        '동의는 PUT 1회로 개인정보 6·위치 ${location ? "6" : "생략"}을 보내고 ${serverFails ? "서버 500이면 재시도하고 " : ""}성공 후에만 onAccepted를 호출한다',
         (tester) async {
           final services = await ConsentTestServices.create(tester);
           services.api.http.status = serverFails ? 500 : 200;
@@ -102,8 +102,8 @@ void main() {
             expect(requests.single.method, 'PUT');
             expect(requests.single.uri.path, '/v1/me/consent');
             expect(jsonDecode(utf8.decode(requests.single.body)), {
-              'privacy': {'version': '5'},
-              if (location) 'location': {'version': '5'},
+              'privacy': {'version': '6'},
+              if (location) 'location': {'version': '6'},
             });
             expect(accepted, serverFails ? 0 : 1);
             expect(hasPrivacyConsent(services.store.consent), !serverFails);

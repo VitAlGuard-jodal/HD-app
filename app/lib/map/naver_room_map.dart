@@ -1,3 +1,4 @@
+import '../location/meeting_plan_controller.dart';
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -206,10 +207,14 @@ class NaverRoomMap extends StatefulWidget {
     this.fullscreen = false,
     this.api,
     this.guidance,
+    this.meetingPins = const [],
+    this.onPointSelected,
   });
   final NaverRoomMapController controller;
   final ApiClient? api;
   final FollowRouteView? guidance;
+  final List<MeetingPin> meetingPins;
+  final ValueChanged<RoutePoint>? onPointSelected;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
   final String? targetHandle, selfHandle;
@@ -239,6 +244,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   final _paths = <String, NPathOverlay>{};
   NPolylineOverlay? _rejoinPath;
   NMarker? _anchorMarker;
+  final _meetingMarkers = <String, NMarker>{};
   bool _syncing = false, _syncAgain = false, _loggedError = false;
   final _clock = Stopwatch()..start();
   Duration? _lastFollow;
@@ -297,6 +303,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
         });
     if (positionsChanged ||
         oldWidget.guidance != widget.guidance ||
+        !listEquals(oldWidget.meetingPins, widget.meetingPins) ||
         trailChanged ||
         rolesChanged ||
         oldWidget.car != widget.car ||
@@ -350,6 +357,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     _paths.clear();
     _rejoinPath = null;
     _anchorMarker = null;
+    _meetingMarkers.clear();
     unawaited(_syncOverlays());
     if (_headingAligned == true &&
         !widget.following &&
@@ -668,6 +676,31 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       await camera.deleteOverlay(line.info);
       if (!_isCurrent(camera)) return;
     }
+    final pinIds = widget.meetingPins.map((p) => p.id).toSet();
+    for (final id in _meetingMarkers.keys.toList()) {
+      if (!pinIds.contains(id)) {
+        await camera.deleteOverlay(_meetingMarkers.remove(id)!.info);
+        if (!_isCurrent(camera)) return;
+      }
+    }
+    for (final pin in widget.meetingPins) {
+      final position = NLatLng(pin.point.lat, pin.point.lng);
+      final caption = NOverlayCaption(text: pin.label);
+      final existing = _meetingMarkers[pin.id];
+      if (existing == null) {
+        final marker = NMarker(
+          id: 'meeting:${pin.id}',
+          position: position,
+          caption: caption,
+        );
+        await camera.addOverlay(marker);
+        if (!_isCurrent(camera)) return;
+        _meetingMarkers[pin.id] = marker;
+      } else {
+        existing.setPosition(position);
+        existing.setCaption(caption);
+      }
+    }
     final anchor = guidance?.anchor;
     if (anchor == null) {
       if (_anchorMarker != null) {
@@ -906,6 +939,11 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
                     tiltGesturesEnable: true,
                   ),
                   onMapReady: _onMapReady,
+                  onMapLongTapped: widget.onPointSelected == null
+                      ? null
+                      : (_, point) => widget.onPointSelected!(
+                          RoutePoint(point.latitude, point.longitude),
+                        ),
                   onCameraChange: (reason, animated) {
                     if (reason == NCameraUpdateReason.gesture) _interaction();
                   },

@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../net/follow_route.dart';
 import '../net/models.dart';
+import '../net/meeting_plan.dart';
 import 'follow_route_geometry.dart';
 
 export '../net/follow_route.dart' show FollowMode, FollowPhase, RoutePoint;
@@ -46,6 +47,9 @@ class FollowRouteInput {
     this.restored = false,
     this.serverNowMs,
     this.routingEnabled = true,
+    this.planTrace,
+    this.planCondition,
+    this.planApproachRoute,
   });
   final String room, account, device, relationship, target;
   final LocationFix? self, origin, leader;
@@ -54,7 +58,11 @@ class FollowRouteInput {
   final bool consent, connected, restored;
   final num? serverNowMs;
   final bool routingEnabled;
-  Object get identity => (room, account, device, relationship, target);
+  final PlanTraceContext? planTrace;
+  final String? planCondition;
+  final FollowRouteResult? planApproachRoute;
+  Object get identity =>
+      (room, account, device, relationship, target, planTrace?.identity);
 }
 
 /// Memory belongs to RoomSession, never to a map or panel widget.
@@ -194,7 +202,9 @@ class FollowRouteView {
   final bool confirmed, subdued, rejoining;
   final String status;
   String get anchorLabel => !rejoining
-      ? '처음 앞차 위치'
+      ? mode == FollowMode.meetingPoint
+            ? '합류 후 이동 경로 시작'
+            : '처음 앞차 위치'
       : confirmed
       ? '재합류 지점'
       : '재합류 지점 후보';
@@ -216,11 +226,18 @@ class FollowRouteController extends ChangeNotifier {
     required this.onInvalidated,
     int Function()? now,
     this.onAuthorizationError,
+    this.loadPlan,
   }) {
     final clock = Stopwatch()..start();
     _now = now ?? () => clock.elapsedMilliseconds;
   }
   final FollowRouteLoader load;
+  final Future<FollowRouteResult> Function(
+    String,
+    PlanRouteRequest,
+    RouteCancellation,
+  )?
+  loadPlan;
   final bool Function() canChange;
   final void Function(String relationship, int round, bool rejoined) onJoined;
   final void Function(String relationship, int round) onDeparted;
@@ -273,6 +290,7 @@ class FollowRouteController extends ChangeNotifier {
       _input = input;
       _state = FollowGuidance(input.identity, input.relationship)
         ..generation = ++_generation;
+      if (input.planTrace != null) _state!.mode = FollowMode.meetingPoint;
       if (input.restored)
         _state!.condition = FollowRouteCondition.resetRequired;
     }
@@ -311,6 +329,7 @@ class FollowRouteController extends ChangeNotifier {
   bool get _fresh {
     final i = _input!;
     return i.connected &&
+        i.planCondition == null &&
         i.self != null &&
         i.leader != null &&
         i.selfAgeMs <= 10000 &&
@@ -353,6 +372,22 @@ class FollowRouteController extends ChangeNotifier {
           : FollowRouteCondition.resetRequired;
     }
     _updateTrace();
+    if (i.planCondition != null) {
+      final hold = switch (i.planCondition) {
+        'poorAccuracy' => FollowRouteCondition.poorAccuracy,
+        'consentRequired' => FollowRouteCondition.consentRequired,
+        'traceUnavailable' => FollowRouteCondition.traceBroken,
+        _ => FollowRouteCondition.locationDelayed,
+      };
+      if ((hold == FollowRouteCondition.consentRequired ||
+              hold == FollowRouteCondition.traceBroken) &&
+          s.condition != hold) {
+        _invalidate();
+        s.route = null;
+      }
+      _hold(hold);
+      return;
+    }
     if (i.self == null || i.leader == null) {
       _hold(FollowRouteCondition.waitingLocation);
       return;
@@ -380,7 +415,11 @@ class FollowRouteController extends ChangeNotifier {
           FollowRouteCondition.waitingLocation,
           FollowRouteCondition.waitingTrace,
         }.contains(s.condition)) {
-      _start();
+      if (i.planTrace != null) {
+        _primePlanTrace(i.planTrace!);
+      } else {
+        _start();
+      }
       return;
     }
     if ({
@@ -593,7 +632,7 @@ class FollowRouteController extends ChangeNotifier {
       }
       return;
     }
-    if (!s.rejoining) {
+    if (!s.rejoining && _input!.planTrace == null) {
       if (s.route == null || s.anchorPoint == null) return;
       if (!s.anchorReached &&
           routeDistance(RoutePoint.fromFix(fix), s.anchorPoint!) <= 25.000001) {
@@ -611,6 +650,7 @@ class FollowRouteController extends ChangeNotifier {
       s.anchorReached = false;
       return;
     }
+    if (_input!.planTrace != null && !s.rejoining) s.anchorReached = true;
     if ((!s.rejoining && !s.anchorReached) ||
         direction == null ||
         routeDirectionDifference(direction, projection.bearing) > 60.000001 ||
@@ -802,6 +842,35 @@ class FollowRouteController extends ChangeNotifier {
     _send();
   }
 
+  void _primePlanTrace(PlanTraceContext plan) {
+    final s = _state!;
+    for (final path in _paths) {
+      final along = path.resolve(plan.start);
+      if (along == null) continue;
+      s.anchor = plan.start;
+      s.anchorPoint = path.pointAt(along);
+      s.anchorAt = path.fixes
+          .firstWhere((f) => SampleRef.of(f) == plan.start.start)
+          .at;
+      s.anchorConfirmed = true;
+      s.route = _input!.planApproachRoute;
+      // Server already verified this round's J passage/departure. This only
+      // opens the trace gate; direction + 3 samples / 2 s / 10 m still apply.
+      s.anchorReached = true;
+      s.condition = FollowRouteCondition.ready;
+      _updateTrace();
+      return;
+    }
+    s.condition =
+        _paths.any(
+          (p) =>
+              p.fixes.first.stream != plan.start.start.stream ||
+              p.fixes.first.seq > plan.start.start.seq,
+        )
+        ? FollowRouteCondition.traceBroken
+        : FollowRouteCondition.waitingTrace;
+  }
+
   void _recoverIfNeeded() {
     final s = _state!;
     if (!s.rejoining ||
@@ -890,7 +959,24 @@ class FollowRouteController extends ChangeNotifier {
     RouteCancellation cancellation,
   ) async {
     try {
-      final result = await load(input.room, request, cancellation);
+      final plan = input.planTrace;
+      final result = plan == null
+          ? await load(input.room, request, cancellation)
+          : await loadPlan!(
+              input.room,
+              PlanRouteRequest(
+                planId: plan.planId,
+                planRevision: plan.revision,
+                followRequestId: request.followRequestId,
+                guidanceGeneration: request.guidanceGeneration,
+                calculationId: request.calculationId,
+                requestId: request.requestId,
+                routeKind: PlanRouteKind.traceRejoin,
+                originRef: request.originRef,
+                traceAnchor: request.anchor,
+              ),
+              cancellation,
+            );
       if (!_current(input, request, cancellation)) return;
       _cancellation = null;
       if (!_fresh) {

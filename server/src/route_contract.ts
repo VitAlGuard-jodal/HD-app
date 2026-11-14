@@ -6,7 +6,7 @@ export const ROUTE_INTERVAL_MS = 30_000;
 export const ROUTE_INPUT_TTL_MS = 120_000;
 export const ROUTE_LOCATION_AGE_MS = 10_000;
 export const ROUTE_ENDPOINT_GAP_METERS = 25;
-export const ROUTE_CONSENT_VERSION = "5";
+export const ROUTE_CONSENT_VERSION = "6";
 
 export interface Point { lat: number; lng: number }
 export interface SampleRef { stream: string; seq: number }
@@ -22,6 +22,19 @@ export interface FollowRouteRequest {
   originRef: SampleRef;
   anchor: RouteAnchor;
 }
+export interface PlanRouteRequest {
+  schemaVersion: 2;
+  planId: string;
+  planRevision: number;
+  followRequestId: string | null;
+  guidanceGeneration: number;
+  calculationId: string;
+  requestId: string;
+  routeKind: "planJoin" | "planDestination" | "traceRejoin";
+  originRef: SampleRef;
+  anchor: { kind: "joinPoint" } | { kind: "destination" } | Extract<RouteAnchor, { kind: "segment" }>;
+}
+export type AnyRouteRequest = FollowRouteRequest | PlanRouteRequest;
 export interface ProviderRoute {
   result: "route" | "atAnchor";
   provider: "naver";
@@ -39,6 +52,9 @@ export interface FollowRouteResponse extends FollowRouteRequest, ProviderRoute {
   requestedAnchor: Point;
   serverNowMs: number;
 }
+export type AnyRouteResponse = AnyRouteRequest & ProviderRoute & {
+  requestedOrigin: Point; requestedAnchor: Point; serverNowMs: number;
+};
 
 const errorStatuses = {
   INVALID_REQUEST: 400, REQUEST_TOO_LARGE: 413, UNAUTHENTICATED: 401,
@@ -49,6 +65,12 @@ const errorStatuses = {
   NO_ROUTE: 422, ENDPOINT_MISMATCH: 422, RATE_LIMITED: 429, PROVIDER_RATE_LIMITED: 429,
   ROUTING_DISABLED: 503, PROVIDER_AUTH_FAILED: 502, INVALID_PROVIDER_RESPONSE: 502,
   ROUTE_TOO_LARGE: 502, PROVIDER_UNAVAILABLE: 502, ROUTE_TIMEOUT: 504,
+  PLAN_NOT_OWNER: 403, PLAN_NOT_PARTICIPANT: 403, CONSENT_REQUIRED_PARTICIPANT: 403,
+  PLAN_NOT_READY: 409, PLAN_CHANGED: 409, PLAN_LOCKED: 409, PLAN_DEPARTED: 409,
+  DEPARTURE_NOT_READY: 409, RUNTIME_CHANGED: 409, PASS_NOT_CONFIRMED: 409,
+  RECOMMENDATION_STALE: 409, TRACE_UNAVAILABLE: 409, STOP_REQUIRED: 409,
+  NO_PARTICIPANTS: 422, TOO_MANY_PARTICIPANTS: 422, RECOMMENDATION_TOO_LARGE: 422,
+  GEOCODING_DISABLED: 503, SEARCH_UNAVAILABLE: 502, SEARCH_TIMEOUT: 504,
 } as const;
 export type RouteErrorCode = keyof typeof errorStatuses;
 const retryableCodes = new Set<RouteErrorCode>([
@@ -61,6 +83,7 @@ export class RouteError extends Error {
   readonly retryable: boolean;
   readonly retryAfterMs: number | null;
   inputExpiresAtMs?: number;
+  participantFollowRequestIds?: string[];
 
   constructor(code: RouteErrorCode, retryAfterMs: number | null = null, retryable = retryableCodes.has(code)) {
     // Never retain a provider exception, URL, response body or credentials.
@@ -71,14 +94,17 @@ export class RouteError extends Error {
     this.retryAfterMs = retryAfterMs;
   }
 
-  body(request?: FollowRouteRequest) {
+  body(request?: AnyRouteRequest) {
     return {
       error: { code: this.code, retryable: this.retryable, retryAfterMs: this.retryAfterMs },
       ...(request ? {
         followRequestId: request.followRequestId, guidanceGeneration: request.guidanceGeneration,
         calculationId: request.calculationId, requestId: request.requestId,
+        ...(request.schemaVersion === 2 ? { schemaVersion: 2, planId: request.planId,
+          planRevision: request.planRevision, routeKind: request.routeKind } : {}),
       } : {}),
       ...(this.inputExpiresAtMs === undefined ? {} : { inputAccepted: true, inputExpiresAtMs: this.inputExpiresAtMs }),
+      ...(this.participantFollowRequestIds ? { participantFollowRequestIds: this.participantFollowRequestIds } : {}),
     };
   }
 }
@@ -89,18 +115,41 @@ export function finite(value: unknown): value is number {
 export function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-function keys(value: Record<string, unknown>, expected: string[]): boolean {
+export function canonicalJson(value: unknown): string {
+  const normalize = (item: unknown): unknown => Array.isArray(item) ? item.map(normalize)
+    : record(item) ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, normalize(item[key])])) : item;
+  return JSON.stringify(normalize(value));
+}
+export function keys(value: Record<string, unknown>, expected: string[]): boolean {
   return Object.keys(value).length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
-function integer(value: unknown): value is number {
+export function integer(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
-function identifier(value: unknown): value is string {
+export function identifier(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 }
-function ref(value: unknown): value is SampleRef {
+export function ref(value: unknown): value is SampleRef {
   return record(value) && keys(value, ["stream", "seq"])
     && typeof value.stream === "string" && /^[0-9a-f]{16}$/.test(value.stream) && integer(value.seq);
+}
+
+export function parseAnyRouteRequest(value: unknown): AnyRouteRequest {
+  if (!record(value) || value.schemaVersion !== 2) return parseRouteRequest(value);
+  if (!keys(value, ["schemaVersion", "planId", "planRevision", "followRequestId", "guidanceGeneration",
+    "calculationId", "requestId", "routeKind", "originRef", "anchor"])
+    || !identifier(value.planId) || !integer(value.planRevision) || value.planRevision < 1
+    || !(value.followRequestId === null || identifier(value.followRequestId))
+    || !integer(value.guidanceGeneration) || !identifier(value.calculationId) || !identifier(value.requestId)
+    || !ref(value.originRef) || !record(value.anchor)) throw new RouteError("INVALID_REQUEST");
+  const a = value.anchor;
+  if (!((value.routeKind === "planJoin" && a.kind === "joinPoint" && keys(a, ["kind"]))
+    || (value.routeKind === "planDestination" && a.kind === "destination" && keys(a, ["kind"]))
+    || (value.routeKind === "traceRejoin" && a.kind === "segment" && keys(a, ["kind", "startRef", "endRef", "fraction"])
+      && ref(a.startRef) && ref(a.endRef) && finite(a.fraction) && a.fraction >= 0 && a.fraction <= 1))) {
+    throw new RouteError("INVALID_REQUEST");
+  }
+  return structuredClone(value) as unknown as PlanRouteRequest;
 }
 
 export function parseRouteRequest(value: unknown): FollowRouteRequest {

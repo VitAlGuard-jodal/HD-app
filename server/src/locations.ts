@@ -149,6 +149,20 @@ export class RoomLocationStore extends EventEmitter {
       .filter((request) => request.target === target).map((request) => ({ ...request }));
   }
 
+  acceptedFollowersOf(code: string, target: string): FollowRelation[] {
+    return [...(this.#rooms.get(code)?.accepted.values() ?? [])]
+      .filter((relation) => relation.target === target).map((relation) => ({ ...relation }));
+  }
+
+  acceptedFollowerTargets(): { code: string; target: string }[] {
+    return [...this.#rooms].flatMap(([code, room]) => [...room.followers.keys()].map((target) => ({ code, target })));
+  }
+
+  recentSamples(code: string, handle: string): LocationFix[] {
+    return (this.#rooms.get(code)?.recent.get(handle) ?? [])
+      .filter((fix) => this.#now() - fix.receivedAt <= LOCATION_REFERENCE_AGE_MS).map((fix) => ({ ...fix }));
+  }
+
   requestById(code: string, target: string, requestId: string): FollowRelation | undefined {
     return this.requestsFor(code, target).find((request) => request.requestId === requestId);
   }
@@ -172,6 +186,7 @@ export class RoomLocationStore extends EventEmitter {
     if (previous?.target === target) {
       const promoted = !room.accepted.has(requester) && room.sharing.has(target);
       if (promoted) { this.#addFollower(room, previous); room.revision++; }
+      if (promoted) this.emit("relations-changed", { code, target });
       return { ...previous, accepted: room.accepted.has(requester), changed: promoted, revision: room.revision };
     }
     this.unfollow(code, requester);
@@ -180,6 +195,7 @@ export class RoomLocationStore extends EventEmitter {
     if (accepted) this.#addFollower(room, relation);
     else room.pendingRequests.set(requester, relation);
     room.revision++;
+    this.emit("relations-changed", { code, target });
     return { ...relation, accepted, changed: true, revision: room.revision };
   }
 
@@ -196,6 +212,7 @@ export class RoomLocationStore extends EventEmitter {
     const requests = this.requestsFor(code, target);
     for (const relation of requests) this.#addFollower(room, relation);
     room.revision++;
+    this.emit("relations-changed", { code, target });
     return requests;
   }
 
@@ -214,6 +231,7 @@ export class RoomLocationStore extends EventEmitter {
     room.revision++;
     room.recent.delete(requester);
     this.emit("invalidated", { code, requester } satisfies LocationInvalidation);
+    this.emit("relations-changed", { code, target: relation.target });
     return relation;
   }
 
@@ -257,6 +275,7 @@ export class RoomLocationStore extends EventEmitter {
       if (trail.length > LOCATION_TRAIL_LIMIT) trail.splice(0, trail.length - LOCATION_TRAIL_LIMIT);
     }
     room.revision++;
+    this.emit("accepted", { code, fix: { ...stored } });
     return { ok: true, dropped: false };
   }
 

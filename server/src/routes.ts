@@ -1,7 +1,11 @@
-import type { LocationFix, LocationInvalidation, RoomLocationStore } from "./locations.ts";
-import { distance, finite, parseRouteRequest, RouteError, sameRef, ROUTE_INPUT_TTL_MS,
-  ROUTE_INTERVAL_MS, ROUTE_LOCATION_AGE_MS, ROUTE_TIMEOUT_MS } from "./route_contract.ts";
-import type { FollowRouteRequest, FollowRouteResponse, Point, RouteAnchor, RouteErrorCode } from "./route_contract.ts";
+import type { LocationInvalidation, RoomLocationStore } from "./locations.ts";
+import { canonicalJson, distance, parseAnyRouteRequest, RouteError, sameRef, ROUTE_INPUT_TTL_MS,
+  ROUTE_INTERVAL_MS, ROUTE_TIMEOUT_MS } from "./route_contract.ts";
+import type { AnyRouteRequest, AnyRouteResponse, Point, RouteAnchor, RouteErrorCode } from "./route_contract.ts";
+import { fresh, quality, continuous } from "./location_quality.ts";
+import { CallBudget, DEFAULT_ROUTE_LIMITS } from "./call_budget.ts";
+import type { Reservation } from "./call_budget.ts";
+import type { FollowPlanService } from "./follow_plans.ts";
 import { naverProvider, routeConfig } from "./route_providers/naver.ts";
 import type { RouteConfig, RouteProvider } from "./route_providers/naver.ts";
 
@@ -10,19 +14,21 @@ export type { FollowRouteRequest } from "./route_contract.ts";
 
 // Shared provider budgets are deliberately conservative until the operator
 // verifies the account quota. They can be lowered through server configuration.
-export const DEFAULT_ROUTE_LIMITS = { accountPerMinute: 2, accountPerHour: 60, providerPerMinute: 60, providerPerHour: 1800 };
+export { DEFAULT_ROUTE_LIMITS } from "./call_budget.ts";
 export interface RouteServiceOptions {
   config?: () => RouteConfig;
   provider?: RouteProvider;
   now?: () => number;
   monotonicNow?: () => number;
   limits?: Partial<typeof DEFAULT_ROUTE_LIMITS>;
+  budget?: CallBudget;
+  plans?: FollowPlanService;
 }
 interface Input {
   code: string;
   requester: string;
   target: string;
-  request: FollowRouteRequest;
+  request: AnyRouteRequest;
   fingerprint: string;
   origin: Point;
   anchor: Point;
@@ -40,31 +46,10 @@ interface ActiveCall {
   controller: AbortController;
 }
 
-function accuracyAllowance(fix: LocationFix): number | undefined {
-  // Pleos supplies no documented metre accuracy. 25 m is only an assumed
-  // jump allowance, never a measured acc or proof of vehicle provenance.
-  // Keep in sync with app/lib/location/follow_route_geometry.dart.
-  if (fix.acc === undefined) return fix.src === "vehicle" ? 25 : undefined;
-  return finite(fix.acc) && fix.acc >= 0 && fix.acc <= 25 ? fix.acc : undefined;
-}
-function quality(fix: LocationFix): boolean {
-  return accuracyAllowance(fix) !== undefined
-    && fix.at <= fix.receivedAt && fix.receivedAt - fix.at <= ROUTE_LOCATION_AGE_MS;
-}
-function fresh(fix: LocationFix | undefined, now: number): fix is LocationFix {
-  return !!fix && quality(fix) && now >= fix.receivedAt && now - fix.receivedAt <= ROUTE_LOCATION_AGE_MS
-    && now >= fix.at && now - fix.at <= ROUTE_LOCATION_AGE_MS;
-}
-function continuous(a: LocationFix, b: LocationFix): boolean {
-  const elapsed = b.at - a.at;
-  return a.stream === b.stream && b.seq === a.seq + 1 && quality(a) && quality(b)
-    && elapsed > 0 && elapsed <= ROUTE_LOCATION_AGE_MS && b.receivedAt >= a.receivedAt
-    && distance(a, b) <= 70 * elapsed / 1000 + accuracyAllowance(a)! + accuracyAllowance(b)!;
-}
 function coordinates(fix: Point): Point { return { lat: fix.lat, lng: fix.lng }; }
-function fingerprint(request: FollowRouteRequest): string {
+function fingerprint(request: AnyRouteRequest): string {
   const { requestId: _attempt, ...input } = request;
-  return JSON.stringify(input);
+  return canonicalJson(input);
 }
 
 export class FollowRouteService {
@@ -73,12 +58,11 @@ export class FollowRouteService {
   #provider: RouteProvider;
   #now: () => number;
   #clock: () => number;
-  #limits: typeof DEFAULT_ROUTE_LIMITS;
+  #budget: CallBudget;
+  #plans?: FollowPlanService;
+  #planInvalidated: (event: { code: string; planId: string; requester?: string }) => void;
   #inputs = new Map<string, Input>();
   #active = new Map<string, ActiveCall>();
-  #accountCalls = new Map<string, number[]>();
-  #providerCalls: number[] = [];
-  #providerRetryAt = 0;
   #closed = false;
   #onInvalidated: (event: LocationInvalidation) => void;
 
@@ -88,12 +72,12 @@ export class FollowRouteService {
     this.#provider = options.provider ?? naverProvider();
     this.#now = options.now ?? (() => Date.now());
     this.#clock = options.monotonicNow ?? (() => performance.now());
-    this.#limits = { ...DEFAULT_ROUTE_LIMITS, ...options.limits };
-    for (const [name, limit] of Object.entries(this.#limits)) {
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > DEFAULT_ROUTE_LIMITS[name as keyof typeof DEFAULT_ROUTE_LIMITS]) {
-        throw new Error("Invalid route limit");
-      }
-    }
+    this.#budget = options.budget ?? new CallBudget({ clock: this.#clock, limits: options.limits });
+    this.#plans = options.plans;
+    this.#planInvalidated = (event) => this.#invalidate((input) => input.code === event.code
+      && input.request.schemaVersion === 2 && input.request.planId === event.planId
+      && (!event.requester || input.requester === event.requester), "PLAN_CHANGED");
+    this.#plans?.on("invalidated", this.#planInvalidated);
     this.#onInvalidated = (event) => this.#invalidate((input) => input.code === event.code
       && (event.requester ? input.requester === event.requester
         : event.handle ? input.requester === event.handle || input.target === event.handle : true), "FOLLOW_NOT_ACTIVE");
@@ -102,7 +86,7 @@ export class FollowRouteService {
 
   feature() {
     const enabled = !this.#closed && this.#config().provider === "naver";
-    return { enabled, provider: enabled ? "naver" : null, routeOption: enabled ? "traoptimal" : null,
+    return { enabled, schemaVersions: this.#plans ? [1, 2] : [1], provider: enabled ? "naver" : null, routeOption: enabled ? "traoptimal" : null,
       ...(enabled ? {} : { code: "ROUTING_DISABLED" }) };
   }
 
@@ -127,12 +111,7 @@ export class FollowRouteService {
   sweep(): void {
     const now = this.#clock();
     for (const input of this.#inputs.values()) if (now >= input.deadline) this.#drop(input, "REFERENCE_EXPIRED");
-    for (const [account, calls] of this.#accountCalls) {
-      const recent = calls.filter((at) => now - at < 3_600_000);
-      if (recent.length) this.#accountCalls.set(account, recent);
-      else this.#accountCalls.delete(account);
-    }
-    this.#providerCalls = this.#providerCalls.filter((at) => now - at < 3_600_000);
+    this.#budget.sweep();
     this.#locations.pruneReferences();
     if (this.#config().provider !== "naver") this.#invalidate(() => true, "ROUTING_DISABLED");
   }
@@ -140,12 +119,11 @@ export class FollowRouteService {
   close(): void {
     this.#closed = true;
     this.#invalidate(() => true, "ROUTING_DISABLED");
-    this.#accountCalls.clear();
-    this.#providerCalls = [];
+    this.#plans?.off("invalidated", this.#planInvalidated);
     this.#locations.off("invalidated", this.#onInvalidated);
   }
 
-  assertCurrent(code: string, requester: string, request: FollowRouteRequest, authorize: () => string): void {
+  assertCurrent(code: string, requester: string, request: AnyRouteRequest, authorize: () => string): void {
     const { target } = this.#check(code, requester, request, authorize);
     const input = this.#inputs.get(requester);
     if (!input || input.code !== code || input.target !== target || input.fingerprint !== fingerprint(request)) {
@@ -155,20 +133,28 @@ export class FollowRouteService {
       this.#drop(input, "REFERENCE_EXPIRED");
       throw new RouteError("REFERENCE_EXPIRED");
     }
-    this.#anchor(code, target, request.anchor, false);
+    this.#requestAnchor(code, requester, target, request, false);
   }
 
-  #check(code: string, requester: string, request: FollowRouteRequest, authorize: () => string): { target: string; config: RouteConfig & { provider: "naver" } } {
+  #check(code: string, requester: string, request: AnyRouteRequest, authorize: () => string): { target: string; config: RouteConfig & { provider: "naver" } } {
     const target = authorize();
     const config = this.#config();
     if (this.#closed || config.provider !== "naver") throw new RouteError("ROUTING_DISABLED");
     const relation = this.#locations.relationOf(code, requester);
-    if (relation?.requestId !== request.followRequestId || this.#locations.targetOf(code, requester) !== target
-      || relation.target !== target) throw new RouteError("FOLLOW_NOT_ACTIVE");
+    if (request.schemaVersion === 1 && (relation?.requestId !== request.followRequestId || this.#locations.targetOf(code, requester) !== target
+      || relation.target !== target)) throw new RouteError("FOLLOW_NOT_ACTIVE");
     if (!this.#locations.isSharing(code, requester) || !this.#locations.isSharing(code, target)
       || !fresh(this.#locations.position(code, requester), this.#now())
       || !fresh(this.#locations.position(code, target), this.#now())) throw new RouteError("LOCATION_NOT_READY");
+    if (request.schemaVersion === 2 && this.#plans?.routeContext(code, requester, request).target !== target) throw new RouteError("PLAN_CHANGED");
     return { target, config };
+  }
+
+  #requestAnchor(code: string, requester: string, target: string, request: AnyRouteRequest, initial: boolean): Point {
+    if (request.schemaVersion === 1) return this.#anchor(code, target, request.anchor, initial);
+    if (!this.#plans) throw new RouteError("PLAN_NOT_READY");
+    const plan = this.#plans.routeContext(code, requester, request);
+    return request.anchor.kind === "segment" ? this.#anchor(code, target, request.anchor, false) : plan.anchor;
   }
 
   #anchor(code: string, target: string, anchor: RouteAnchor, initial: boolean): Point {
@@ -193,7 +179,7 @@ export class FollowRouteService {
     return { lat: start.lat + (end.lat - start.lat) * anchor.fraction, lng: start.lng + (end.lng - start.lng) * anchor.fraction };
   }
 
-  #pin(code: string, requester: string, target: string, request: FollowRouteRequest): Input {
+  #pin(code: string, requester: string, target: string, request: AnyRouteRequest): Input {
     let previous = this.#inputs.get(requester);
     if (previous && this.#clock() >= previous.deadline) {
       this.#drop(previous, "REFERENCE_EXPIRED");
@@ -202,14 +188,15 @@ export class FollowRouteService {
     }
     if (previous && previous.request.calculationId === request.calculationId) {
       if (previous.code !== code || previous.target !== target || previous.fingerprint !== fingerprint(request)) throw new RouteError("CONTEXT_MISMATCH");
-      this.#anchor(code, target, request.anchor, false);
+      this.#requestAnchor(code, requester, target, request, false);
       return previous;
     }
-    if (previous && previous.request.followRequestId === request.followRequestId
+    if (previous && previous.request.followRequestId === request.followRequestId && previous.request.schemaVersion === request.schemaVersion
+      && (request.schemaVersion === 1 || previous.request.schemaVersion === 2 && previous.request.planId === request.planId)
       && request.guidanceGeneration <= previous.request.guidanceGeneration) throw new RouteError("CONTEXT_MISMATCH");
     const origin = this.#locations.recentSample(code, requester, request.originRef);
     if (!fresh(origin, this.#now())) throw new RouteError("REFERENCE_EXPIRED");
-    const anchor = this.#anchor(code, target, request.anchor, true);
+    const anchor = this.#requestAnchor(code, requester, target, request, true);
     if (previous) this.#drop(previous, "CONTEXT_MISMATCH");
     const input: Input = { code, requester, target, request, fingerprint: fingerprint(request), origin: coordinates(origin), anchor,
       expiresAt: this.#now() + ROUTE_INPUT_TTL_MS, deadline: this.#clock() + ROUTE_INPUT_TTL_MS,
@@ -219,39 +206,22 @@ export class FollowRouteService {
     return input;
   }
 
-  #reserve(input: Input): void {
+  #reserve(input: Input): Reservation {
     if (this.#active.has(input.requester)) throw new RouteError("ROUTE_IN_PROGRESS");
-    if (input.done) {
-      throw input.lastError ? new RouteError(input.lastError.code, null, false) : new RouteError("CONTEXT_MISMATCH");
-    }
-    const now = this.#clock();
-    const calls = (this.#accountCalls.get(input.requester) ?? []).filter((at) => now - at < 3_600_000);
-    this.#providerCalls = this.#providerCalls.filter((at) => now - at < 3_600_000);
-    let wait = Math.max(0, input.retryAt - now, this.#providerRetryAt - now,
-      calls.length ? calls.at(-1)! + ROUTE_INTERVAL_MS - now : 0);
-    for (const [times, period, limit] of [
-      [calls, 60_000, this.#limits.accountPerMinute], [calls, 3_600_000, this.#limits.accountPerHour],
-      [this.#providerCalls, 60_000, this.#limits.providerPerMinute], [this.#providerCalls, 3_600_000, this.#limits.providerPerHour],
-    ] as const) {
-      const recent = times.filter((at) => now - at < period);
-      if (recent.length >= limit) wait = Math.max(wait, recent[recent.length - limit] + period - now);
-    }
-    if (wait > 0) throw new RouteError("RATE_LIMITED", Math.ceil(wait));
-    calls.push(now);
-    this.#accountCalls.set(input.requester, calls);
-    this.#providerCalls.push(now);
-    input.attempts++;
+    if (input.done) throw input.lastError ? new RouteError(input.lastError.code, null, false) : new RouteError("CONTEXT_MISMATCH");
+    if (input.retryAt > this.#clock()) throw new RouteError("RATE_LIMITED", Math.ceil(input.retryAt - this.#clock()));
+    return this.#budget.reserve([input.requester]);
   }
 
-  async calculate(code: string, requester: string, raw: unknown, authorize: () => string, signal?: AbortSignal): Promise<FollowRouteResponse> {
-    const request = parseRouteRequest(raw);
+  async calculate(code: string, requester: string, raw: unknown, authorize: () => string, signal?: AbortSignal): Promise<AnyRouteResponse> {
+    const request = parseAnyRouteRequest(raw);
     let input: Input | undefined;
     try {
       const { target, config } = this.#check(code, requester, request, authorize);
       input = this.#pin(code, requester, target, request);
       if (signal?.aborted) throw new RouteError("CONTEXT_MISMATCH");
       if (input.requestIds.has(request.requestId) && !this.#active.has(requester)) throw new RouteError("CONTEXT_MISMATCH");
-      this.#reserve(input);
+      const reservation = this.#reserve(input);
       input.requestIds.add(request.requestId);
       const controller = new AbortController();
       const active = { input, controller };
@@ -267,9 +237,10 @@ export class FollowRouteService {
       // The transport keeps the account slot until its cancellation settles.
       const transport = (async () => {
         controller.signal.throwIfAborted();
+        reservation.start(requester); input!.attempts++;
         return this.#provider({ ...input!.origin }, { ...input!.anchor }, controller.signal, config);
       })();
-      const release = () => { if (this.#active.get(requester) === active) this.#active.delete(requester); };
+      const release = () => { reservation.release(requester); if (this.#active.get(requester) === active) this.#active.delete(requester); };
       void transport.then(release, release);
       try {
         const result = await Promise.race([transport, aborted]);
@@ -279,16 +250,17 @@ export class FollowRouteService {
         // may recompute the same pinned input within the three-call budget;
         // no completed geometry is retained or replayed.
         input.done = input.attempts >= 3;
-        return { ...request, ...result, requestedOrigin: { ...input.origin }, requestedAnchor: { ...input.anchor }, serverNowMs: this.#now() };
+        const { timing: _timing, ...wireResult } = result as typeof result & { timing?: unknown };
+        return { ...request, ...wireResult, requestedOrigin: { ...input.origin }, requestedAnchor: { ...input.anchor }, serverNowMs: this.#now() };
       } catch (error) {
         // Late failures must not describe a no-longer-authorized calculation.
         this.#check(code, requester, request, authorize);
         if (this.#inputs.get(requester) !== input) throw new RouteError("CONTEXT_MISMATCH");
-        this.#anchor(code, target, request.anchor, false);
+        this.#requestAnchor(code, requester, target, request, false);
         let failure = error instanceof RouteError ? error : new RouteError("PROVIDER_UNAVAILABLE", ROUTE_INTERVAL_MS);
         if (failure.retryable && failure.code !== "RATE_LIMITED") {
           input.retryAt = this.#clock() + Math.max(ROUTE_INTERVAL_MS, failure.retryAfterMs ?? 0);
-          if (failure.code === "PROVIDER_RATE_LIMITED") this.#providerRetryAt = Math.max(this.#providerRetryAt, input.retryAt);
+          if (failure.code === "PROVIDER_RATE_LIMITED") this.#budget.defer(input.retryAt - this.#clock());
           if (input.attempts >= 3) failure = new RouteError(failure.code, null, false);
         }
         input.lastError = failure;

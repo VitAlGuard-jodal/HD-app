@@ -6,10 +6,15 @@ import { isValidDisplayName, isValidHandle, isValidPassword } from "./handles.ts
 import { LOCATION_DISCONNECT_GRACE_MS, LOCATION_STALE_MS, LOCATION_SWEEP_INTERVAL_MS, RoomLocationStore } from "./locations.ts";
 import { generateRoomCode, RoomEventHub } from "./rooms.ts";
 import { RoomReadyStore } from "./ready.ts";
-import { FollowRouteService, parseRouteRequest, RouteError } from "./routes.ts";
+import { FollowRouteService, RouteError } from "./routes.ts";
 import type { RouteServiceOptions } from "./routes.ts";
-import { ROUTE_BODY_LIMIT, ROUTE_CONSENT_VERSION } from "./route_contract.ts";
-import type { FollowRouteRequest } from "./route_contract.ts";
+import { parseAnyRouteRequest, ROUTE_BODY_LIMIT, ROUTE_CONSENT_VERSION } from "./route_contract.ts";
+import type { AnyRouteRequest } from "./route_contract.ts";
+import { GeocodingService } from "./geocoding.ts";
+import type { GeocodingOptions } from "./geocoding.ts";
+import { MeetingRecommendationService } from "./meeting_recommendation.ts";
+import { FollowPlanService } from "./follow_plans.ts";
+import { CallBudget } from "./call_budget.ts";
 import { openEventStream } from "./sse.ts";
 import { issueIceServers } from "./turn.ts";
 import {
@@ -153,10 +158,30 @@ function requireMember(db: DatabaseSync, room: StoredRoom, user: StoredUser): vo
   }
 }
 
-export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLocationStore(), readiness = new RoomReadyStore(), avatarsDir = avatarDirectory(db), routeOptions }: {
-  db: DatabaseSync; hub?: RoomEventHub; locations?: RoomLocationStore; readiness?: RoomReadyStore; avatarsDir?: string; routeOptions?: RouteServiceOptions;
+export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLocationStore(), readiness = new RoomReadyStore(), avatarsDir = avatarDirectory(db), routeOptions, geocodingOptions }: {
+  db: DatabaseSync; hub?: RoomEventHub; locations?: RoomLocationStore; readiness?: RoomReadyStore; avatarsDir?: string; routeOptions?: RouteServiceOptions; geocodingOptions?: GeocodingOptions;
 }): RequestListener {
-  const routes = new FollowRouteService(locations, routeOptions);
+  const eligible = (code: string, handle: string) => {
+    const user = findUserByHandle(db, handle);
+    const room = findRoomByCode(db, code);
+    return !!user && !!room && isRoomMember(db, room.id, user.id) && hub.hasSender(code, handle) && routeConsent(user.id);
+  };
+  const plans = new FollowPlanService(locations, { now: routeOptions?.now, monotonicNow: routeOptions?.monotonicNow, eligible });
+  const budget = new CallBudget({ clock: routeOptions?.monotonicNow, limits: routeOptions?.limits });
+  const routes = new FollowRouteService(locations, { ...routeOptions, plans, budget });
+  const recommendations = new MeetingRecommendationService(locations, plans, budget, { ...routeOptions, eligible });
+  const geocoding = new GeocodingService(locations, plans, { now: routeOptions?.now, monotonicNow: routeOptions?.monotonicNow, ...geocodingOptions });
+  plans.on("change", ({ code, leaderHandle, event, data }) => {
+    for (const handle of plans.readers(code, leaderHandle)) hub.sendTo(code, handle, event, data);
+  });
+  plans.on("participants-changed", ({ code, leaderHandle, participants }) => {
+    if (!eligible(code, leaderHandle)) return;
+    hub.sendTo(code, leaderHandle, "follow-plan-participants", { acceptedPlanFollowers: participants, serverNowMs: locations.serverNowMs() });
+  });
+  function planSnapshot(code: string, handle: string) {
+    return { followPlans: plans.snapshots(code, handle), acceptedPlanFollowers: plans.participants(code, handle),
+      meetingPlan: plans.feature(), meetingRecommendation: recommendations.feature(), geocoding: geocoding.feature() };
+  }
   function deviceOf(request: IncomingMessage, token: string): string {
     const device = request.headers["x-unavo-device"];
     if (device !== undefined && (typeof device !== "string" || !/^[0-9a-f]{32}$/.test(device))) {
@@ -249,6 +274,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
   function expireLocations(): void {
     for (const { code, handle } of locations.stale()) removeLocation(code, handle, "stale");
     routes.sweep();
+    plans.sweep(); recommendations.sweep(); geocoding.sweep();
   }
 
   function scheduleDisconnect(code: string, handle: string): void {
@@ -268,6 +294,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
     }, LOCATION_DISCONNECT_GRACE_MS).unref());
   }
 
+  const planSweepTimer = setInterval(() => plans.sweep(), 1000).unref();
   const locationSweepTimer = setInterval(expireLocations, LOCATION_SWEEP_INTERVAL_MS).unref();
   hub.on("sender-changed", ({ code, handle }: { code: string; handle: string }) => {
     clearReady(code, handle);
@@ -291,7 +318,9 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
   });
   hub.once("closing", () => {
     closing = true;
-    routes.close();
+    routes.close(); recommendations.close(); geocoding.close();
+    plans.close();
+    clearInterval(planSweepTimer);
     clearInterval(locationSweepTimer);
     clearTimeout(locationLogTimer);
     for (const timers of disconnectTimers.values()) for (const timer of timers.values()) clearTimeout(timer);
@@ -307,19 +336,19 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
   function routeConsent(userId: number): boolean {
     const consent = readUserConsent(db, userId);
     return [consent.privacy, consent.location].every((entry) => entry?.version === ROUTE_CONSENT_VERSION
-      && Number.isFinite(Date.parse(entry.at)));
+      && Number.isFinite(Date.parse(entry.at)) && Date.parse(entry.at) >= 0 && Date.parse(entry.at) <= Date.now());
   }
 
   async function followRoute(request: IncomingMessage, response: ServerResponse, rawCode: string): Promise<void> {
     response.setHeader("cache-control", "no-store");
-    let input: FollowRouteRequest | undefined;
+    let input: AnyRouteRequest | undefined;
     let verifyReply: (() => void) | undefined;
     const controller = new AbortController();
     const cancel = () => { if (!response.writableEnded) controller.abort(); };
     request.once("aborted", cancel);
     response.once("close", cancel);
     try {
-      input = parseRouteRequest(await readJson(request, false, ROUTE_BODY_LIMIT));
+      input = parseAnyRouteRequest(await readJson(request, false, ROUTE_BODY_LIMIT));
       const { user, token } = authenticate(db, request);
       const device = deviceOf(request, token);
       const code = pathValue(rawCode).toUpperCase();
@@ -330,13 +359,18 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         if (findRoomByCode(db, code)?.id !== room.id || !isRoomMember(db, room.id, user.id)) throw new RouteError("NOT_ROOM_MEMBER");
         if (!hub.isSender(code, user.handle, device)) throw new RouteError("NOT_ACTIVE_SENDER");
         if (!routes.feature().enabled) throw new RouteError("ROUTING_DISABLED");
-        const relation = locations.relationOf(code, user.handle);
-        if (relation?.requestId !== input!.followRequestId || locations.targetOf(code, user.handle) !== relation.target) {
-          throw new RouteError("FOLLOW_NOT_ACTIVE");
-        }
-        const target = findUserByHandle(db, relation.target);
-        if (!target || !isRoomMember(db, room.id, target.id)) throw new RouteError("FOLLOW_NOT_ACTIVE");
         if (!routeConsent(user.id)) throw new RouteError("CONSENT_REQUIRED_SELF");
+        let targetHandle: string;
+        if (input!.schemaVersion === 2) targetHandle = plans.routeContext(code, user.handle, input!).target;
+        else {
+          const relation = locations.relationOf(code, user.handle);
+          if (relation?.requestId !== input!.followRequestId || locations.targetOf(code, user.handle) !== relation.target) {
+            throw new RouteError("FOLLOW_NOT_ACTIVE");
+          }
+          targetHandle = relation.target;
+        }
+        const target = findUserByHandle(db, targetHandle);
+        if (!target || !isRoomMember(db, room.id, target.id)) throw new RouteError("FOLLOW_NOT_ACTIVE");
         if (!routeConsent(target.id)) throw new RouteError("CONSENT_REQUIRED_TARGET");
         return target.handle;
       };
@@ -360,9 +394,77 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
     }
   }
 
+  async function followPlan(request: IncomingMessage, response: ServerResponse, rawCode: string, rawLeader: string, action?: string): Promise<void> {
+    response.setHeader("cache-control", "no-store");
+    const controller = new AbortController();
+    const cancel = () => { if (!response.writableEnded) controller.abort(); };
+    request.once("aborted", cancel); response.once("close", cancel);
+    let verifyContext: (() => void) | undefined;
+    try {
+      const { user, token } = authenticate(db, request);
+      const code = pathValue(rawCode).toUpperCase();
+      const room = /^[A-Z0-9]+$/.test(code) ? findRoomByCode(db, code) : undefined;
+      if (!room) throw new RouteError("NOT_ROOM_MEMBER");
+      const leader = rawLeader === "self" ? user.handle : pathValue(rawLeader);
+      const device = deviceOf(request, token);
+      const authorize = () => {
+        if (lookupToken(db, token)?.id !== user.id) throw new RouteError("UNAUTHENTICATED");
+        if (findRoomByCode(db, code)?.id !== room.id || !isRoomMember(db, room.id, user.id)) throw new RouteError("NOT_ROOM_MEMBER");
+        if (request.method !== "GET" || action === "participants") {
+          if (!hub.isSender(code, user.handle, device)) throw new RouteError("NOT_ACTIVE_SENDER");
+        }
+        if (!routeConsent(user.id)) throw new RouteError("CONSENT_REQUIRED_SELF");
+      };
+      verifyContext = authorize;
+      authorize();
+      if (request.method === "GET" && action === "participants" && rawLeader === "self") {
+        json(response, 200, { participants: plans.participants(code, user.handle), serverNowMs: locations.serverNowMs() }); return;
+      }
+      if (request.method === "GET" && !action) { json(response, 200, plans.get(code, leader, user.handle)); return; }
+      const body = await readJson(request, false, ROUTE_BODY_LIMIT); authorize();
+      let result: unknown;
+      if (action === "recommend" && request.method === "POST") {
+        if (rawLeader !== "self") throw new RouteError("PLAN_NOT_OWNER");
+        const reply = await recommendations.recommend(code, user.handle, body, authorize, controller.signal);
+        recommendations.assertCurrent(reply); json(response, 200, reply); return;
+      }
+      if (action === "geocoding" && request.method === "POST") {
+        const reply = await geocoding.search(code, user.handle, body, authorize, controller.signal);
+        geocoding.assertCurrent(reply); json(response, 200, reply); return;
+      }
+      if (!action && request.method === "PUT") {
+        if (rawLeader !== "self") throw new RouteError("PLAN_NOT_OWNER");
+        result = plans.save(code, user.handle, body);
+      } else if (!action && request.method === "DELETE") {
+        if (rawLeader !== "self") throw new RouteError("PLAN_NOT_OWNER");
+        result = plans.remove(code, user.handle, body);
+      } else if (action === "participation" && request.method === "PUT") result = plans.participate(code, leader, user.handle, body);
+      else if (action === "depart" && request.method === "POST") {
+        if (rawLeader !== "self") throw new RouteError("PLAN_NOT_OWNER");
+        result = plans.depart(code, user.handle, body);
+      } else if (action === "pass-evidence" && request.method === "POST") result = plans.pass(code, leader, user.handle, body);
+      else if (action === "guidance-status" && request.method === "PUT") result = plans.guidanceStatus(code, leader, user.handle, body);
+      else throw new RouteError("INVALID_REQUEST");
+      authorize(); json(response, 200, result);
+    } catch (error) {
+      let failure = error instanceof RouteError ? error : error instanceof HttpError
+        ? new RouteError(error.status === 413 ? "REQUEST_TOO_LARGE" : error.status === 401 ? "UNAUTHENTICATED" : "INVALID_REQUEST")
+        : new RouteError("INVALID_REQUEST");
+      try {
+        verifyContext?.();
+        if (error && typeof error === "object") { recommendations.assertFailureCurrent(error); geocoding.assertFailureCurrent(error); }
+      } catch (changed) { failure = changed instanceof RouteError ? changed : new RouteError("INVALID_REQUEST"); }
+      if (!response.destroyed) json(response, failure.status, failure.body());
+    } finally { request.off("aborted", cancel); response.off("close", cancel); }
+  }
+
   async function route(request: IncomingMessage, response: ServerResponse, path: string): Promise<void> {
     const method = request.method;
 
+    const geocodingMatch = /^\/v1\/rooms\/([^/]+)\/geocoding$/.exec(path);
+    if (geocodingMatch && method === "POST") { await followPlan(request, response, geocodingMatch[1], "self", "geocoding"); return; }
+    const planMatch = /^\/v1\/rooms\/([^/]+)\/follow-plans\/([^/]+)(?:\/(participants|participation|recommend|depart|pass-evidence|guidance-status))?$/.exec(path);
+    if (planMatch) { await followPlan(request, response, planMatch[1], planMatch[2], planMatch[3]); return; }
     const followRouteMatch = /^\/v1\/rooms\/([^/]+)\/follow-route$/.exec(path);
     if (method === "POST" && followRouteMatch) {
       await followRoute(request, response, followRouteMatch[1]);
@@ -459,7 +561,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
       const locationVersion = body.location === undefined ? undefined : consentVersion(body.location);
       authenticate(db, request);
       const consent = updateUserConsent(db, user.id, { privacyVersion, locationVersion });
-      if (!routeConsent(user.id)) routes.invalidateConsent(user.handle);
+      if (!routeConsent(user.id)) { routes.invalidateConsent(user.handle); plans.invalidateConsent(user.handle); recommendations.invalidateConsent(user.handle); geocoding.invalidateConsent(user.handle); }
       json(response, 200, { consent });
       return;
     }
@@ -741,7 +843,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         response.setHeader("cache-control", "no-store");
         expireLocations();
         json(response, 200, { ...locations.snapshot(code, user.handle), revision: locations.revision(code),
-          serverNowMs: locations.serverNowMs(), followRoute: routes.feature() });
+          serverNowMs: locations.serverNowMs(), followRoute: routes.feature(), ...planSnapshot(code, user.handle) });
         return;
       }
       if (method === "DELETE" && action === "location") {
@@ -771,7 +873,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
           pendingFollow: locations.pendingOf(code, user.handle),
           followRequestId: locations.relationOf(code, user.handle)?.requestId ?? null,
           followRequests: locations.requestsFor(code, user.handle),
-          serverNowMs: locations.serverNowMs(), followRoute: routes.feature(),
+          serverNowMs: locations.serverNowMs(), followRoute: routes.feature(), ...planSnapshot(code, user.handle),
         })) {
           unsubscribe();
         } else {
@@ -816,7 +918,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
     const log = () => {
       if (logged) return;
       logged = true;
-      if (/^\/v1\/rooms\/[^/]+\/follow-route$/.test(path)) {
+      if (/^\/v1\/rooms\/[^/]+\/(?:follow-route|follow-plans|geocoding)(?:\/|$)/.test(path)) {
         process.stdout.write(`follow-route status=${response.statusCode} durationMs=${Date.now() - started}\n`);
         return;
       }

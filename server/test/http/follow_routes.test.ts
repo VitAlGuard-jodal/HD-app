@@ -96,7 +96,7 @@ test("follow-route HTTP uses persisted consent and disabled routing leaves posit
   const consentPath = "/v1/me/consent";
   await f.api({ location: { version: "3" } }, { path: consentPath, method: "PUT", token: f.tokens.get("leader") });
   assert.equal((await f.api(f.request())).body.error.code, "CONSENT_REQUIRED_TARGET"); assert.equal(f.calls.length, 0);
-  await f.api({ location: { version: "5" } }, { path: consentPath, method: "PUT", token: f.tokens.get("leader") });
+  await f.api({ location: { version: "6" } }, { path: consentPath, method: "PUT", token: f.tokens.get("leader") });
   assert.equal((await f.api(f.request())).status, 200);
   f.setConfig({ provider: "disabled" });
   assert.equal((await f.api(f.request())).body.error.code, "ROUTING_DISABLED");

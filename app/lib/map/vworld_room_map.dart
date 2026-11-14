@@ -1,3 +1,4 @@
+import '../location/meeting_plan_controller.dart';
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -51,10 +52,14 @@ class VworldRoomMap extends StatefulWidget {
     this.fullscreen = false,
     this.api,
     this.guidance,
+    this.meetingPins = const [],
+    this.onPointSelected,
   });
   final RoomMapController controller;
   final ApiClient? api;
   final FollowRouteView? guidance;
+  final List<MeetingPin> meetingPins;
+  final ValueChanged<RoutePoint>? onPointSelected;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
   final String? targetHandle, selfHandle;
@@ -236,6 +241,11 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
                 interactionOptions: const InteractionOptions(
                   flags: InteractiveFlag.all,
                 ),
+                onLongPress: widget.onPointSelected == null
+                    ? null
+                    : (_, point) => widget.onPointSelected!(
+                        RoutePoint(point.latitude, point.longitude),
+                      ),
                 onMapReady: () {
                   _ready = true;
                   _queueFollow();
@@ -281,6 +291,16 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
                 ),
                 MarkerLayer(
                   markers: [
+                    for (final pin in widget.meetingPins)
+                      Marker(
+                        point: LatLng(pin.point.lat, pin.point.lng),
+                        width: 180,
+                        height: 42,
+                        child: Semantics(
+                          label: pin.label,
+                          child: RoomMapLabel(pin.label, maxLines: 2),
+                        ),
+                      ),
                     if (guidance?.anchor case final anchor?)
                       Marker(
                         key: const ValueKey('follow-anchor'),

@@ -46,7 +46,7 @@ export function routeFixture(t: TestContext, options: RouteServiceOptions = {}) 
   const tokens = new Map(users.map((user) => [user.handle, issueToken(db, user.id)]));
   const room = createRoom(db, { code: "ABC234", name: "경로", createdBy: users[0].id })!;
   for (const user of users.slice(1, 3)) joinRoom(db, room.id, user.id);
-  for (const user of users) updateUserConsent(db, user.id, { privacyVersion: "5", locationVersion: "5" });
+  for (const user of users) updateUserConsent(db, user.id, { privacyVersion: "6", locationVersion: "6" });
   for (const user of users.slice(0, 3)) {
     const hash = tokenHash(tokens.get(user.handle)!);
     hub.claim(room.code, user.handle, hash, hash);

@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'meeting_plan.dart';
 
 typedef JsonMap = Map<String, dynamic>;
 
@@ -296,17 +297,32 @@ class LocationSnapshot {
     this.trails, {
     this.serverNowMs,
     this.followRoute,
+    this.plans = const [],
+    this.acceptedPlanFollowers = const [],
+    this.meetingCapabilities = const MeetingCapabilities(),
   });
   factory LocationSnapshot.fromJson(JsonMap json) => LocationSnapshot(
     locationPointsFromJson(json['positions']),
     locationTrailsFromJson(json),
     serverNowMs: json['serverNowMs'] as num?,
     followRoute: FollowRouteFeature.fromJson(json['followRoute']),
+    plans: List.unmodifiable(
+      (json['followPlans'] as List? ?? []).map(MeetingPlanSnapshot.fromJson),
+    ),
+    acceptedPlanFollowers: List.unmodifiable(
+      (json['acceptedPlanFollowers'] as List? ?? []).map(
+        PlanParticipant.fromJson,
+      ),
+    ),
+    meetingCapabilities: MeetingCapabilities.fromJson(json),
   );
   final List<LocationFix> positions;
   final Map<String, List<LocationFix>> trails;
   final num? serverNowMs;
   final FollowRouteFeature? followRoute;
+  final List<MeetingPlanSnapshot> plans;
+  final List<PlanParticipant> acceptedPlanFollowers;
+  final MeetingCapabilities meetingCapabilities;
 }
 
 class FollowResult {
@@ -365,6 +381,9 @@ final class Hello extends RoomEvent {
     this.followRequestId,
     this.serverNowMs,
     this.followRoute,
+    this.plans = const [],
+    this.acceptedPlanFollowers = const [],
+    this.meetingCapabilities = const MeetingCapabilities(),
   ]);
   factory Hello.fromJson(JsonMap json) {
     final self = json['self'];
@@ -386,6 +405,9 @@ final class Hello extends RoomEvent {
       json['followRequestId'] as String?,
       snapshot.serverNowMs,
       snapshot.followRoute,
+      snapshot.plans,
+      snapshot.acceptedPlanFollowers,
+      snapshot.meetingCapabilities,
     );
   }
   final String self;
@@ -399,6 +421,35 @@ final class Hello extends RoomEvent {
   final String? pendingFollow, followRequestId;
   final num? serverNowMs;
   final FollowRouteFeature? followRoute;
+  final List<MeetingPlanSnapshot> plans;
+  final List<PlanParticipant> acceptedPlanFollowers;
+  final MeetingCapabilities meetingCapabilities;
+}
+
+final class FollowPlanParticipants extends RoomEvent {
+  const FollowPlanParticipants(this.participants);
+  final List<PlanParticipant> participants;
+}
+
+final class FollowPlanUpdated extends RoomEvent {
+  const FollowPlanUpdated(this.snapshot);
+  final MeetingPlanSnapshot snapshot;
+}
+
+final class FollowPlanProgress extends RoomEvent {
+  const FollowPlanProgress(this.runtime);
+  final MeetingRuntime runtime;
+}
+
+final class FollowPlanCleared extends RoomEvent {
+  const FollowPlanCleared(
+    this.planId,
+    this.leaderHandle,
+    this.revision,
+    this.reason,
+  );
+  final String planId, leaderHandle, reason;
+  final int revision;
 }
 
 final class FollowRequest extends RoomEvent {

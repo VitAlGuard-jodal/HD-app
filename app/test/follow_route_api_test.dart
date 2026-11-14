@@ -8,6 +8,7 @@ import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:unavo/net/api_client.dart';
 import 'package:unavo/net/follow_route.dart';
+import 'package:unavo/net/meeting_plan.dart';
 import 'package:unavo/net/models.dart';
 
 import 'support/avatar_fakes.dart';
@@ -165,59 +166,91 @@ void main() {
       expect(error.toString(), isNot(contains('SECRET')));
     },
   );
-  for (final stage in ['open', 'headers', 'body']) {
-    for (final cancel in [false, true]) {
-      test(
-        '$stage ${cancel ? 'explicit cancellation' : 'eight-second timeout'} closes only route client',
-        () {
-          fakeAsync((clock) {
-            final clients = <_Client>[];
-            final api = ApiClient(
-              tokenStore: AvatarTestTokenStore(),
-              clientFactory: () {
-                final client = _Client(clients.isEmpty ? 'normal' : stage);
-                clients.add(client);
-                return client;
-              },
-            );
-            unawaited(api.me());
-            clock.flushMicrotasks();
-            final token = RouteCancellation();
-            Object? failure;
-            unawaited(
-              api
-                  .followRoute('ROOM', request, token)
-                  .then<void>(
-                    (_) => fail('must stop'),
-                    onError: (Object error) => failure = error,
+  for (final kind in ['schema1', 'schema2', 'geocoding', 'recommend']) {
+    for (final stage in ['open', 'headers', 'body']) {
+      for (final cancel in [false, true]) {
+        test(
+          '$kind/$stage ${cancel ? 'explicit cancellation' : 'bounded timeout'} closes only its client',
+          () {
+            fakeAsync((clock) {
+              final clients = <_Client>[];
+              final api = ApiClient(
+                tokenStore: AvatarTestTokenStore(),
+                clientFactory: () {
+                  final client = _Client(clients.isEmpty ? 'normal' : stage);
+                  clients.add(client);
+                  return client;
+                },
+              );
+              unawaited(api.me());
+              clock.flushMicrotasks();
+              final token = RouteCancellation();
+              Object? failure;
+              final timeoutMs = kind == 'recommend' ? 18000 : 8000;
+              final Future<Object> pending = switch (kind) {
+                'schema1' => api.followRoute('ROOM', request, token),
+                'schema2' => api.planRoute(
+                  'ROOM',
+                  const PlanRouteRequest(
+                    planId: 'plan-1',
+                    planRevision: 1,
+                    followRequestId: null,
+                    guidanceGeneration: 1,
+                    calculationId: 'calc-1',
+                    requestId: 'req-1',
+                    routeKind: PlanRouteKind.planJoin,
+                    originRef: SampleRef('0123456789abcdef', 1),
                   ),
-            );
-            clock.flushMicrotasks();
-            if (cancel) {
-              token.cancel();
+                  token,
+                ),
+                _ => api.meetingRequest(
+                  'ROOM',
+                  'POST',
+                  kind == 'recommend'
+                      ? '/follow-plans/self/recommend'
+                      : '/geocoding',
+                  {'requestId': 'req-1'},
+                  token,
+                  timeout: Duration(milliseconds: timeoutMs),
+                ),
+              };
+              unawaited(
+                pending.then<void>(
+                  (_) => fail('must stop'),
+                  onError: (Object error) => failure = error,
+                ),
+              );
               clock.flushMicrotasks();
-            } else {
-              clock.elapse(const Duration(milliseconds: 7999));
-              expect(failure, isNull);
-              clock.elapse(const Duration(milliseconds: 1));
-            }
-            expect(
-              (failure! as FollowRouteException).code,
-              cancel ? 'CANCELLED' : 'ROUTE_TIMEOUT',
-            );
-            expect(clients[0].closed, isFalse);
-            expect(clients[1].closed, isTrue);
-            if (stage == 'open') {
-              clients[1].openGate.complete(clients[1].request);
+              if (cancel) {
+                token.cancel();
+                clock.flushMicrotasks();
+              } else {
+                clock.elapse(Duration(milliseconds: timeoutMs - 1));
+                expect(failure, isNull);
+                clock.elapse(const Duration(milliseconds: 1));
+              }
+              expect(
+                (failure! as FollowRouteException).code,
+                cancel
+                    ? 'CANCELLED'
+                    : kind == 'geocoding'
+                    ? 'SEARCH_TIMEOUT'
+                    : 'ROUTE_TIMEOUT',
+              );
+              expect(clients[0].closed, isFalse);
+              expect(clients[1].closed, isTrue);
+              if (stage == 'open') {
+                clients[1].openGate.complete(clients[1].request);
+                clock.flushMicrotasks();
+                expect(clients[1].request.aborted, isTrue);
+              }
+              api.close();
               clock.flushMicrotasks();
-              expect(clients[1].request.aborted, isTrue);
-            }
-            api.close();
-            clock.flushMicrotasks();
-            expect(clock.pendingTimers, isEmpty);
-          });
-        },
-      );
+              expect(clock.pendingTimers, isEmpty);
+            });
+          },
+        );
+      }
     }
   }
 }

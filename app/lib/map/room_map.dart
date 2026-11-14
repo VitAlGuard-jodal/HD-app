@@ -1,3 +1,4 @@
+import '../location/meeting_plan_controller.dart';
 import 'package:flutter/material.dart';
 
 import '../net/models.dart';
@@ -50,14 +51,23 @@ class RoomMap extends StatefulWidget {
     this.onStopSharing,
     this.api,
     this.guidance,
+    this.meetingPins = const [],
+    this.onPointSelected,
     this.onModeChanged,
     this.onResetGuidance,
+    this.onMeetingPlan,
+    this.meetingAvailable = false,
+    this.meetingPanel,
   });
   final RoomMapController controller;
   final ApiClient? api;
   final FollowRouteView? guidance;
+  final List<MeetingPin> meetingPins;
+  final ValueChanged<RoutePoint>? onPointSelected;
   final ValueChanged<FollowMode>? onModeChanged;
-  final VoidCallback? onResetGuidance;
+  final VoidCallback? onResetGuidance, onMeetingPlan;
+  final bool meetingAvailable;
+  final Widget? meetingPanel;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
   final String? targetHandle, selfHandle;
@@ -85,6 +95,8 @@ class _RoomMapState extends State<RoomMap> {
         MapProvider.naver => NaverRoomMap(
           api: widget.api,
           guidance: widget.guidance,
+          meetingPins: widget.meetingPins,
+          onPointSelected: widget.onPointSelected,
           controller: widget.controller as NaverRoomMapController,
           positions: widget.positions,
           trail: widget.trail,
@@ -100,6 +112,8 @@ class _RoomMapState extends State<RoomMap> {
         MapProvider.vworld => VworldRoomMap(
           api: widget.api,
           guidance: widget.guidance,
+          meetingPins: widget.meetingPins,
+          onPointSelected: widget.onPointSelected,
           controller: widget.controller,
           positions: widget.positions,
           trail: widget.trail,
@@ -115,6 +129,8 @@ class _RoomMapState extends State<RoomMap> {
       },
       RoomMapControls(
         mode: widget.guidance?.mode,
+        onMeetingPlan: widget.onMeetingPlan,
+        meetingAvailable: widget.meetingAvailable,
         guidanceLabel: switch (widget.guidance) {
           final guidance? =>
             '${guidance.mode == FollowMode.a ? '따라가기' : '합류 지점 따라가기'} · ${guidance.status}\n'
@@ -136,6 +152,14 @@ class _RoomMapState extends State<RoomMap> {
         onStopSharing: widget.onStopSharing,
         onFullscreen: widget.onFullscreen,
       ),
+      if (widget.meetingPanel != null)
+        Positioned(
+          left: 8,
+          top: widget.fullscreen ? (widget.car ? 150 : 110) : 8,
+          bottom: widget.fullscreen ? 160 : 40,
+          width: MediaQuery.sizeOf(context).width < 600 ? 240 : 340,
+          child: widget.meetingPanel!,
+        ),
     ],
   );
 }

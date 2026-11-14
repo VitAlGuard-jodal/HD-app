@@ -499,11 +499,11 @@ test("S6 failed consent storage cannot authorize routing; successful record perm
   const f = httpFixture(t);
   updateUserConsent(f.db, f.users[1].id, { locationVersion: "3" });
   f.db.exec("CREATE TRIGGER fail_consent BEFORE UPDATE OF location_version ON users BEGIN SELECT RAISE(FAIL, 'synthetic storage failure'); END");
-  const failure = await f.post({ location: { version: "5" } }, "follower", { method: "PUT", path: "/v1/me/consent" }).done;
+  const failure = await f.post({ location: { version: "6" } }, "follower", { method: "PUT", path: "/v1/me/consent" }).done;
   assert.equal(failure.statusCode, 500);
   assert.equal((await f.post().done).json().error.code, "CONSENT_REQUIRED_SELF"); assert.equal(f.calls.length, 0);
   f.db.exec("DROP TRIGGER fail_consent");
-  assert.equal((await f.post({ location: { version: "5" } }, "follower", { method: "PUT", path: "/v1/me/consent" }).done).statusCode, 200);
+  assert.equal((await f.post({ location: { version: "6" } }, "follower", { method: "PUT", path: "/v1/me/consent" }).done).statusCode, 200);
   assert.equal((await f.post().done).statusCode, 200); assert.equal(f.calls.length, 1);
 });
 
