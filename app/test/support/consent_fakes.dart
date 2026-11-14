@@ -73,6 +73,7 @@ class ConsentTestServices implements AppServices {
     Stream<Object?>? drivingEvents,
     Stream<Object?>? vehicleEvents,
     DateTime Function()? locationNow,
+    int Function()? monotonicNow,
   }) {
     _api = ConsentTestApi(store);
     mic = _Mic(store);
@@ -89,6 +90,7 @@ class ConsentTestServices implements AppServices {
       micRouter: mic,
       locationSource: locationSource,
       locationNow: locationNow,
+      monotonicNow: monotonicNow,
       deviceMode: mode,
       driving: driving,
       vehicle: VehicleState(
@@ -107,6 +109,7 @@ class ConsentTestServices implements AppServices {
     Stream<Object?>? drivingEvents,
     Stream<Object?>? vehicleEvents,
     String handle = 'bob',
+    int Function()? monotonicNow,
   }) async {
     SharedPreferences.setMockInitialValues({
       if (signedIn) ...{'token': 'test', 'handle': handle},
@@ -126,6 +129,7 @@ class ConsentTestServices implements AppServices {
       drivingEvents: drivingEvents,
       vehicleEvents: vehicleEvents,
       locationNow: tester.binding.clock.now,
+      monotonicNow: monotonicNow,
     );
     if (serverVersion != null) {
       services.api.consent = testConsent(version: serverVersion);

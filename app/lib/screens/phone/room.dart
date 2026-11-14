@@ -115,7 +115,7 @@ class _RoomScreenState extends State<RoomScreen> {
             ? [
                 member.displayName,
                 '${member.displayName} 님의 따라가기를 중지합니다',
-                '지도는 닫히고 내 위치 공유는 계속됩니다',
+                '따라가기 안내는 종료되고 내 위치 공유는 계속됩니다',
               ]
             : [
                 member.displayName,
@@ -326,7 +326,15 @@ class _RoomScreenState extends State<RoomScreen> {
         builder: (context, _) {
           final session = widget.services.rooms;
           final state = session.state;
-          if (session.followTarget == null) fullscreenMap = false;
+          // A leader enters the same map when a direct follower is accepted.
+          // A saved own plan keeps it available after the last follower leaves.
+          final showingMap =
+              session.followTarget != null ||
+              session.locationShare.sharing &&
+                  session.meetingPlan.capabilities.enabled &&
+                  (session.meetingPlan.participants.isNotEmpty ||
+                      session.meetingPlan.ownPlan != null);
+          if (!showingMap) fullscreenMap = false;
           _scheduleFollowDialogs(context);
           if (state.code == null && !widget.embedded && !_popped) {
             WidgetsBinding.instance.addPostFrameCallback((_) => _closeIfLeft());
@@ -540,6 +548,10 @@ class _RoomScreenState extends State<RoomScreen> {
           final membersByHandle = {
             for (final member in state.members) member.handle: member,
           };
+          final ownGuidance =
+              session.meetingPlan.selected && session.meetingPlan.owner;
+          final mapTarget = ownGuidance ? null : session.followTarget;
+          final guidance = session.activeGuidance;
           final map = RoomMap(
             api: widget.services.api,
             key: _mapKey,
@@ -561,8 +573,8 @@ class _RoomScreenState extends State<RoomScreen> {
                 ),
               ),
             ),
-            trail: session.trailOf(session.followTarget),
-            guidance: session.activeGuidance,
+            trail: session.trailOf(mapTarget),
+            guidance: guidance,
             meetingPins: session.meetingPlan.pins,
             onPointSelected:
                 session.meetingPlan.editing && session.canEditMeetingPlan
@@ -583,25 +595,24 @@ class _RoomScreenState extends State<RoomScreen> {
                   )
                 : null,
             onModeChanged:
-                _busy || !session.canEditMeetingPlan || state.isLeaving
+                _busy ||
+                    session.followTarget == null ||
+                    !session.canEditMeetingPlan ||
+                    state.isLeaving
                 ? null
                 : (mode) => unawaited(session.changeFollowMode(mode)),
             onResetGuidance:
                 _busy ||
+                    guidance == null ||
                     (session.meetingPlan.selected
                         ? !session.canEditMeetingPlan
                         : session.followNeedsStop) ||
                     state.isLeaving
                 ? null
                 : session.resetActiveGuidance,
-            targetHandle:
-                session.meetingPlan.selected && session.meetingPlan.owner
-                ? null
-                : session.followTarget,
+            targetHandle: mapTarget,
             selfHandle: widget.services.store.handle,
-            following:
-                session.followTarget != null &&
-                !(session.meetingPlan.selected && session.meetingPlan.owner),
+            following: mapTarget != null,
             brightness: MediaQuery.platformBrightnessOf(context),
             car: car,
             fullscreen: fullscreenMap,
@@ -969,7 +980,6 @@ class _RoomScreenState extends State<RoomScreen> {
           );
           final content = LayoutBuilder(
             builder: (context, constraints) {
-              final showingMap = session.followTarget != null;
               final sideBySide =
                   car || constraints.maxWidth > constraints.maxHeight;
               if (!showingMap)
