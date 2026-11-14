@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../audio/mic_router.dart';
 import '../auth/session_store.dart';
+import '../auth/legal_consent_store.dart';
 import '../call/call_service.dart';
 import '../call/call_state.dart';
 import '../call/media_engine.dart';
@@ -15,6 +16,8 @@ import '../core/vehicle_state.dart';
 import '../location/location_share.dart';
 import '../location/location_source.dart';
 import '../location/follow_voice_guidance.dart';
+import '../location/follow_route_controller.dart';
+import '../location/follow_route_geometry.dart';
 import '../net/api_client.dart';
 import '../net/models.dart';
 
@@ -99,6 +102,37 @@ class RoomSession extends ChangeNotifier {
           now: locationNow,
           output: speech.scope(),
         );
+    _routeVoice = FollowVoiceGuidance(
+      enabled: () => _carMode,
+      now: locationNow,
+      output: speech.scope(),
+    );
+    followRoute = FollowRouteController(
+      load: api.followRoute,
+      canChange: () => !followNeedsStop && !state.isLeaving && !_deviceReplaced,
+      onJoined: (relationship, round) {
+        final code = state.code;
+        if (code != null)
+          _routeVoice.announceOnce(
+            room: code,
+            key: '$relationship:$round',
+            text: '앞차가 지나간 경로를 따라갑니다',
+          );
+      },
+      onInvalidated: _routeVoice.clear,
+      onAuthorizationError: (code) {
+        if (code == 'NOT_ACTIVE_SENDER') unawaited(_handleDeviceReplaced());
+        if (code == 'FOLLOW_NOT_ACTIVE')
+          unawaited(_reconcileRouteRelationship());
+        if (code == 'NOT_ROOM_MEMBER')
+          unawaited(
+            _forgetInaccessibleRoom(
+              const ApiException(403, 'NOT_ROOM_MEMBER', '방 참여 권한이 없습니다'),
+            ),
+          );
+      },
+    );
+    followRoute.addListener(_routeChanged);
     locationShare = LocationShare(
       api: api,
       source: locationSource,
@@ -167,6 +201,15 @@ class RoomSession extends ChangeNotifier {
   late final FollowVoiceGuidance _vehicleVoice;
   late final LocationShare locationShare;
   late final FollowVoiceGuidance _followVoice;
+  late final FollowVoiceGuidance _routeVoice;
+  late final FollowRouteController followRoute;
+  final _routeClock = Stopwatch()..start();
+  late final _remoteRouteClock = FollowLocationClock(
+    () => _routeClock.elapsedMilliseconds,
+  );
+  Timer? _routeTimer;
+  bool _updatingRoute = false, _routeRestored = false;
+  FollowRouteFeature? _routeFeature;
   late final StreamSubscription<Map<String, MeshPeerState>> _peerSubscription;
   Map<String, MeshPeerState> get peerStates => mediaEngine.peerStates;
   RoomState _state = const RoomState();
@@ -846,6 +889,8 @@ class RoomSession extends ChangeNotifier {
         _notify();
         return;
       case LocationUpdated():
+        if (event.fix.handle == followTarget)
+          _remoteRouteClock.observe(event.fix, event.serverNowMs);
         if (event.revision > _serverRevision) _serverRevision = event.revision;
         if (_updateLocation(event.fix)) _notify();
         return;
@@ -1074,6 +1119,7 @@ class RoomSession extends ChangeNotifier {
   void _setLeader(String? handle) => _leaderHandle = handle;
 
   void _profileChanged() {
+    _updateFollowRoute();
     final index = state.members.indexWhere(
       (member) => member.handle == store.handle,
     );
@@ -1107,6 +1153,7 @@ class RoomSession extends ChangeNotifier {
   void _setLocationSnapshot(Hello event) {
     _setLeader(event.leader ?? state.room?.leader);
     if (event.revision < _serverRevision) return;
+    _routeFeature = event.followRoute;
     _serverRevision = event.revision;
     final positions = <String, LocationFix>{};
     for (final fix in event.positions) {
@@ -1123,6 +1170,10 @@ class RoomSession extends ChangeNotifier {
     for (final fix in positions.values) {
       _putPosition(fix);
     }
+    final routeTarget = event.followTarget ?? followTarget;
+    final routeFix = positions[routeTarget];
+    if (routeFix != null)
+      _remoteRouteClock.observe(routeFix, event.serverNowMs);
     // HTTP 완료 기록은 내 follow 필드만 보호하며 SSE 순번을 올리지 않는다.
     if (_helloFollowIsCurrent(event)) {
       if (_followPostInFlight || _followStops.isNotEmpty) {
@@ -1178,6 +1229,10 @@ class RoomSession extends ChangeNotifier {
 
   void _setHelloFollow(Hello event, {Map<String, List<LocationFix>>? trails}) {
     final previousIntent = followIntent;
+    if (event.followTarget != null &&
+        event.followRequestId != _followRequestId &&
+        followRoute.state == null)
+      _routeRestored = true;
     _followTarget = locationShare.sharing ? event.followTarget : null;
     _pendingFollow = locationShare.sharing ? event.pendingFollow : null;
     _followRequestId = locationShare.sharing ? event.followRequestId : null;
@@ -1423,6 +1478,8 @@ class RoomSession extends ChangeNotifier {
         !locationShare.sharing)
       return;
     _followVoice.clear();
+    _routeRestored = false;
+    _remoteRouteClock.clear();
     // 다른 pending 대상에서 전환할 때 이미 켜진 공유는 이번 동의로 이어 쓴다.
     for (final entry in _locationStarts.entries.toList()) {
       if (!entry.value.incoming && entry.value.target != target)
@@ -1631,6 +1688,12 @@ class RoomSession extends ChangeNotifier {
   }
 
   void _clearLocations() {
+    followRoute.clear();
+    _routeTimer?.cancel();
+    _routeTimer = null;
+    _remoteRouteClock.clear();
+    _routeRestored = false;
+    _routeFeature = null;
     _followVoice.clear();
     _followStops.clear();
     _serverRevision = 0;
@@ -2092,9 +2155,75 @@ class RoomSession extends ChangeNotifier {
     }
   }
 
+  void _routeChanged() {
+    if (!_disposed && !_updatingRoute) notifyListeners();
+  }
+
+  Future<void> _reconcileRouteRelationship() async {
+    // A new authenticated hello is the authoritative relationship snapshot.
+    final code = state.code;
+    if (code != null && !_disposed && !state.isLeaving)
+      await open(code, force: true);
+  }
+
+  void _updateFollowRoute() {
+    if (_disposed || _updatingRoute) return;
+    _updatingRoute = true;
+    try {
+      final code = state.code,
+          account = store.handle,
+          target = followTarget,
+          relationship = followRequestId;
+      if (code == null ||
+          account == null ||
+          target == null ||
+          relationship == null ||
+          !locationShare.sharing ||
+          state.isLeaving ||
+          _deviceReplaced ||
+          _exitStopsLocation) {
+        followRoute.update(null);
+        _routeTimer?.cancel();
+        _routeTimer = null;
+        return;
+      }
+      final leader = positions[target];
+      followRoute.update(
+        FollowRouteInput(
+          room: code,
+          account: account,
+          device: '${store.sessionRevision}:${api.deviceId}',
+          relationship: relationship,
+          target: target,
+          self: locationShare.lastSent,
+          origin: locationShare.lastSent,
+          leader: leader,
+          selfAgeMs: locationShare.lastSentAgeMs,
+          originAgeMs: locationShare.lastSentAgeMs,
+          leaderAgeMs: _remoteRouteClock.age(leader),
+          trace: trailOf(target),
+          consent:
+              hasPrivacyConsent(store.consent) &&
+              hasLocationConsent(store.consent),
+          connected: state.isConnected,
+          restored: _routeRestored,
+          serverNowMs: _remoteRouteClock.serverNowMs,
+          routingEnabled: _routeFeature?.enabled == true,
+        ),
+      );
+      _routeTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+        _updateFollowRoute();
+        if (!_disposed) notifyListeners();
+      });
+    } finally {
+      _updatingRoute = false;
+    }
+  }
+
   void _notify() {
     if (!_disposed) {
       _updateFollowVoice();
+      _updateFollowRoute();
       notifyListeners();
     }
   }
@@ -2103,6 +2232,9 @@ class RoomSession extends ChangeNotifier {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _routeTimer?.cancel();
+    followRoute.removeListener(_routeChanged);
+    followRoute.dispose();
     _clearTransientVehicleNotice();
     vehicle.removeListener(_vehicleChanged);
     vehicle.dispose();
@@ -2133,6 +2265,7 @@ class RoomSession extends ChangeNotifier {
     unawaited(_peerSubscription.cancel());
     _shutdown = Future.wait<void>([
       _followVoice.dispose(),
+      _routeVoice.dispose(),
       _vehicleVoice.dispose(),
       _readyQueue,
       stoppingLocation,

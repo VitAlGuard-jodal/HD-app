@@ -6,6 +6,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../net/models.dart';
+import '../location/follow_route_controller.dart';
 import '../net/api_client.dart';
 import '../ui/member_colors.dart';
 import '../ui/theme.dart';
@@ -49,9 +50,11 @@ class VworldRoomMap extends StatefulWidget {
     this.car = false,
     this.fullscreen = false,
     this.api,
+    this.guidance,
   });
   final RoomMapController controller;
   final ApiClient? api;
+  final FollowRouteView? guidance;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
   final String? targetHandle, selfHandle;
@@ -74,6 +77,8 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
   bool? _headingAligned;
   List<LocationFix>? _trailSource;
   List<LatLng> _trailPoints = const [];
+  List<List<RoutePoint>>? _guidanceTrace;
+  List<List<LatLng>> _guidancePoints = const [];
   MapTiles get _tiles => widget.tiles ?? mapTiles;
   LocationFix? get _self => widget.positions[widget.selfHandle]?.fix;
   LocationFix? get _target => widget.positions[widget.targetHandle]?.fix;
@@ -185,10 +190,21 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
 
   @override
   Widget build(BuildContext context) {
+    final guidance = widget.guidance;
     if (!identical(_trailSource, widget.trail)) {
       _trailSource = widget.trail;
       _trailPoints = widget.trail.map(_point).toList(growable: false);
     }
+    if (!identical(_guidanceTrace, guidance?.trace)) {
+      _guidanceTrace = guidance?.trace;
+      _guidancePoints =
+          guidance?.trace
+              .map((trace) => trace.map((p) => LatLng(p.lat, p.lng)).toList())
+              .toList() ??
+          const [];
+    }
+    final traces = guidance == null ? [_trailPoints] : _guidancePoints;
+    final alpha = guidance?.subdued == true ? .35 : 1.0;
     final initial =
         _self ?? _target ?? widget.positions.values.firstOrNull?.fix;
     return ClipRect(
@@ -233,18 +249,42 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
                   _RoomTiles(tiles: _tiles, brightness: widget.brightness),
                 PolylineLayer(
                   polylines: [
-                    if (widget.trail.length >= 2)
+                    if (guidance != null && guidance.connector.length >= 2)
                       Polyline(
-                        points: _trailPoints,
-                        color: UnavoColors.gold,
+                        points: guidance.connector
+                            .map((p) => LatLng(p.lat, p.lng))
+                            .toList(),
+                        color: const Color(0xff1a9eb5).withValues(alpha: alpha),
+                        borderColor: Colors.white.withValues(alpha: alpha),
+                        borderStrokeWidth: 2,
                         strokeWidth: 6,
                         strokeCap: StrokeCap.round,
                         strokeJoin: StrokeJoin.round,
                       ),
+                    for (final trace in traces)
+                      if (trace.length >= 2)
+                        Polyline(
+                          points: trace,
+                          color: UnavoColors.gold.withValues(alpha: alpha),
+                          strokeWidth: 6,
+                          borderColor: UnavoColors.ink.withValues(alpha: alpha),
+                          borderStrokeWidth: 1,
+                          strokeCap: StrokeCap.round,
+                          strokeJoin: StrokeJoin.round,
+                        ),
                   ],
                 ),
                 MarkerLayer(
                   markers: [
+                    if (guidance?.anchor case final anchor?)
+                      Marker(
+                        key: const ValueKey('follow-anchor'),
+                        point: LatLng(anchor.lat, anchor.lng),
+                        width: 110,
+                        height: 28,
+                        rotate: true,
+                        child: RoomMapLabel(guidance!.anchorLabel, maxLines: 1),
+                      ),
                     for (final entry in [
                       ...widget.positions.entries.where(
                         (entry) => entry.key != widget.selfHandle,

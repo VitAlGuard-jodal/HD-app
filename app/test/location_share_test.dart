@@ -13,6 +13,26 @@ const _timeout = Timeout(Duration(seconds: 30));
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('receivedAt 0 자기 위치는 수집 단조 시계로 늙고 같은 측정 시각은 신선도를 복구하지 않는다', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.start();
+      f.add();
+      expect(f.share.lastSent!.receivedAt, 0);
+      expect(f.share.lastSentAgeMs, 0);
+      final measured = f.now();
+      clock.elapse(const Duration(seconds: 11));
+      expect(f.share.lastSentAgeMs, 11000);
+      f.source.add(LocationSample(lat: 37, lng: 127, speed: 2, at: measured));
+      clock.flushMicrotasks();
+      expect(f.share.lastSentAgeMs, 11000);
+      clock.elapse(const Duration(seconds: 1));
+      f.add();
+      expect(f.share.lastSentAgeMs, 0);
+      f.dispose();
+    });
+  });
+
   test('1초 이내 표본은 최신 것 하나만 보류하고 시한에 전송한다', () {
     fakeAsync((clock) {
       final f = _Fixture.create(clock);
@@ -464,6 +484,7 @@ class _Fixture {
       roomCode: () => code,
       selfHandle: () => 'alice',
       now: now,
+      monotonicNow: () => clock.elapsed.inMilliseconds,
     );
   }
   static _Fixture create(FakeAsync clock, {bool available = true}) =>

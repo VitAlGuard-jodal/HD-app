@@ -25,7 +25,9 @@ class LocationShare extends ChangeNotifier {
     required this.selfHandle,
     this.canStart,
     DateTime Function()? now,
+    int Function()? monotonicNow,
   }) : now = now ?? DateTime.now {
+    _sampleNow = monotonicNow ?? () => _sampleClock.elapsedMilliseconds;
     _lastState = _stateValues();
     _observedRoom = roomCode();
     _observedHandle = selfHandle();
@@ -47,6 +49,14 @@ class LocationShare extends ChangeNotifier {
   bool get deletionPending => _deletion != null;
   String? get deletionStatus => deletionPending ? '위치 삭제 대기 중' : null;
   LocationFix? get lastSent => _lastSent;
+  final _sampleClock = Stopwatch()..start();
+  late final int Function() _sampleNow;
+  int? _pendingCollected, _sentCollected;
+  num? _lastMeasuredAt;
+  int? _measurementCollected;
+  double get lastSentAgeMs => _sentCollected == null
+      ? double.infinity
+      : (_sampleNow() - _sentCollected!).toDouble();
   LocationMotionState get motionState => _motionState;
   bool get isStationary => motionState == LocationMotionState.stationary;
 
@@ -175,6 +185,15 @@ class LocationShare extends ChangeNotifier {
           _recordSample(sample);
           if (!_current(generation, code)) return;
           _pending = sample;
+          // Duplicate measurements, even with a new transmission seq, do not
+          // restart age. Include sensor delivery delay before the local clock.
+          final at = sample.at.millisecondsSinceEpoch;
+          if (_lastMeasuredAt == null || at > _lastMeasuredAt!) {
+            _lastMeasuredAt = at;
+            final delay = now().millisecondsSinceEpoch - at;
+            _measurementCollected = _sampleNow() - (delay < 0 ? 10001 : delay);
+          }
+          _pendingCollected = _measurementCollected;
           _scheduleSend(generation, code);
         },
         onError: (Object error) {
@@ -269,19 +288,27 @@ class LocationShare extends ChangeNotifier {
     );
     _lastAttemptAt = now();
     _lastAttempt = fix;
-    _sending = _send(code, fix, generation).whenComplete(() {
+    _sending = _send(code, fix, generation, _pendingCollected).whenComplete(() {
       _sending = null;
       _scheduleSend(generation, code);
     });
   }
 
-  Future<void> _send(String code, LocationFix fix, int generation) async {
+  Future<void> _send(
+    String code,
+    LocationFix fix,
+    int generation,
+    int? collected,
+  ) async {
     try {
       final dropped = await api.sendLocation(code, fix);
       if (!_current(generation, code)) return;
       _failures = 0;
       _error = null;
-      if (!dropped) _lastSent = fix;
+      if (!dropped) {
+        _lastSent = fix;
+        _sentCollected = collected;
+      }
       _notify();
     } catch (error) {
       if (!_current(generation, code)) return;
@@ -349,6 +376,8 @@ class LocationShare extends ChangeNotifier {
     _startValid = null;
     _error = null;
     _lastSent = null;
+    _sentCollected = _pendingCollected = _measurementCollected = null;
+    _lastMeasuredAt = null;
     _activeCode = null;
     _activeHandle = null;
     _sharing = false;

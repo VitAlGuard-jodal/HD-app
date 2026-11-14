@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 
 import '../net/models.dart';
+import '../location/follow_route_controller.dart';
 import '../net/api_client.dart';
 import '../ui/avatar_images.dart';
 import '../ui/member_colors.dart';
@@ -34,6 +35,26 @@ class NaverRoomMapController implements RoomMapController {
 }
 
 NLatLng _point(LocationFix fix) => NLatLng(fix.lat, fix.lng);
+
+/// The SDK boundary uses the same immutable route/trace data as VWorld.
+NPathOverlay roomNaverRoutePath({
+  required String id,
+  required List<RoutePoint> points,
+  required bool connector,
+  required bool subdued,
+  required Brightness brightness,
+}) => NPathOverlay(
+  id: id,
+  coords: points.map((p) => NLatLng(p.lat, p.lng)).toList(),
+  width: 8,
+  color: (connector ? const Color(0xff1a9eb5) : UnavoColors.gold).withValues(
+    alpha: subdued ? .35 : 1,
+  ),
+  outlineWidth: 2,
+  outlineColor:
+      (brightness == Brightness.dark ? UnavoColors.text : UnavoColors.ink)
+          .withValues(alpha: subdued ? .35 : 1),
+);
 
 /// SDK 위젯을 만들지 않고도 마커 정책을 검사할 수 있는 생성 경계.
 NMarker roomNaverMarker({
@@ -173,9 +194,11 @@ class NaverRoomMap extends StatefulWidget {
     this.car = false,
     this.fullscreen = false,
     this.api,
+    this.guidance,
   });
   final NaverRoomMapController controller;
   final ApiClient? api;
+  final FollowRouteView? guidance;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
   final String? targetHandle, selfHandle;
@@ -202,8 +225,8 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   final _assetImages = <String, ui.Image>{};
   StreamSubscription<OnCameraChangedParams>? _cameraSubscription;
   double _cameraBearing = 0, _cameraTilt = 0;
-  NPathOverlay? _path;
-  List<LocationFix> _pathPoints = const [];
+  final _paths = <String, NPathOverlay>{};
+  NMarker? _anchorMarker;
   bool _syncing = false, _syncAgain = false, _loggedError = false;
   final _clock = Stopwatch()..start();
   Duration? _lastFollow;
@@ -261,6 +284,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
               old?.order != entry.value.order;
         });
     if (positionsChanged ||
+        oldWidget.guidance != widget.guidance ||
         trailChanged ||
         rolesChanged ||
         oldWidget.car != widget.car ||
@@ -311,8 +335,8 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       _cameraTilt = event.position.tilt;
       _updateDirectionAngles();
     });
-    _path = null;
-    _pathPoints = const [];
+    _paths.clear();
+    _anchorMarker = null;
     unawaited(_syncOverlays());
     if (_headingAligned == true &&
         !widget.following &&
@@ -564,37 +588,77 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     }
     _updateDirectionAngles();
 
-    final points = roomPathPoints(widget.trail);
-    if (points.isEmpty) {
-      if (_path != null) {
-        await camera.deleteOverlay(_path!.info);
+    final guidance = widget.guidance;
+    final traces =
+        guidance?.trace ??
+        [widget.trail.map((fix) => RoutePoint(fix.lat, fix.lng)).toList()];
+    final lines = <String, List<RoutePoint>>{
+      if (guidance != null && guidance.connector.length >= 2)
+        'connector': guidance.connector,
+      for (var i = 0; i < traces.length; i++)
+        if (traces[i].length >= 2) 'trace:$i': traces[i],
+    };
+    for (final id in _paths.keys.toList()) {
+      if (!lines.containsKey(id)) {
+        await camera.deleteOverlay(_paths.remove(id)!.info);
         if (!_isCurrent(camera)) return;
-        _path = null;
       }
-    } else {
-      final outline = widget.brightness == Brightness.dark
-          ? UnavoColors.text
-          : UnavoColors.ink;
-      if (_path == null) {
-        final path = NPathOverlay(
-          id: 'trail',
-          coords: points.map(_point).toList(),
-          width: 8,
-          color: UnavoColors.gold,
-          outlineWidth: 2,
-          outlineColor: outline,
+    }
+    final alpha = guidance?.subdued == true ? .35 : 1.0;
+    for (final entry in lines.entries) {
+      final color =
+          (entry.key == 'connector'
+                  ? const Color(0xff1a9eb5)
+                  : UnavoColors.gold)
+              .withValues(alpha: alpha);
+      final outline =
+          (widget.brightness == Brightness.dark
+                  ? UnavoColors.text
+                  : UnavoColors.ink)
+              .withValues(alpha: alpha);
+      final coords = entry.value.map((p) => NLatLng(p.lat, p.lng)).toList();
+      final existing = _paths[entry.key];
+      if (existing == null) {
+        final path = roomNaverRoutePath(
+          id: entry.key,
+          points: entry.value,
+          connector: entry.key == 'connector',
+          subdued: guidance?.subdued == true,
+          brightness: widget.brightness,
         );
         await camera.addOverlay(path);
         if (!_isCurrent(camera)) return;
-        _path = path;
+        _paths[entry.key] = path;
       } else {
-        if (!listEquals(_pathPoints, points)) {
-          _path!.setCoords(points.map(_point).toList());
-        }
-        if (_path!.outlineColor != outline) _path!.setOutlineColor(outline);
+        existing.setCoords(coords);
+        existing.setColor(color);
+        existing.setOutlineColor(outline);
       }
     }
-    _pathPoints = points;
+    final anchor = guidance?.anchor;
+    if (anchor == null) {
+      if (_anchorMarker != null) {
+        await camera.deleteOverlay(_anchorMarker!.info);
+        if (!_isCurrent(camera)) return;
+        _anchorMarker = null;
+      }
+    } else {
+      final position = NLatLng(anchor.lat, anchor.lng);
+      final caption = NOverlayCaption(text: guidance!.anchorLabel);
+      if (_anchorMarker == null) {
+        final marker = NMarker(
+          id: 'follow-anchor',
+          position: position,
+          caption: caption,
+        );
+        await camera.addOverlay(marker);
+        if (!_isCurrent(camera)) return;
+        _anchorMarker = marker;
+      } else {
+        _anchorMarker!.setPosition(position);
+        _anchorMarker!.setCaption(caption);
+      }
+    }
   }
 
   void _queueFollow() {

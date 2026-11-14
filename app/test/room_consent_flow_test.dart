@@ -26,6 +26,70 @@ import 'support/icon_bundle.dart';
 const _timeout = Timeout(Duration(seconds: 30));
 
 void main() {
+  for (final incoming in [false, true]) {
+    testWidgets(
+      'v4 ${incoming ? '앞차' : '뒷차'} 동의 저장 실패는 공유와 수락을 차단하고 재시도할 수 있다',
+      (tester) async {
+        final f = await _Fixture.create(
+          tester,
+          handle: incoming ? 'alice' : 'bob',
+        );
+        try {
+          f.services.api.http.status = 500;
+          if (incoming) {
+            f.services.api.events.add(
+              const FollowRequest(
+                'bob',
+                requestId: 'bob-request',
+                displayName: '보비',
+                revision: 2,
+              ),
+            );
+            await pumpConsentUi(tester);
+          } else {
+            await _member(tester, 'alice');
+          }
+          await _tap(tester, '동의');
+          expect(f.services.locationSource.requests, 0);
+          expect(f.services.api.follows, isEmpty);
+          expect(f.services.api.followResponses, isEmpty);
+          expect(f.services.rooms.state.code, 'ABC123');
+          f.services.api.http.status = 200;
+          if (incoming) {
+            // The pending request remains actionable after the failed save.
+            await pumpConsentUi(tester);
+          } else {
+            await _member(tester, 'alice');
+          }
+          await _tap(tester, '동의');
+          expect(hasLocationConsent(f.services.store.consent), isTrue);
+          expect(f.services.locationShare.sharing, isTrue);
+        } finally {
+          await f.dispose(tester);
+        }
+      },
+      timeout: _timeout,
+    );
+  }
+
+  testWidgets('v4 기록 응답 대기 중에는 위치·follow를 시작하지 않는다', (tester) async {
+    final f = await _Fixture.create(tester);
+    final gate = Completer<void>();
+    try {
+      f.services.api.consentGate = gate.future;
+      await _member(tester, 'alice');
+      await _tap(tester, '동의');
+      expect(f.services.locationSource.requests, 0);
+      expect(f.services.api.follows, isEmpty);
+      gate.complete();
+      await pumpConsentUi(tester);
+      expect(f.services.api.follows, ['alice']);
+      expect(hasLocationConsent(f.services.store.consent), isTrue);
+    } finally {
+      if (!gate.isCompleted) gate.complete();
+      await f.dispose(tester);
+    }
+  }, timeout: _timeout);
   for (final car in [false, true]) {
     testWidgets('상대 퇴장 뒤 종료 모달은 아이디 대신 마지막 표시 이름을 쓴다 (차량 $car)', (
       tester,
@@ -313,7 +377,7 @@ void main() {
       expect(consentRequests.single.method, 'PUT');
       expect(consentRequests.single.uri.path, '/v1/me/consent');
       expect(jsonDecode(utf8.decode(consentRequests.single.body)), {
-        'location': {'version': '3'},
+        'location': {'version': '4'},
       });
       expect(f.services.rooms.followTarget, 'alice');
       expect(find.byType(RoomMap), findsOneWidget);
@@ -415,7 +479,7 @@ void main() {
           expect(consentRequests.single.method, 'PUT');
           expect(consentRequests.single.uri.path, '/v1/me/consent');
           expect(jsonDecode(utf8.decode(consentRequests.single.body)), {
-            'location': {'version': '3'},
+            'location': {'version': '4'},
           });
         } else {
           expect(f.services.api.http.requests, isEmpty);
@@ -692,6 +756,7 @@ void main() {
   for (final (car, size) in [
     (false, const Size(412, 915)),
     (false, const Size(915, 412)),
+    (true, const Size(915, 412)),
     (true, const Size(1320, 940)),
     (true, const Size(1706, 1206)),
   ]) {
@@ -716,6 +781,10 @@ void main() {
             const [],
             const {},
             'alice',
+            const [],
+            0,
+            null,
+            'alice-request',
           ),
         );
         await pumpConsentUi(tester);
@@ -760,7 +829,8 @@ void main() {
           find.descendant(of: map, matching: find.byType(UnavoWatermark)),
           findsNothing,
         );
-        expect(find.byType(RoomMapButton), findsNWidgets(4));
+        expect(find.byType(RoomMapButton), findsNWidgets(7));
+        _expectMapControlsReachable(tester);
         expect(
           tester.getSize(find.byTooltip('방향 정렬')),
           Size.square(car ? 64 : 44),
@@ -780,9 +850,10 @@ void main() {
         expect(tester.state(find.byType(VworldRoomMap)), same(mapState));
         expect(panel, findsNothing);
         expect(find.byType(UnavoWatermark), findsNothing);
-        expect(find.byType(RoomMapButton), findsNWidgets(4));
+        expect(find.byType(RoomMapButton), findsNWidgets(7));
         expect(find.byTooltip('지도 축소'), findsOneWidget);
         expect(find.byKey(const ValueKey('room-controls')), findsOneWidget);
+        _expectMapControlsReachable(tester);
         final expanded = tester.getSize(map);
         expect(
           expanded.width,
@@ -881,6 +952,7 @@ void main() {
         tester.getRect(find.byKey(const ValueKey('room-controls'))).bottom,
         873,
       );
+      _expectMapControlsReachable(tester);
       expect(find.byType(MemberAvatar), findsNWidgets(6));
       expect(f.services.rooms.call.isActive, isTrue);
       f.services.media.localSpeaking?.call(true);
@@ -990,6 +1062,36 @@ void main() {
   }, timeout: _timeout);
 }
 
+void _expectMapControlsReachable(WidgetTester tester) {
+  final mapRect = tester.getRect(find.byType(RoomMap));
+  final dockRect = tester.getRect(find.byKey(const ValueKey('room-controls')));
+  final buttons = find.byType(RoomMapButton);
+  final previous = <Rect>[];
+  for (var i = 0; i < buttons.evaluate().length; i++) {
+    final button = buttons.at(i);
+    final widget = tester.widget<RoomMapButton>(button);
+    final rect = tester.getRect(button);
+    expect(rect.size, Size.square(widget.car ? 64 : 44));
+    expect(mapRect.contains(rect.topLeft), isTrue, reason: widget.label);
+    expect(mapRect.contains(rect.bottomRight), isTrue, reason: widget.label);
+    expect(rect.overlaps(dockRect), isFalse, reason: widget.label);
+    for (final other in previous) {
+      expect(rect.overlaps(other), isFalse, reason: widget.label);
+    }
+    expect(
+      find.byTooltip(widget.label).hitTestable(),
+      findsOneWidget,
+      reason: widget.label,
+    );
+    expect(
+      find.descendant(of: button, matching: find.byType(Text)),
+      findsNothing,
+      reason: widget.label,
+    );
+    previous.add(rect);
+  }
+}
+
 void _expectWatermarkBounds(WidgetTester tester) {
   const epsilon = .01;
   final panel = find.byKey(const ValueKey('room-call-panel'));
@@ -1082,6 +1184,11 @@ class _Fixture {
       mode: mode,
       handle: handle,
       drivingEvents: drivingEvents,
+    );
+    services.api.consent = ConsentRecord(privacy: testConsent().privacy);
+    services.store.updateConsent(
+      services.api.consent!,
+      sessionRevision: services.store.sessionRevision,
     );
     await services.openRoom(tester);
     final f = _Fixture(services);

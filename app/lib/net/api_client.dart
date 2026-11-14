@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import '../auth/session_store.dart';
 import '../core/server_address.dart';
 import 'models.dart';
+import 'follow_route.dart';
 import 'sse_parser.dart';
 
 class _AvatarPhotoEntry {
@@ -58,6 +59,84 @@ class ApiClient {
 
   // 서버 ping 15초 + 여유 5초
   static const sseSilenceTimeout = Duration(seconds: 20);
+
+  Future<FollowRouteResult> followRoute(
+    String code,
+    FollowRouteRequest body,
+    RouteCancellation cancellation,
+  ) async {
+    final client = _clientFactory()
+      ..connectionTimeout = const Duration(seconds: 8);
+    var finished = false;
+    final cancelled = cancellation.whenCancelled.then<FollowRouteResult>((_) {
+      if (!finished) client.close(force: true);
+      throw const FollowRouteException('CANCELLED');
+    });
+    Future<FollowRouteResult> read() async {
+      if (cancellation.isCancelled)
+        throw const FollowRouteException('CANCELLED');
+      final base = ServerAddress.normalize(
+        tokenStore.baseUrl,
+        allowPrivateCleartext: allowPrivateCleartext,
+      );
+      final request = await client.openUrl(
+        'POST',
+        Uri.parse('$base/v1/rooms/${_segment(code)}/follow-route'),
+      );
+      if (finished || cancellation.isCancelled) {
+        request.abort();
+        throw const FollowRouteException('CANCELLED');
+      }
+      request.followRedirects = false;
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set('x-unavo-device', deviceId);
+      final token = tokenStore.token;
+      if (token != null)
+        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      request.headers.set(
+        HttpHeaders.contentTypeHeader,
+        'application/json; charset=utf-8',
+      );
+      request.add(utf8.encode(jsonEncode(body.toJson())));
+      final response = await request.close();
+      final bytes = BytesBuilder(copy: false);
+      await for (final chunk in response) {
+        if (finished || cancellation.isCancelled)
+          throw const FollowRouteException('CANCELLED');
+        bytes.add(chunk);
+        if (bytes.length > 2 * 1024 * 1024)
+          throw const FollowRouteException('ROUTE_TOO_LARGE');
+      }
+      final json = jsonDecode(utf8.decode(bytes.takeBytes()));
+      if (json is! JsonMap) throw const FormatException();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw FollowRouteException.fromJson(json);
+      }
+      return FollowRouteResult.fromJson(json, body);
+    }
+
+    try {
+      return await Future.any([read(), cancelled]).timeout(
+        const Duration(seconds: 8),
+        onTimeout: () {
+          client.close(force: true);
+          throw const FollowRouteException('ROUTE_TIMEOUT', retryable: true);
+        },
+      );
+    } on FollowRouteException {
+      rethrow;
+    } on FormatException {
+      throw const FollowRouteException('INVALID_PROVIDER_RESPONSE');
+    } catch (_) {
+      // Never expose an HTTP exception's URL, coordinates or provider body.
+      if (cancellation.isCancelled)
+        throw const FollowRouteException('CANCELLED');
+      throw const FollowRouteException('PROVIDER_UNAVAILABLE', retryable: true);
+    } finally {
+      finished = true;
+      client.close(force: true);
+    }
+  }
 
   final _avatarPhotos = <(String, String?, String, int), _AvatarPhotoEntry>{};
 
@@ -615,6 +694,7 @@ class ApiClient {
             : LocationUpdated(
                 fix,
                 revision: (data['revision'] as num?)?.toInt() ?? 0,
+                serverNowMs: data['serverNowMs'] as num?,
               );
       case 'location-stopped':
         return LocationStopped(

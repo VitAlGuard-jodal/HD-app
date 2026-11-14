@@ -269,14 +269,35 @@ Map<String, List<LocationFix>> locationTrailsFromJson(JsonMap json) =>
       (handle, points) => MapEntry(handle, locationPointsFromJson(points)),
     );
 
+class FollowRouteFeature {
+  const FollowRouteFeature({required this.enabled});
+  factory FollowRouteFeature.fromJson(Object? value) => FollowRouteFeature(
+    enabled:
+        value is JsonMap &&
+        value['enabled'] == true &&
+        value['provider'] == 'naver' &&
+        value['routeOption'] == 'traoptimal',
+  );
+  final bool enabled;
+}
+
 class LocationSnapshot {
-  const LocationSnapshot(this.positions, this.trails);
+  const LocationSnapshot(
+    this.positions,
+    this.trails, {
+    this.serverNowMs,
+    this.followRoute,
+  });
   factory LocationSnapshot.fromJson(JsonMap json) => LocationSnapshot(
     locationPointsFromJson(json['positions']),
     locationTrailsFromJson(json),
+    serverNowMs: json['serverNowMs'] as num?,
+    followRoute: FollowRouteFeature.fromJson(json['followRoute']),
   );
   final List<LocationFix> positions;
   final Map<String, List<LocationFix>> trails;
+  final num? serverNowMs;
+  final FollowRouteFeature? followRoute;
 }
 
 class FollowResult {
@@ -333,6 +354,8 @@ final class Hello extends RoomEvent {
     this.revision = 0,
     this.pendingFollow,
     this.followRequestId,
+    this.serverNowMs,
+    this.followRoute,
   ]);
   factory Hello.fromJson(JsonMap json) {
     final self = json['self'];
@@ -352,6 +375,8 @@ final class Hello extends RoomEvent {
       (json['revision'] as num?)?.toInt() ?? 0,
       json['pendingFollow'] as String?,
       json['followRequestId'] as String?,
+      snapshot.serverNowMs,
+      snapshot.followRoute,
     );
   }
   final String self;
@@ -363,6 +388,8 @@ final class Hello extends RoomEvent {
   final List<FollowRequest> followRequests;
   final int revision;
   final String? pendingFollow, followRequestId;
+  final num? serverNowMs;
+  final FollowRouteFeature? followRoute;
 }
 
 final class FollowRequest extends RoomEvent {
@@ -418,8 +445,9 @@ final class TrailUpdated extends RoomEvent {
 }
 
 final class LocationUpdated extends RoomEvent {
-  const LocationUpdated(this.fix, {this.revision = 0});
+  const LocationUpdated(this.fix, {this.revision = 0, this.serverNowMs});
   final LocationFix fix;
+  final num? serverNowMs;
   final int revision;
 }
 

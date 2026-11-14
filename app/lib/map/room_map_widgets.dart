@@ -2,10 +2,12 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import '../location/follow_route_controller.dart';
 
 import '../ui/icons.dart';
 import '../net/api_client.dart';
 import '../net/models.dart';
+import '../ui/widgets/floating_bar.dart';
 import '../ui/widgets/member_avatar.dart';
 import '../ui/theme.dart';
 import 'room_map_geometry.dart';
@@ -208,67 +210,128 @@ class RoomMapControls extends StatelessWidget {
     this.onAlign,
     this.onStopSharing,
     this.onFullscreen,
+    this.mode,
+    this.onModeChanged,
+    this.onResetGuidance,
+    this.guidanceLabel,
   });
   final bool car, fullscreen, headingAligned;
+  final FollowMode? mode;
+  final ValueChanged<FollowMode>? onModeChanged;
+  final VoidCallback? onResetGuidance;
+  final String? guidanceLabel;
   final VoidCallback? onRecenter, onAlign, onStopSharing, onFullscreen;
   @override
-  Widget build(BuildContext context) => Stack(
-    children: [
-      Positioned(
-        top: 12,
-        right: 12,
-        bottom: 12,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              RoomMapButton(
-                icon: 'focus',
-                label: '내 위치로',
-                car: car,
-                onPressed: onRecenter,
-              ),
-              const SizedBox(height: 10),
-              RoomMapButton(
-                icon: 'compass',
-                label: '방향 정렬',
-                car: car,
-                selected: headingAligned,
-                onPressed: onAlign,
-              ),
-              const SizedBox(height: 10),
-              RoomMapButton(
-                icon: 'locationoff',
-                label: '위치 공유 중지',
-                car: car,
-                onPressed: onStopSharing,
-              ),
-              if (fullscreen) ...[
-                const SizedBox(height: 10),
-                RoomMapButton(
-                  icon: 'collapse',
-                  label: '지도 축소',
-                  car: car,
-                  onPressed: onFullscreen,
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-      if (!fullscreen)
-        Positioned(
-          left: 12,
-          bottom: 44,
-          child: RoomMapButton(
-            icon: 'expand',
-            label: '지도 전체 화면',
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      const gap = 10.0;
+      final diameter = car ? 64.0 : 44.0;
+      // 전체 화면의 발화 인디케이터 아래, 출처·통화 도크 위만 사용한다.
+      final top = fullscreen ? (car ? 80.0 : 64.0) : 12.0;
+      final bottom = fullscreen
+          ? math.max(car ? 152.0 : 120.0, FloatingBarInset.of(context) + 12)
+          : 36.0;
+      final buttons = <Widget>[
+        if (mode != null) ...[
+          RoomMapButton(
+            icon: 'navigation',
+            label: '따라가기',
             car: car,
-            translucent: true,
+            selected: mode == FollowMode.a,
+            onPressed: onModeChanged == null
+                ? null
+                : () => onModeChanged!(FollowMode.a),
+          ),
+          RoomMapButton(
+            icon: 'route',
+            label: '합류 후 따라가기',
+            car: car,
+            selected: mode == FollowMode.b,
+            onPressed: onModeChanged == null
+                ? null
+                : () => onModeChanged!(FollowMode.b),
+          ),
+          RoomMapButton(
+            icon: 'refresh',
+            label: '안내 다시 설정',
+            car: car,
+            onPressed: onResetGuidance,
+          ),
+        ],
+        RoomMapButton(
+          icon: 'focus',
+          label: '내 위치로',
+          car: car,
+          onPressed: onRecenter,
+        ),
+        RoomMapButton(
+          icon: 'compass',
+          label: '방향 정렬',
+          car: car,
+          selected: headingAligned,
+          onPressed: onAlign,
+        ),
+        RoomMapButton(
+          icon: 'locationoff',
+          label: '위치 공유 중지',
+          car: car,
+          onPressed: onStopSharing,
+        ),
+        if (fullscreen)
+          RoomMapButton(
+            icon: 'collapse',
+            label: '지도 축소',
+            car: car,
             onPressed: onFullscreen,
           ),
-        ),
-    ],
+      ];
+      // 버튼 크기를 유지하면서 짧은 창에서는 오른쪽부터 열을 늘린다.
+      final rows =
+          ((constraints.maxHeight - top - bottom + gap) / (diameter + gap))
+              .floor()
+              .clamp(1, buttons.length);
+      final columns = (buttons.length / rows).ceil();
+      final width = columns * diameter + (columns - 1) * gap;
+      return Stack(
+        children: [
+          Positioned(
+            top: top,
+            right: 12,
+            bottom: bottom,
+            width: width,
+            child: Wrap(
+              direction: Axis.vertical,
+              textDirection: TextDirection.rtl,
+              spacing: gap,
+              runSpacing: gap,
+              children: buttons,
+            ),
+          ),
+          if (!fullscreen)
+            Positioned(
+              left: 12,
+              bottom: 44,
+              child: RoomMapButton(
+                icon: 'expand',
+                label: '지도 전체 화면',
+                car: car,
+                translucent: true,
+                onPressed: onFullscreen,
+              ),
+            ),
+          if (guidanceLabel case final label?)
+            Positioned(
+              left: 8,
+              right: width + 28,
+              top: fullscreen ? (car ? 115 : 96) : 38,
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: RoomMapLabel(label, maxLines: 5),
+              ),
+            ),
+        ],
+      );
+    },
   );
 }
 
@@ -303,7 +366,12 @@ class RoomMapButton extends StatelessWidget {
             height: diameter,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: Colors.white.withValues(alpha: translucent ? .6 : 1),
+              color: selected
+                  ? UnavoColors.gold
+                  : Colors.white.withValues(alpha: translucent ? .6 : 1),
+              border: selected
+                  ? Border.all(color: UnavoColors.ink, width: 3)
+                  : null,
               boxShadow: const [
                 BoxShadow(
                   color: Colors.black26,

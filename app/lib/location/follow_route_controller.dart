@@ -1,0 +1,932 @@
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
+
+import '../net/follow_route.dart';
+import '../net/models.dart';
+import 'follow_route_geometry.dart';
+
+export '../net/follow_route.dart' show FollowMode, FollowPhase, RoutePoint;
+
+enum FollowRouteCondition {
+  waitingLocation,
+  waitingTrace,
+  atAnchorWaitingTrace,
+  calculating,
+  ready,
+  locationDelayed,
+  poorAccuracy,
+  offRoute,
+  traceBroken,
+  noRoute,
+  resetRequired,
+  consentRequired,
+  authorizationBlocked,
+  disabled,
+  retryWaiting,
+}
+
+class FollowRouteInput {
+  const FollowRouteInput({
+    required this.room,
+    required this.account,
+    required this.device,
+    required this.relationship,
+    required this.target,
+    required this.self,
+    required this.origin,
+    required this.leader,
+    required this.selfAgeMs,
+    required this.originAgeMs,
+    required this.leaderAgeMs,
+    required this.trace,
+    required this.consent,
+    required this.connected,
+    this.restored = false,
+    this.serverNowMs,
+    this.routingEnabled = true,
+  });
+  final String room, account, device, relationship, target;
+  final LocationFix? self, origin, leader;
+  final double selfAgeMs, originAgeMs, leaderAgeMs;
+  final List<LocationFix> trace;
+  final bool consent, connected, restored;
+  final num? serverNowMs;
+  final bool routingEnabled;
+  Object get identity => (room, account, device, relationship, target);
+}
+
+/// Memory belongs to RoomSession, never to a map or panel widget.
+class FollowGuidance {
+  FollowGuidance(this.identity, this.relationship);
+  final Object identity;
+  final String relationship;
+  FollowMode mode = FollowMode.a;
+  FollowPhase phase = FollowPhase.approaching;
+  FollowRouteCondition condition = FollowRouteCondition.waitingLocation;
+  RouteAnchor? anchor, progress;
+  num? progressAt, anchorAt;
+  RoutePoint? anchorPoint, originPoint;
+  SampleRef? originRef;
+  FollowRouteResult? route;
+  int generation = 0, joinRound = 0;
+  double routeProgress = 0;
+  bool anchorConfirmed = false, anchorReached = false;
+  List<List<RoutePoint>> activeTrace = const [];
+  List<RoutePoint> get connector =>
+      phase == FollowPhase.approaching &&
+          condition != FollowRouteCondition.offRoute &&
+          condition != FollowRouteCondition.resetRequired &&
+          condition != FollowRouteCondition.traceBroken
+      ? route?.points ?? const []
+      : const [];
+  RoutePoint? get marker =>
+      phase == FollowPhase.approaching ? anchorPoint : null;
+  bool get subdued => {
+    FollowRouteCondition.waitingLocation,
+    FollowRouteCondition.locationDelayed,
+    FollowRouteCondition.poorAccuracy,
+    FollowRouteCondition.consentRequired,
+    FollowRouteCondition.authorizationBlocked,
+    FollowRouteCondition.traceBroken,
+  }.contains(condition);
+  String get modeLabel => mode == FollowMode.a ? '따라가기' : '합류 후 따라가기';
+  FollowRouteView? _view;
+  FollowRouteView get view {
+    final previous = _view;
+    final line = connector;
+    if (previous != null &&
+        previous.mode == mode &&
+        previous.phase == phase &&
+        previous.condition == condition &&
+        identical(previous.connector, line) &&
+        identical(previous.trace, activeTrace) &&
+        previous.anchor == marker &&
+        previous.confirmed == anchorConfirmed &&
+        previous.subdued == subdued)
+      return previous;
+    return _view = FollowRouteView(
+      mode: mode,
+      phase: phase,
+      condition: condition,
+      connector: line,
+      trace: activeTrace,
+      anchor: marker,
+      confirmed: anchorConfirmed,
+      subdued: subdued,
+      status: status,
+    );
+  }
+
+  String get status => switch (condition) {
+    FollowRouteCondition.waitingLocation => '위치 확인 중',
+    FollowRouteCondition.waitingTrace => '이동 경로 대기',
+    FollowRouteCondition.atAnchorWaitingTrace => '기준 지점 근처 · 이동 경로 대기',
+    FollowRouteCondition.calculating => '추천 경로 계산 중',
+    FollowRouteCondition.ready =>
+      phase == FollowPhase.onTrace ? '앞차가 지나간 경로를 따라갑니다' : '추천 경로로 기준 지점까지 이동',
+    FollowRouteCondition.locationDelayed => '위치 갱신 대기',
+    FollowRouteCondition.poorAccuracy => '위치 정확도 확인 중',
+    FollowRouteCondition.offRoute => '경로를 벗어났습니다',
+    FollowRouteCondition.traceBroken => '이어서 따라갈 이동 경로가 끊겼습니다',
+    FollowRouteCondition.noRoute => '추천 경로를 찾지 못했습니다',
+    FollowRouteCondition.resetRequired => '정차 후 안내를 다시 설정해 주세요',
+    FollowRouteCondition.consentRequired => '나와 앞차의 최신 위치 동의가 필요합니다',
+    FollowRouteCondition.authorizationBlocked => '참여 권한 확인이 필요합니다',
+    FollowRouteCondition.disabled => '추천 경로 기능을 사용할 수 없습니다',
+    FollowRouteCondition.retryWaiting => '추천 경로 다시 시도 대기',
+  };
+}
+
+class FollowRouteView {
+  const FollowRouteView({
+    required this.mode,
+    required this.phase,
+    required this.condition,
+    required this.connector,
+    required this.trace,
+    required this.anchor,
+    required this.confirmed,
+    required this.subdued,
+    required this.status,
+  });
+  final FollowMode mode;
+  final FollowPhase phase;
+  final FollowRouteCondition condition;
+  final List<RoutePoint> connector;
+  final List<List<RoutePoint>> trace;
+  final RoutePoint? anchor;
+  final bool confirmed, subdued;
+  final String status;
+  String get anchorLabel => mode == FollowMode.a
+      ? '처음 앞차 위치'
+      : confirmed
+      ? '합류 지점'
+      : '합류 지점 후보';
+}
+
+typedef FollowRouteLoader =
+    Future<FollowRouteResult> Function(
+      String room,
+      FollowRouteRequest request,
+      RouteCancellation cancellation,
+    );
+
+class FollowRouteController extends ChangeNotifier {
+  FollowRouteController({
+    required this.load,
+    required this.canChange,
+    required this.onJoined,
+    required this.onInvalidated,
+    int Function()? now,
+    this.onAuthorizationError,
+  }) {
+    final clock = Stopwatch()..start();
+    _now = now ?? () => clock.elapsedMilliseconds;
+  }
+  final FollowRouteLoader load;
+  final bool Function() canChange;
+  final void Function(String relationship, int round) onJoined;
+  final VoidCallback onInvalidated;
+  final void Function(String code)? onAuthorizationError;
+  late final int Function() _now;
+  FollowGuidance? _state;
+  FollowGuidance? get state => _state;
+  FollowRouteInput? _input;
+  List<TracePath> _paths = const [];
+  List<LocationFix>? _traceSource;
+  TracePath? _renderedPath;
+  RouteAnchor? _renderedRef;
+  RouteCancellation? _cancellation;
+  FollowRouteRequest? _request;
+  FollowRouteResult? _pendingResult;
+  FollowRouteResult? _rejectedRoute;
+  FollowRouteCondition? _beforeHold;
+  String? _calculation;
+  int _generation = 0, _ids = 0, _retries = 0, _extraCandidates = 0;
+  int? _lastAttempt, _nextAttempt, _expires, _inputAt, _offSince, _joinSince;
+  int _offSamples = 0, _joinSamples = 0;
+  double? _joinStart, _joinLast;
+  LocationFix? _lastSelf;
+  RouteAnchor? _tracking;
+  bool _disposed = false,
+      _offRoute = false,
+      _extraPending = false,
+      _retryOnLocation = false;
+  bool _hadAnchorInTrace = false;
+  bool _selfConsentBlocked = false;
+  bool _featureBlocked = false;
+  String? get calculationId => _calculation;
+  bool get calculating => _cancellation != null;
+
+  void update(FollowRouteInput? input) {
+    if (_disposed) return;
+    if (input == null) {
+      clear();
+      return;
+    }
+    _input = input;
+    if (_state?.identity != input.identity) {
+      clear();
+      _input = input;
+      _state = FollowGuidance(input.identity, input.relationship)
+        ..generation = ++_generation;
+      if (input.restored)
+        _state!.condition = FollowRouteCondition.resetRequired;
+    }
+    if (!identical(_traceSource, input.trace)) {
+      _traceSource = input.trace;
+      _paths = splitFollowTrace(input.trace);
+    }
+    _evaluate();
+    notifyListeners();
+  }
+
+  bool changeMode(FollowMode mode) {
+    final s = _state;
+    if (s == null || s.mode == mode || !canChange()) return false;
+    _invalidate();
+    s.mode = mode;
+    if (s.phase == FollowPhase.approaching) {
+      _clearCalculation();
+      s.anchor = null;
+      s.anchorPoint = null;
+      s.condition = FollowRouteCondition.waitingLocation;
+    }
+    _evaluate();
+    notifyListeners();
+    return true;
+  }
+
+  bool reset() {
+    final s = _state;
+    if (s == null || !canChange()) return false;
+    _invalidate();
+    _clearCalculation();
+    s.phase = FollowPhase.approaching;
+    s.anchor = s.progress = null;
+    s.progressAt = null;
+    s.anchorPoint = null;
+    s.condition = FollowRouteCondition.waitingLocation;
+    _tracking = null;
+    _offRoute = false;
+    _evaluate();
+    notifyListeners();
+    return true;
+  }
+
+  bool get _fresh {
+    final i = _input!;
+    return i.connected &&
+        i.self != null &&
+        i.leader != null &&
+        i.selfAgeMs <= 10000 &&
+        i.leaderAgeMs <= 10000 &&
+        routeQuality(i.self!) &&
+        routeQuality(i.leader!);
+  }
+
+  void _evaluate() {
+    final s = _state!, i = _input!;
+    if (!i.routingEnabled) {
+      if (!_featureBlocked) _invalidate();
+      _featureBlocked = true;
+      s.route = null;
+      _updateTrace();
+      if (s.anchor == null)
+        s.activeTrace = _paths.map((path) => path.points).toList();
+      s.condition = FollowRouteCondition.disabled;
+      return;
+    }
+    if (_featureBlocked) {
+      _featureBlocked = false;
+      s.condition = s.anchor == null && !i.restored
+          ? FollowRouteCondition.waitingLocation
+          : FollowRouteCondition.resetRequired;
+    }
+    if (!i.consent) {
+      _selfConsentBlocked = true;
+      if (s.condition != FollowRouteCondition.consentRequired) {
+        _invalidate();
+        s.route = null;
+      }
+      s.condition = FollowRouteCondition.consentRequired;
+      return;
+    }
+    if (_selfConsentBlocked) {
+      _selfConsentBlocked = false;
+      s.condition = s.anchor == null
+          ? FollowRouteCondition.waitingLocation
+          : FollowRouteCondition.resetRequired;
+    }
+    _updateTrace();
+    if (i.self == null || i.leader == null) {
+      _hold(FollowRouteCondition.waitingLocation);
+      return;
+    }
+    if (!i.connected || i.selfAgeMs > 10000 || i.leaderAgeMs > 10000) {
+      _hold(FollowRouteCondition.locationDelayed);
+      return;
+    }
+    if (!routeQuality(i.self!) || !routeQuality(i.leader!)) {
+      _hold(FollowRouteCondition.poorAccuracy);
+      return;
+    }
+    if (_beforeHold != null) {
+      s.condition = _beforeHold!;
+      _beforeHold = null;
+    }
+    _updateTrace();
+    if (_pendingResult != null) {
+      final result = _pendingResult!;
+      _pendingResult = null;
+      _applyResult(result);
+    }
+    if (s.anchor == null &&
+        {
+          FollowRouteCondition.waitingLocation,
+          FollowRouteCondition.waitingTrace,
+        }.contains(s.condition)) {
+      _start();
+      return;
+    }
+    if ({
+          FollowRouteCondition.resetRequired,
+          FollowRouteCondition.consentRequired,
+          FollowRouteCondition.authorizationBlocked,
+          FollowRouteCondition.disabled,
+        }.contains(s.condition) ||
+        s.condition == FollowRouteCondition.noRoute && !_extraPending)
+      return;
+    if (_expires != null &&
+        _now() >= _expires! &&
+        s.route == null &&
+        s.phase == FollowPhase.approaching) {
+      _nextAttempt = null;
+      s.condition = FollowRouteCondition.resetRequired;
+      return;
+    }
+    if (_extraPending && _nextAttempt != null && _now() >= _nextAttempt!) {
+      _extraPending = false;
+      _additionalCandidate();
+      return;
+    }
+    if (_nextAttempt != null && _now() >= _nextAttempt! && !calculating) {
+      _nextAttempt = null;
+      _send();
+    }
+    final fix = i.self!;
+    final previous = _lastSelf;
+    final newSample =
+        previous == null || SampleRef.of(previous) != SampleRef.of(fix);
+    if (!newSample) {
+      _recoverIfNeeded();
+      return;
+    }
+    _lastSelf = fix;
+    if (_retryOnLocation &&
+        previous != null &&
+        fix.at > previous.at &&
+        !calculating) {
+      _retryOnLocation = false;
+      _send();
+    }
+    double? direction;
+    var moved = 0.0;
+    if (previous != null) {
+      moved = routeDistance(
+        RoutePoint.fromFix(previous),
+        RoutePoint.fromFix(fix),
+      );
+      final dt = (fix.at - previous.at) / 1000;
+      if (previous.stream != fix.stream ||
+          fix.at <= previous.at ||
+          dt > 10 ||
+          moved > 70 * dt + previous.acc! + fix.acc!) {
+        _resetEvidence();
+        s.anchorReached = false;
+        return;
+      }
+      if (moved >= 3)
+        direction = routeBearing(
+          RoutePoint.fromFix(previous),
+          RoutePoint.fromFix(fix),
+        );
+    }
+    final path = _activePath();
+    final floor = path?.resolve(
+      s.phase == FollowPhase.onTrace ? s.progress ?? s.anchor! : s.anchor!,
+    );
+    final tracking = _tracking == null ? null : path?.resolve(_tracking!);
+    final projection = path == null || floor == null
+        ? null
+        : projectRoute(
+            RoutePoint.fromFix(fix),
+            path.points,
+            minimum: math.max(floor, (tracking ?? floor) - 3),
+            maximum: (tracking ?? floor) + math.max(120, moved + 50),
+          );
+    final judgingRoute = s.route ?? _rejectedRoute;
+    final connectorProjection = judgingRoute == null
+        ? null
+        : projectRoute(RoutePoint.fromFix(fix), judgingRoute.points);
+    if (connectorProjection != null && !connectorProjection.ambiguous)
+      s.routeProgress = connectorProjection.along;
+    final traceDistance = projection?.distance ?? double.infinity;
+    final connectorDistance =
+        judgingRoute?.atAnchor == true && s.anchorPoint != null
+        ? routeDistance(RoutePoint.fromFix(fix), s.anchorPoint!)
+        : connectorProjection?.distance ?? double.infinity;
+    final outside =
+        traceDistance > 60.000001 &&
+        (s.phase == FollowPhase.onTrace ||
+            judgingRoute != null && connectorDistance > 60.000001);
+    if (outside) {
+      _offSince ??= _now();
+      _offSamples++;
+      _resetJoin();
+      s.anchorReached = false;
+      if (_now() - _offSince! >= 5000 && _offSamples >= 3) {
+        _offRoute = true;
+        s.condition = FollowRouteCondition.offRoute;
+      }
+    } else {
+      _offSince = null;
+      _offSamples = 0;
+      if (_offRoute) {
+        _offRoute = false;
+        if (s.condition == FollowRouteCondition.offRoute)
+          s.condition = FollowRouteCondition.ready;
+      }
+    }
+    _recoverIfNeeded();
+    if (s.phase == FollowPhase.onTrace) {
+      if (projection != null &&
+          !projection.ambiguous &&
+          projection.distance <= 25.000001 &&
+          direction != null &&
+          routeDirectionDifference(direction, projection.bearing) <= 60 &&
+          projection.along >= (tracking ?? floor ?? 0)) {
+        s.progress = _tracking = path!.at(projection.along);
+        s.progressAt = path.fixes[projection.index].at;
+        _updateTrace();
+      }
+      return;
+    }
+    if (s.route == null || s.anchorPoint == null) return;
+    if (!s.anchorReached &&
+        routeDistance(RoutePoint.fromFix(fix), s.anchorPoint!) <= 25.000001) {
+      s.anchorReached =
+          s.route!.atAnchor ||
+          connectorProjection != null &&
+              !connectorProjection.ambiguous &&
+              connectorProjection.distance <= 25.000001 &&
+              connectorProjection.along >= routeLength(s.route!.points) - 25;
+    }
+    if (projection == null) {
+      _resetJoin();
+      return;
+    }
+    if (projection.ambiguous || projection.distance > 25.000001) {
+      _resetJoin();
+      s.anchorReached = false;
+      return;
+    }
+    if (!s.anchorReached ||
+        direction == null ||
+        routeDirectionDifference(direction, projection.bearing) > 60.000001 ||
+        _joinLast != null && projection.along < _joinLast!) {
+      _resetJoin();
+      return;
+    }
+    _joinSince ??= _now();
+    _joinStart ??= projection.along;
+    _joinLast = projection.along;
+    _tracking = path!.at(projection.along);
+    _joinSamples++;
+    if (_joinSamples >= 3 &&
+        _now() - _joinSince! >= 2000 &&
+        projection.along - _joinStart! >= 10) {
+      s.phase = FollowPhase.onTrace;
+      s.progress = _tracking;
+      s.progressAt = path.fixes[projection.index].at;
+      s.route = null;
+      s.condition = FollowRouteCondition.ready;
+      _nextAttempt = null;
+      s.joinRound++;
+      _updateTrace();
+      onJoined(s.relationship, s.joinRound);
+    }
+  }
+
+  void _hold(FollowRouteCondition condition) {
+    final s = _state!;
+    _beforeHold ??= s.condition;
+    s.condition = condition;
+    _resetEvidence();
+    _offRoute = false;
+    _lastSelf = null;
+  }
+
+  TracePath? _activePath() {
+    final s = _state!;
+    final ref = s.phase == FollowPhase.onTrace
+        ? s.progress ?? s.anchor
+        : s.anchor;
+    if (ref == null) return null;
+    for (final path in _paths) {
+      if (path.resolve(ref) != null) return path;
+    }
+    return null;
+  }
+
+  void _updateTrace() {
+    final s = _state!;
+    final path = _activePath();
+    if (path == null) {
+      _renderedPath = null;
+      _renderedRef = null;
+      s.activeTrace = const [];
+      if (s.anchor != null &&
+          (_hadAnchorInTrace ||
+              s.anchorAt != null &&
+                  _paths.any((p) => p.fixes.first.at > s.anchorAt!)) &&
+          !{
+            FollowRouteCondition.disabled,
+            FollowRouteCondition.consentRequired,
+            FollowRouteCondition.authorizationBlocked,
+            FollowRouteCondition.resetRequired,
+            FollowRouteCondition.noRoute,
+          }.contains(s.condition)) {
+        s.route = null;
+        s.condition = FollowRouteCondition.traceBroken;
+        _resetEvidence();
+      }
+      return;
+    }
+    _hadAnchorInTrace = true;
+    if (s.condition == FollowRouteCondition.waitingTrace &&
+        s.route != null &&
+        path.cumulative.last > (path.resolve(s.anchor!) ?? 0)) {
+      s.condition = s.route!.atAnchor
+          ? FollowRouteCondition.atAnchorWaitingTrace
+          : FollowRouteCondition.ready;
+    }
+    final ref = s.phase == FollowPhase.onTrace
+        ? s.progress ?? s.anchor!
+        : s.anchor!;
+    if (identical(_renderedPath, path) && _renderedRef == ref) return;
+    _renderedPath = path;
+    _renderedRef = ref;
+    s.activeTrace = [path.after(path.resolve(ref)!)];
+    // Preserve separate later sections for display, but never judge a join on
+    // a straight line across the missing portion.
+    final index = _paths.indexOf(path);
+    s.activeTrace = List.unmodifiable([
+      ...s.activeTrace,
+      for (final later in _paths.skip(index + 1)) later.points,
+    ]);
+  }
+
+  void _start({JoinCandidate? candidate}) {
+    final s = _state!, i = _input!;
+    if (!_fresh || !i.consent) return;
+    final origin = i.origin;
+    if (origin == null || i.originAgeMs > 10000 || !routeQuality(origin)) {
+      s.condition = FollowRouteCondition.waitingLocation;
+      return;
+    }
+    if (s.mode == FollowMode.b) {
+      candidate ??= selectJoinCandidate(
+        RoutePoint.fromFix(i.self!),
+        _paths,
+        progress: s.progress,
+        progressAt: s.progressAt,
+      );
+      if (candidate == null) {
+        s.condition = FollowRouteCondition.waitingTrace;
+        return;
+      }
+    }
+    _invalidate();
+    s.originRef = SampleRef.of(origin);
+    s.originPoint = RoutePoint.fromFix(origin);
+    s.anchor = candidate?.anchor ?? RouteAnchor.sample(SampleRef.of(i.leader!));
+    s.anchorPoint = candidate?.point ?? RoutePoint.fromFix(i.leader!);
+    s.anchorAt = candidate == null
+        ? i.leader!.at
+        : candidate.path.fixes
+              .firstWhere((fix) => SampleRef.of(fix) == candidate!.anchor.start)
+              .at;
+    s.anchorConfirmed = false;
+    s.anchorReached = false;
+    s.route = null;
+    _rejectedRoute = null;
+    s.phase = FollowPhase.approaching;
+    _tracking = null;
+    _hadAnchorInTrace = false;
+    _calculation = _id('calc');
+    _inputAt = _now();
+    _expires = _inputAt! + 120000;
+    _retries = 0;
+    _updateTrace();
+    // Initial input validation goes to the server immediately even during its
+    // provider cooldown. RATE_LIMITED must say whether it pinned these refs.
+    _send();
+  }
+
+  void _recoverIfNeeded() {
+    final s = _state!;
+    if (s.mode != FollowMode.b ||
+        !_fresh ||
+        calculating ||
+        !(_offRoute || s.condition == FollowRouteCondition.traceBroken) ||
+        _lastAttempt != null && _now() - _lastAttempt! < 30000)
+      return;
+    _extraCandidates = 0;
+    _start();
+    _offRoute = false;
+    _offSince = null;
+    _offSamples = 0;
+  }
+
+  String _id(String prefix) => '$prefix-${_now()}-${++_ids}';
+
+  void _send() {
+    final s = _state!, i = _input!;
+    if (calculating ||
+        !_fresh ||
+        !i.consent ||
+        s.anchor == null ||
+        s.originRef == null ||
+        _calculation == null)
+      return;
+    if (_expires != null && _now() >= _expires!) {
+      s.condition = FollowRouteCondition.resetRequired;
+      return;
+    }
+    final cancellation = RouteCancellation();
+    _cancellation = cancellation;
+    final request = FollowRouteRequest(
+      followRequestId: s.relationship,
+      guidanceGeneration: s.generation,
+      calculationId: _calculation!,
+      requestId: _id('req'),
+      mode: s.mode,
+      originRef: s.originRef!,
+      anchor: s.anchor!,
+    );
+    _request = request;
+    _lastAttempt = _now();
+    s.condition = FollowRouteCondition.calculating;
+    unawaited(_perform(i, request, cancellation));
+  }
+
+  bool _current(
+    FollowRouteInput input,
+    FollowRouteRequest request,
+    RouteCancellation cancellation,
+  ) =>
+      !_disposed &&
+      !cancellation.isCancelled &&
+      identical(_request, request) &&
+      _state?.identity == input.identity &&
+      _input?.identity == input.identity &&
+      _state?.generation == request.guidanceGeneration &&
+      _state?.mode == request.mode &&
+      _state?.anchor == request.anchor &&
+      _calculation == request.calculationId &&
+      _input!.consent;
+
+  Future<void> _perform(
+    FollowRouteInput input,
+    FollowRouteRequest request,
+    RouteCancellation cancellation,
+  ) async {
+    try {
+      final result = await load(input.room, request, cancellation);
+      if (!_current(input, request, cancellation)) return;
+      _cancellation = null;
+      if (!_fresh) {
+        _pendingResult = result;
+        _hold(FollowRouteCondition.locationDelayed);
+      } else {
+        _applyResult(result);
+      }
+    } catch (error) {
+      if (!_current(input, request, cancellation)) return;
+      _cancellation = null;
+      final failure = error is FollowRouteException
+          ? error
+          : const FollowRouteException('INVALID_PROVIDER_RESPONSE');
+      if (failure.identity != null && !request.matches(failure.identity!)) {
+        _state!.condition = FollowRouteCondition.resetRequired;
+      } else {
+        _failed(failure);
+      }
+    }
+    if (!_disposed &&
+        _state?.identity == input.identity &&
+        identical(_request, request))
+      notifyListeners();
+  }
+
+  void _applyResult(FollowRouteResult result) {
+    final s = _state!;
+    if (routeDistance(result.origin, s.originPoint!) > 1 ||
+        routeDistance(result.anchor, s.anchorPoint!) > 1 ||
+        result.atAnchor &&
+            routeDistance(result.origin, result.anchor) > 25.000001 ||
+        !result.atAnchor &&
+            (routeDistance(result.points.first, result.origin) > 25.000001 ||
+                routeDistance(result.points.last, result.anchor) > 25.000001 ||
+                routeDistance(result.actualStart!, result.origin) > 25.000001 ||
+                routeDistance(result.actualEnd!, result.anchor) > 25.000001)) {
+      _failed(const FollowRouteException('ENDPOINT_MISMATCH'));
+      return;
+    }
+    final current = RoutePoint.fromFix(_input!.self!);
+    final projection = projectRoute(current, result.points);
+    if (result.atAnchor
+        ? routeDistance(current, result.anchor) > 60.000001
+        : projection == null ||
+              projection.ambiguous ||
+              projection.distance >= 60) {
+      s.route = null;
+      s.condition = FollowRouteCondition.resetRequired;
+      if (s.mode == FollowMode.b) {
+        _rejectedRoute = result;
+        _resetEvidence();
+        _offRoute = false;
+        s.condition = FollowRouteCondition.offRoute;
+      }
+      return;
+    }
+    s.route = result;
+    _rejectedRoute = null;
+    s.anchorConfirmed = true;
+    s.routeProgress = projection?.along ?? 0;
+    s.condition = result.atAnchor
+        ? FollowRouteCondition.atAnchorWaitingTrace
+        : (_activePath()?.points.length ?? 0) < 2
+        ? FollowRouteCondition.waitingTrace
+        : FollowRouteCondition.ready;
+    _beforeHold = null;
+    _nextAttempt = null;
+    _updateTrace();
+  }
+
+  void _failed(FollowRouteException error) {
+    final s = _state!;
+    s.route = null;
+    _beforeHold = null;
+    _nextAttempt = null;
+    switch (error.code) {
+      case 'CONSENT_REQUIRED_SELF':
+      case 'CONSENT_REQUIRED_TARGET':
+        s.condition = FollowRouteCondition.consentRequired;
+        onInvalidated();
+      case 'UNAUTHENTICATED':
+      case 'NOT_ROOM_MEMBER':
+      case 'NOT_ACTIVE_SENDER':
+      case 'FOLLOW_NOT_ACTIVE':
+        s.condition = FollowRouteCondition.authorizationBlocked;
+        onInvalidated();
+        onAuthorizationError?.call(error.code);
+      case 'ROUTING_DISABLED':
+      case 'PROVIDER_AUTH_FAILED':
+        s.condition = FollowRouteCondition.disabled;
+      case 'LOCATION_NOT_READY':
+        s.condition = FollowRouteCondition.locationDelayed;
+        _retryOnLocation = true;
+      case 'REFERENCE_EXPIRED':
+      case 'CONTEXT_MISMATCH':
+        s.condition = FollowRouteCondition.resetRequired;
+      case 'TRACE_DISCONTINUITY':
+        s.condition = FollowRouteCondition.traceBroken;
+      case 'NO_ROUTE':
+      case 'ENDPOINT_MISMATCH':
+        s.condition = FollowRouteCondition.noRoute;
+        if (s.mode == FollowMode.b && _extraCandidates == 0) {
+          _extraCandidates++;
+          _extraPending = true;
+          _nextAttempt = _now() + 30000;
+        }
+      case 'RATE_LIMITED':
+      case 'ROUTE_IN_PROGRESS':
+        if (!error.inputAccepted || error.inputExpiresAtMs == null) {
+          s.condition = FollowRouteCondition.resetRequired;
+        } else {
+          final serverNow = _input!.serverNowMs;
+          if (serverNow == null) {
+            s.condition = FollowRouteCondition.resetRequired;
+            break;
+          }
+          _expires = math.min(
+            _expires ?? _now() + 120000,
+            _now() + (error.inputExpiresAtMs! - serverNow).toInt(),
+          );
+          _scheduleRetry(error.retryAfterMs);
+        }
+      case 'PROVIDER_UNAVAILABLE':
+      case 'ROUTE_TIMEOUT':
+      case 'PROVIDER_RATE_LIMITED':
+        if (error.retryable && _retries < 2) {
+          _retries++;
+          _scheduleRetry(error.retryAfterMs);
+        } else {
+          s.condition = FollowRouteCondition.noRoute;
+        }
+      default:
+        s.condition = FollowRouteCondition.noRoute;
+    }
+  }
+
+  void _scheduleRetry(int delay) {
+    _nextAttempt = _now() + math.max(30000, delay);
+    if (_expires != null && _nextAttempt! >= _expires!) {
+      _nextAttempt = null;
+      _state!.condition = FollowRouteCondition.resetRequired;
+    } else {
+      _state!.condition = FollowRouteCondition.retryWaiting;
+    }
+  }
+
+  void _additionalCandidate() {
+    final s = _state!, path = _activePath();
+    if (path == null) {
+      s.condition = FollowRouteCondition.noRoute;
+      return;
+    }
+    final along = path.resolve(s.anchor!)!;
+    final next = math.min(along + 60, path.cumulative.last);
+    final anchor = path.at(next);
+    if (next <= along || anchor == s.anchor || anchor.end == null) {
+      s.condition = FollowRouteCondition.noRoute;
+      _nextAttempt = null;
+      return;
+    }
+    _start(candidate: JoinCandidate(anchor, path.pointAt(next), path));
+  }
+
+  void _resetJoin() {
+    _joinSince = null;
+    _joinSamples = 0;
+    _joinStart = _joinLast = null;
+  }
+
+  void _resetEvidence() {
+    _resetJoin();
+    _offSince = null;
+    _offSamples = 0;
+  }
+
+  void _invalidate() {
+    _rejectedRoute = null;
+    _cancellation?.cancel();
+    _cancellation = null;
+    _request = null;
+    _pendingResult = null;
+    _nextAttempt = null;
+    _extraPending = _retryOnLocation = false;
+    _beforeHold = null;
+    _resetEvidence();
+    _lastSelf = null;
+    if (_state != null) _state!.generation = ++_generation;
+    onInvalidated();
+  }
+
+  void _clearCalculation() {
+    _rejectedRoute = null;
+    _state?.route = null;
+    _state?.anchorReached = false;
+    _calculation = null;
+    _expires = _inputAt = null;
+    _retries = _extraCandidates = 0;
+  }
+
+  void clear() {
+    if (_state == null) return;
+    _invalidate();
+    _clearCalculation();
+    _state = null;
+    _input = null;
+    _paths = const [];
+    _traceSource = null;
+    _renderedPath = null;
+    _renderedRef = null;
+    _selfConsentBlocked = false;
+    _featureBlocked = false;
+    _tracking = null;
+    _offRoute = false;
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    clear();
+    super.dispose();
+  }
+}

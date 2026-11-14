@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
+import type { SampleRef } from "./route_contract.ts";
 
 export interface LocationFix {
   handle: string;
@@ -19,6 +21,10 @@ export const LOCATION_DISCONNECT_GRACE_MS = 30_000;
 export const LOCATION_STALE_MS = 90_000;
 export const LOCATION_SWEEP_INTERVAL_MS = 30_000;
 export const FOLLOW_MIN_INTERVAL_MS = 1_000;
+export const LOCATION_REFERENCE_AGE_MS = 10_000;
+export const LOCATION_REFERENCE_LIMIT = 64;
+
+export interface LocationInvalidation { code: string; requester?: string; handle?: string }
 
 export interface FollowRelation {
   requestId: string;
@@ -44,6 +50,7 @@ interface RoomLocations {
   lastSeq: Map<string, number>;
   lastReceivedAt: Map<string, number>;
   lastFollowAt: Map<string, number>;
+  recent: Map<string, LocationFix[]>;
 }
 
 function finite(value: unknown): value is number {
@@ -63,18 +70,20 @@ function valid(value: unknown): value is Omit<LocationFix, "receivedAt"> {
     && finite(fix.at) && fix.at >= 0 && Number.isSafeInteger(fix.seq) && (fix.seq as number) >= 0;
 }
 
-export class RoomLocationStore {
+export class RoomLocationStore extends EventEmitter {
   #rooms = new Map<string, RoomLocations>();
   #now: () => number;
 
-  constructor(now = () => Date.now()) { this.#now = now; }
+  constructor(now = () => Date.now()) { super(); this.#now = now; }
+
+  serverNowMs(): number { return this.#now(); }
 
   #room(code: string): RoomLocations {
     let room = this.#rooms.get(code);
     if (!room) {
       room = { revision: 0, positions: new Map(), trails: new Map(), followers: new Map(),
         accepted: new Map(), pendingRequests: new Map(), sharing: new Set(), disconnectedAt: new Map(),
-        lastSeq: new Map(), lastReceivedAt: new Map(), lastFollowAt: new Map() };
+        lastSeq: new Map(), lastReceivedAt: new Map(), lastFollowAt: new Map(), recent: new Map() };
       this.#rooms.set(code, room);
     }
     return room;
@@ -200,6 +209,8 @@ export class RoomLocationStore {
       room.trails.delete(relation.target);
     }
     room.revision++;
+    room.recent.delete(requester);
+    this.emit("invalidated", { code, requester } satisfies LocationInvalidation);
     return relation;
   }
 
@@ -230,6 +241,10 @@ export class RoomLocationStore {
       at: fix.at, seq: fix.seq, receivedAt: now,
     };
     room.positions.set(fix.handle, stored);
+    const recent = (room.recent.get(fix.handle) ?? []).filter((sample) => now - sample.receivedAt <= LOCATION_REFERENCE_AGE_MS);
+    recent.push(stored);
+    if (recent.length > LOCATION_REFERENCE_LIMIT) recent.splice(0, recent.length - LOCATION_REFERENCE_LIMIT);
+    room.recent.set(fix.handle, recent);
     room.lastSeq.set(sequenceKey, fix.seq);
     room.sharing.add(fix.handle);
     const trail = room.trails.get(fix.handle);
@@ -280,6 +295,28 @@ export class RoomLocationStore {
     return fix && this.#now() - fix.receivedAt < LOCATION_STALE_MS ? { ...fix } : undefined;
   }
 
+  recentSample(code: string, handle: string, ref: SampleRef): LocationFix | undefined {
+    const room = this.#rooms.get(code);
+    const recent = room?.recent.get(handle)?.filter((fix) => this.#now() - fix.receivedAt <= LOCATION_REFERENCE_AGE_MS);
+    if (recent?.length) room!.recent.set(handle, recent);
+    else room?.recent.delete(handle);
+    const fix = recent?.find((fix) => fix.stream === ref.stream && fix.seq === ref.seq);
+    return fix ? { ...fix } : undefined;
+  }
+
+  trail(code: string, handle: string): LocationFix[] {
+    return (this.#rooms.get(code)?.trails.get(handle) ?? []).map((fix) => ({ ...fix }));
+  }
+
+  pruneReferences(): void {
+    const now = this.#now();
+    for (const room of this.#rooms.values()) for (const [handle, samples] of room.recent) {
+      const recent = samples.filter((fix) => now - fix.receivedAt <= LOCATION_REFERENCE_AGE_MS);
+      if (recent.length) room.recent.set(handle, recent);
+      else room.recent.delete(handle);
+    }
+  }
+
   remove(code: string, handle: string): boolean {
     // 순번은 같은 stream의 늦은 표본을 거르기 위해 방 수명 동안 보존한다.
     const room = this.#rooms.get(code);
@@ -287,15 +324,22 @@ export class RoomLocationStore {
     const sharing = room.sharing.delete(handle);
     const position = room.positions.delete(handle);
     const disconnected = room.disconnectedAt.delete(handle);
+    room.recent.delete(handle);
+    this.emit("invalidated", { code, handle } satisfies LocationInvalidation);
     if (sharing || position || disconnected) room.revision++;
     return sharing || position;
   }
 
-  clear(code: string): void { this.#rooms.delete(code); }
+  clear(code: string): void {
+    this.#rooms.delete(code);
+    this.emit("invalidated", { code } satisfies LocationInvalidation);
+  }
 
   resetDevice(code: string, handle: string): void {
     const room = this.#rooms.get(code);
     if (!room) return;
+    room.recent.delete(handle);
+    this.emit("invalidated", { code, handle } satisfies LocationInvalidation);
     room.lastReceivedAt.delete(handle);
     room.lastFollowAt.delete(handle);
     for (const key of room.lastSeq.keys()) {

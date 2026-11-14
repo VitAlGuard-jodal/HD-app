@@ -119,6 +119,9 @@ class _RoomScreenState extends State<RoomScreen> {
                 member.displayName,
                 '${member.displayName} 님의 위치를 따라갑니다',
                 '내 위치도 같은 방 참여자에게 보입니다',
+                '안내 시작·합류 후 따라가기 재계산 때 내 출발 좌표와 앞차 기준점 좌표(P0 또는 J)를 네이버 클라우드 플랫폼 Maps(Directions 5)에 제공합니다',
+                '앱 지도에 추천 경로를 그리기 위한 도로 경로 계산에 사용합니다',
+                '계정·이름·사진·방 코드는 보내지 않습니다. 제공처 보유 조건은 네이버 클라우드 플랫폼의 정책을 따릅니다',
                 '화면이 꺼져 있어도 공유 중에는 위치를 보냅니다',
                 '방을 나가거나 위치 공유를 중지하면 공유가 끝납니다',
                 '위치는 방이 있는 동안만 서버(국내)에 남습니다',
@@ -143,23 +146,7 @@ class _RoomScreenState extends State<RoomScreen> {
         return;
       }
       if (!valid()) return;
-      final consentRevision = widget.services.store.sessionRevision;
-      unawaited(
-        widget.services.api
-            .recordConsent(locationVersion: locationLegalVersion)
-            .then<void>(
-              (consent) {
-                if (!mounted) return;
-                widget.services.store.updateConsent(
-                  consent,
-                  sessionRevision: consentRevision,
-                );
-              },
-              onError: (Object error, StackTrace stack) {
-                debugPrint('위치 동의 기록 전송 실패: $error');
-              },
-            ),
-      );
+      await _saveLocationConsent();
       if (!valid()) return;
       await session.locationShare.start(token: token, stillValid: valid);
       if (!valid() || !session.locationShare.sharing) return;
@@ -170,6 +157,20 @@ class _RoomScreenState extends State<RoomScreen> {
       }
     } finally {
       if (!pending) session.cancelLocationStart(token);
+    }
+  }
+
+  Future<void> _saveLocationConsent() async {
+    final store = widget.services.store;
+    final revision = store.sessionRevision;
+    final consent = await widget.services.api.recordConsent(
+      locationVersion: locationLegalVersion,
+    );
+    if (!hasPrivacyConsent(consent) || !hasLocationConsent(consent)) {
+      throw const FormatException('최신 동의 내역을 저장하지 못했습니다. 다시 시도해 주세요.');
+    }
+    if (!store.updateConsent(consent, sessionRevision: revision)) {
+      throw const FormatException('계정이 변경되었습니다. 동의를 다시 확인해 주세요.');
     }
   }
 
@@ -236,7 +237,10 @@ class _RoomScreenState extends State<RoomScreen> {
             );
             bool valid() => current() && session.locationStartValid(token);
             try {
-              var accepted = session.locationShare.sharing;
+              var accepted =
+                  session.locationShare.sharing &&
+                  hasPrivacyConsent(widget.services.store.consent) &&
+                  hasLocationConsent(widget.services.store.consent);
               if (!accepted) {
                 if (!dialogContext.mounted) return;
                 accepted = await showConsentDialog(
@@ -246,6 +250,9 @@ class _RoomScreenState extends State<RoomScreen> {
                     name,
                     '$name 님이 내 위치를 따라가려 합니다',
                     '동의하면 내 위치가 같은 방 참여자에게 보입니다',
+                    '안내 시작·합류 후 따라가기 재계산 때 따라오는 차의 출발 좌표와 내 기준점 좌표(P0 또는 J)를 네이버 클라우드 플랫폼 Maps(Directions 5)에 제공합니다',
+                    '앱 지도에 추천 경로를 그리기 위한 도로 경로 계산에 사용합니다',
+                    '계정·이름·사진·방 코드는 보내지 않습니다. 제공처 보유 조건은 네이버 클라우드 플랫폼의 정책을 따릅니다',
                     '화면이 꺼져 있어도 공유 중에는 위치를 보냅니다',
                     '방을 나가거나 위치 공유를 중지하면 끝납니다',
                     '위치는 방이 있는 동안만 서버(국내)에 남습니다',
@@ -255,23 +262,7 @@ class _RoomScreenState extends State<RoomScreen> {
               }
               if (!valid()) continue;
               if (accepted) {
-                final consentRevision = widget.services.store.sessionRevision;
-                unawaited(
-                  widget.services.api
-                      .recordConsent(locationVersion: locationLegalVersion)
-                      .then<void>(
-                        (consent) {
-                          if (!mounted) return;
-                          widget.services.store.updateConsent(
-                            consent,
-                            sessionRevision: consentRevision,
-                          );
-                        },
-                        onError: (Object error, StackTrace stack) {
-                          debugPrint('위치 동의 기록 전송 실패: $error');
-                        },
-                      ),
-                );
+                await _saveLocationConsent();
                 if (!valid()) continue;
                 await session.locationShare.start(
                   token: token,
@@ -565,6 +556,13 @@ class _RoomScreenState extends State<RoomScreen> {
               ),
             ),
             trail: session.trailOf(session.followTarget),
+            guidance: session.followRoute.state?.view,
+            onModeChanged: _busy || session.followNeedsStop || state.isLeaving
+                ? null
+                : (mode) => session.followRoute.changeMode(mode),
+            onResetGuidance: _busy || session.followNeedsStop || state.isLeaving
+                ? null
+                : () => session.followRoute.reset(),
             targetHandle: session.followTarget,
             selfHandle: widget.services.store.handle,
             following: session.followTarget != null,
@@ -749,12 +747,19 @@ class _RoomScreenState extends State<RoomScreen> {
                           },
                         ),
                 );
-          Widget dock(Widget child) => Stack(
-            fit: StackFit.expand,
-            children: [
-              child,
-              Positioned(left: 8, right: 8, bottom: 8, child: controls),
-            ],
+          Widget dock(Widget child) => LayoutBuilder(
+            builder: (context, constraints) => Stack(
+              fit: StackFit.expand,
+              children: [
+                FloatingBarInset(
+                  bottom:
+                      (car ? carControlHeight(constraints.maxWidth - 16) : 64) +
+                      8,
+                  child: child,
+                ),
+                Positioned(left: 8, right: 8, bottom: 8, child: controls),
+              ],
+            ),
           );
           Widget callPanel({
             required bool compact,
@@ -789,6 +794,17 @@ class _RoomScreenState extends State<RoomScreen> {
                             const SizedBox(height: 12),
                           ],
                           readiness,
+                          if (session.locationShare.sharing)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              child: Text(
+                                '추천 경로 안내 시작·재계산 시 네이버 클라우드 플랫폼 Maps(Directions 5)에 뒷차 출발·앞차 기준점 좌표 제공',
+                                key: const ValueKey(
+                                  'follow-route-provider-status',
+                                ),
+                                style: statusTextStyle,
+                              ),
+                            ),
                           if (session.vehicleNotice != null ||
                               session.deviceReplaced ||
                               session.exitProtected)

@@ -6,6 +6,10 @@ import { isValidDisplayName, isValidHandle, isValidPassword } from "./handles.ts
 import { LOCATION_DISCONNECT_GRACE_MS, LOCATION_STALE_MS, LOCATION_SWEEP_INTERVAL_MS, RoomLocationStore } from "./locations.ts";
 import { generateRoomCode, RoomEventHub } from "./rooms.ts";
 import { RoomReadyStore } from "./ready.ts";
+import { FollowRouteService, parseRouteRequest, RouteError } from "./routes.ts";
+import type { RouteServiceOptions } from "./routes.ts";
+import { ROUTE_BODY_LIMIT, ROUTE_CONSENT_VERSION } from "./route_contract.ts";
+import type { FollowRouteRequest } from "./route_contract.ts";
 import { openEventStream } from "./sse.ts";
 import { issueIceServers } from "./turn.ts";
 import {
@@ -149,9 +153,10 @@ function requireMember(db: DatabaseSync, room: StoredRoom, user: StoredUser): vo
   }
 }
 
-export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLocationStore(), readiness = new RoomReadyStore(), avatarsDir = avatarDirectory(db) }: {
-  db: DatabaseSync; hub?: RoomEventHub; locations?: RoomLocationStore; readiness?: RoomReadyStore; avatarsDir?: string;
+export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLocationStore(), readiness = new RoomReadyStore(), avatarsDir = avatarDirectory(db), routeOptions }: {
+  db: DatabaseSync; hub?: RoomEventHub; locations?: RoomLocationStore; readiness?: RoomReadyStore; avatarsDir?: string; routeOptions?: RouteServiceOptions;
 }): RequestListener {
+  const routes = new FollowRouteService(locations, routeOptions);
   function deviceOf(request: IncomingMessage, token: string): string {
     const device = request.headers["x-unavo-device"];
     if (device !== undefined && (typeof device !== "string" || !/^[0-9a-f]{32}$/.test(device))) {
@@ -212,7 +217,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
   function sendTrail(code: string, requester: string, target: string): void {
     hub.sendTo(code, requester, "trail", {
       handle: target, points: locations.snapshot(code, requester).trails[target] ?? [],
-      revision: locations.revision(code),
+      revision: locations.revision(code), serverNowMs: locations.serverNowMs(),
     });
   }
 
@@ -243,6 +248,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
 
   function expireLocations(): void {
     for (const { code, handle } of locations.stale()) removeLocation(code, handle, "stale");
+    routes.sweep();
   }
 
   function scheduleDisconnect(code: string, handle: string): void {
@@ -285,6 +291,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
   });
   hub.once("closing", () => {
     closing = true;
+    routes.close();
     clearInterval(locationSweepTimer);
     clearTimeout(locationLogTimer);
     for (const timers of disconnectTimers.values()) for (const timer of timers.values()) clearTimeout(timer);
@@ -297,8 +304,70 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
     }
   }
 
+  function routeConsent(userId: number): boolean {
+    const consent = readUserConsent(db, userId);
+    return [consent.privacy, consent.location].every((entry) => entry?.version === ROUTE_CONSENT_VERSION
+      && Number.isFinite(Date.parse(entry.at)));
+  }
+
+  async function followRoute(request: IncomingMessage, response: ServerResponse, rawCode: string): Promise<void> {
+    response.setHeader("cache-control", "no-store");
+    let input: FollowRouteRequest | undefined;
+    let verifyReply: (() => void) | undefined;
+    const controller = new AbortController();
+    const cancel = () => { if (!response.writableEnded) controller.abort(); };
+    request.once("aborted", cancel);
+    response.once("close", cancel);
+    try {
+      input = parseRouteRequest(await readJson(request, false, ROUTE_BODY_LIMIT));
+      const { user, token } = authenticate(db, request);
+      const device = deviceOf(request, token);
+      const code = pathValue(rawCode).toUpperCase();
+      const room = /^[A-Z0-9]+$/.test(code) ? findRoomByCode(db, code) : undefined;
+      if (!room) throw new RouteError("NOT_ROOM_MEMBER");
+      const authorize = () => {
+        if (lookupToken(db, token)?.id !== user.id) throw new RouteError("UNAUTHENTICATED");
+        if (findRoomByCode(db, code)?.id !== room.id || !isRoomMember(db, room.id, user.id)) throw new RouteError("NOT_ROOM_MEMBER");
+        if (!hub.isSender(code, user.handle, device)) throw new RouteError("NOT_ACTIVE_SENDER");
+        if (!routes.feature().enabled) throw new RouteError("ROUTING_DISABLED");
+        const relation = locations.relationOf(code, user.handle);
+        if (relation?.requestId !== input!.followRequestId || locations.targetOf(code, user.handle) !== relation.target) {
+          throw new RouteError("FOLLOW_NOT_ACTIVE");
+        }
+        const target = findUserByHandle(db, relation.target);
+        if (!target || !isRoomMember(db, room.id, target.id)) throw new RouteError("FOLLOW_NOT_ACTIVE");
+        if (!routeConsent(user.id)) throw new RouteError("CONSENT_REQUIRED_SELF");
+        if (!routeConsent(target.id)) throw new RouteError("CONSENT_REQUIRED_TARGET");
+        return target.handle;
+      };
+      verifyReply = () => routes.assertCurrent(code, user.handle, input!, authorize);
+      if (request.aborted || response.destroyed) controller.abort();
+      const result = await routes.calculate(code, user.handle, input, authorize, controller.signal);
+      verifyReply();
+      if (!response.destroyed) json(response, 200, result);
+    } catch (error) {
+      let failure = error instanceof RouteError ? error : error instanceof HttpError
+        ? new RouteError(error.status === 413 ? "REQUEST_TOO_LARGE" : error.status === 401 ? "UNAUTHENTICATED" : "INVALID_REQUEST")
+        : new RouteError("PROVIDER_UNAVAILABLE", 30_000);
+      if (failure.inputExpiresAtMs !== undefined) {
+        try { verifyReply?.(); }
+        catch (changed) { failure = changed instanceof RouteError ? changed : new RouteError("PROVIDER_UNAVAILABLE", 30_000); }
+      }
+      if (!response.destroyed) json(response, failure.status, failure.body(input));
+    } finally {
+      request.off("aborted", cancel);
+      response.off("close", cancel);
+    }
+  }
+
   async function route(request: IncomingMessage, response: ServerResponse, path: string): Promise<void> {
     const method = request.method;
+
+    const followRouteMatch = /^\/v1\/rooms\/([^/]+)\/follow-route$/.exec(path);
+    if (method === "POST" && followRouteMatch) {
+      await followRoute(request, response, followRouteMatch[1]);
+      return;
+    }
 
     if (method === "POST" && path === "/v1/auth/signup") {
       const body = await readJson(request);
@@ -388,7 +457,10 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
           (body.privacy === undefined && body.location === undefined)) invalidConsent();
       const privacyVersion = body.privacy === undefined ? undefined : consentVersion(body.privacy);
       const locationVersion = body.location === undefined ? undefined : consentVersion(body.location);
-      json(response, 200, { consent: updateUserConsent(db, user.id, { privacyVersion, locationVersion }) });
+      authenticate(db, request);
+      const consent = updateUserConsent(db, user.id, { privacyVersion, locationVersion });
+      if (!routeConsent(user.id)) routes.invalidateConsent(user.handle);
+      json(response, 200, { consent });
       return;
     }
 
@@ -657,7 +729,9 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         }
         countLocation(code, result.dropped ? "dropped" : "accepted");
         if (!result.dropped) {
-          hub.broadcastExcept(code, user.handle, "location", { ...locations.position(code, user.handle), revision: locations.revision(code) });
+          hub.broadcastExcept(code, user.handle, "location", {
+            ...locations.position(code, user.handle), revision: locations.revision(code), serverNowMs: locations.serverNowMs(),
+          });
         }
         json(response, 202, { accepted: true, dropped: result.dropped });
         return;
@@ -666,7 +740,8 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
         requireMember(db, room, user);
         response.setHeader("cache-control", "no-store");
         expireLocations();
-        json(response, 200, { ...locations.snapshot(code, user.handle), revision: locations.revision(code) });
+        json(response, 200, { ...locations.snapshot(code, user.handle), revision: locations.revision(code),
+          serverNowMs: locations.serverNowMs(), followRoute: routes.feature() });
         return;
       }
       if (method === "DELETE" && action === "location") {
@@ -696,6 +771,7 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
           pendingFollow: locations.pendingOf(code, user.handle),
           followRequestId: locations.relationOf(code, user.handle)?.requestId ?? null,
           followRequests: locations.requestsFor(code, user.handle),
+          serverNowMs: locations.serverNowMs(), followRoute: routes.feature(),
         })) {
           unsubscribe();
         } else {
@@ -740,6 +816,10 @@ export function createApp({ db, hub = new RoomEventHub(), locations = new RoomLo
     const log = () => {
       if (logged) return;
       logged = true;
+      if (/^\/v1\/rooms\/[^/]+\/follow-route$/.test(path)) {
+        process.stdout.write(`follow-route status=${response.statusCode} durationMs=${Date.now() - started}\n`);
+        return;
+      }
       if (request.method === "POST" && /^\/v1\/rooms\/[^/]+\/location$/.test(path)) return;
       const actor = actors.get(response);
       process.stdout.write(`${request.method ?? "UNKNOWN"} ${path} ${response.statusCode} ${Date.now() - started}${actor ? ` ${actor}` : ""}\n`);

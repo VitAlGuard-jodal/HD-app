@@ -33,8 +33,8 @@ void main() {
         try {
           await _mount(tester, services, car: car, phoneWidth: 360);
           const labels = [
-            ['항목', '목적', '보유', '제공', '거부'],
-            ['항목', '제공', '보유', '거부'],
+            ['항목', '목적', '보유', '제공', '경로', '거부'],
+            ['항목', '제공', '경로', '제공처 보유', '보유', '거부'],
           ];
           for (var document = 0; document < labels.length; document++) {
             expect(
@@ -73,7 +73,7 @@ void main() {
   for (final location in [false, true]) {
     for (final serverFails in [false, true]) {
       testWidgets(
-        '동의는 PUT 1회로 개인정보 3·위치 ${location ? "3" : "생략"}을 보내고 ${serverFails ? "서버 500이면 재시도하고 " : ""}성공 후에만 onAccepted를 호출한다',
+        '동의는 PUT 1회로 개인정보 4·위치 ${location ? "4" : "생략"}을 보내고 ${serverFails ? "서버 500이면 재시도하고 " : ""}성공 후에만 onAccepted를 호출한다',
         (tester) async {
           final services = await ConsentTestServices.create(tester);
           services.api.http.status = serverFails ? 500 : 200;
@@ -88,8 +88,8 @@ void main() {
             expect(requests.single.method, 'PUT');
             expect(requests.single.uri.path, '/v1/me/consent');
             expect(jsonDecode(utf8.decode(requests.single.body)), {
-              'privacy': {'version': '3'},
-              if (location) 'location': {'version': '3'},
+              'privacy': {'version': '4'},
+              if (location) 'location': {'version': '4'},
             });
             expect(accepted, serverFails ? 0 : 1);
             expect(hasPrivacyConsent(services.store.consent), !serverFails);

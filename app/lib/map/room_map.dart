@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../net/models.dart';
+import '../location/follow_route_controller.dart';
 import '../net/api_client.dart';
 import 'map_provider.dart';
 import 'map_tiles.dart';
@@ -48,9 +49,15 @@ class RoomMap extends StatefulWidget {
     this.onFullscreen,
     this.onStopSharing,
     this.api,
+    this.guidance,
+    this.onModeChanged,
+    this.onResetGuidance,
   });
   final RoomMapController controller;
   final ApiClient? api;
+  final FollowRouteView? guidance;
+  final ValueChanged<FollowMode>? onModeChanged;
+  final VoidCallback? onResetGuidance;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
   final String? targetHandle, selfHandle;
@@ -77,6 +84,7 @@ class _RoomMapState extends State<RoomMap> {
       switch (widget.provider) {
         MapProvider.naver => NaverRoomMap(
           api: widget.api,
+          guidance: widget.guidance,
           controller: widget.controller as NaverRoomMapController,
           positions: widget.positions,
           trail: widget.trail,
@@ -91,6 +99,7 @@ class _RoomMapState extends State<RoomMap> {
         ),
         MapProvider.vworld => VworldRoomMap(
           api: widget.api,
+          guidance: widget.guidance,
           controller: widget.controller,
           positions: widget.positions,
           trail: widget.trail,
@@ -105,6 +114,15 @@ class _RoomMapState extends State<RoomMap> {
         ),
       },
       RoomMapControls(
+        mode: widget.guidance?.mode,
+        guidanceLabel: switch (widget.guidance) {
+          final guidance? =>
+            '${guidance.mode == FollowMode.a ? '따라가기' : '합류 후 따라가기'} · ${guidance.status}\n'
+                '${guidance.condition == FollowRouteCondition.disabled ? '추천 경로 제공 비활성' : '안내 시작·재계산 시 네이버 Maps에 좌표 제공'}',
+          null => null,
+        },
+        onModeChanged: widget.onModeChanged,
+        onResetGuidance: widget.onResetGuidance,
         car: widget.car,
         fullscreen: widget.fullscreen,
         headingAligned: _headingAligned,
