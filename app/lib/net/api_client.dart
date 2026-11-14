@@ -404,13 +404,17 @@ class ApiClient {
         }),
       );
 
-  Future<bool> sendLocation(String code, LocationFix fix) async =>
-      (await _response(
-            'POST',
-            '/v1/rooms/${_segment(code)}/location',
-            fix.toJson(),
-          ))['dropped']
-          as bool;
+  Future<bool> sendLocation(String code, LocationFix fix) async {
+    final result = await _requestOnce(
+      'POST',
+      '/v1/rooms/${_segment(code)}/location',
+      fix.toJson(),
+      deadline: const Duration(seconds: 5),
+    );
+    if (result == null)
+      throw const ApiException(0, 'empty_response', '서버 응답이 비어 있습니다.');
+    return result['dropped'] as bool;
+  }
 
   Future<LocationSnapshot> positions(String code) async =>
       LocationSnapshot.fromJson(
@@ -606,60 +610,121 @@ class ApiClient {
   Future<JsonMap?> _requestOnce(
     String method,
     String path,
-    JsonMap? body,
-  ) async {
-    final request = await _openShared(method, path);
-    try {
-      if (body != null) {
-        request.headers.set(
-          HttpHeaders.contentTypeHeader,
-          'application/json; charset=utf-8',
-        );
-        request.add(utf8.encode(jsonEncode(body)));
+    JsonMap? body, {
+    Duration? deadline,
+  }) async {
+    HttpClientRequest? active;
+    StreamSubscription<String>? reading;
+    var timedOut = false;
+    final expired = Completer<JsonMap?>();
+    final timer = deadline == null
+        ? null
+        : Timer(deadline, () {
+            timedOut = true;
+            active?.abort(_timeoutError);
+            expired.completeError(_timeoutError);
+          });
+    Future<JsonMap?> read() async {
+      final request = await _openShared(
+        method,
+        path,
+        timeout: deadline ?? _timeout,
+      );
+      active = request;
+      if (timedOut) {
+        request.abort(_timeoutError);
+        throw _timeoutError;
       }
-    } catch (error, stack) {
-      request.abort(error, stack);
-      rethrow;
+      try {
+        if (body != null) {
+          request.headers.set(
+            HttpHeaders.contentTypeHeader,
+            'application/json; charset=utf-8',
+          );
+          request.add(utf8.encode(jsonEncode(body)));
+        }
+      } catch (error, stack) {
+        request.abort(error, stack);
+        rethrow;
+      }
+      final response = await _closeRequest(
+        request,
+        timeout: deadline ?? _timeout,
+      );
+      if (timedOut) {
+        unawaited(response.listen(null).cancel());
+        throw _timeoutError;
+      }
+      final String text;
+      if (deadline == null) {
+        text = await response
+            .timeout(_timeout, onTimeout: _onStreamTimeout)
+            .transform(utf8.decoder)
+            .join();
+      } else {
+        // One deadline covers open, headers and the entire response body.
+        // Cancel this response only; keep the shared pool and SSE alive.
+        final completed = Completer<String>();
+        final buffer = StringBuffer();
+        reading = response
+            .transform(utf8.decoder)
+            .listen(
+              buffer.write,
+              onError: completed.completeError,
+              onDone: () => completed.complete(buffer.toString()),
+            );
+        text = await completed.future;
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300)
+        throw await _responseError(response, text);
+      if (response.statusCode == 204 || text.trim().isEmpty) return null;
+      try {
+        final value = jsonDecode(text);
+        if (value is JsonMap) return value;
+      } on FormatException {
+        // 동일한 invalid_response 오류로 처리한다.
+      }
+      throw ApiException(
+        response.statusCode,
+        'invalid_response',
+        '서버 응답 형식을 확인해 주세요.',
+      );
     }
-    final response = await _closeRequest(request);
-    if (response.statusCode < 200 || response.statusCode >= 300)
-      throw await _responseError(response);
-    final text = await response
-        .timeout(_timeout, onTimeout: _onStreamTimeout)
-        .transform(utf8.decoder)
-        .join();
-    if (response.statusCode == 204 || text.trim().isEmpty) return null;
+
     try {
-      final value = jsonDecode(text);
-      if (value is JsonMap) return value;
-    } on FormatException {
-      // 동일한 invalid_response 오류로 처리한다.
+      return await (deadline == null
+          ? read()
+          : Future.any([read(), expired.future]));
+    } finally {
+      timer?.cancel();
+      unawaited(reading?.cancel());
     }
-    throw ApiException(
-      response.statusCode,
-      'invalid_response',
-      '서버 응답 형식을 확인해 주세요.',
-    );
   }
 
-  Future<HttpClientResponse> _closeRequest(HttpClientRequest request) =>
-      request.close().timeout(
-        _timeout,
-        onTimeout: () {
-          request.abort(_timeoutError);
-          throw _timeoutError;
-        },
-      );
+  Future<HttpClientResponse> _closeRequest(
+    HttpClientRequest request, {
+    Duration timeout = _timeout,
+  }) => request.close().timeout(
+    timeout,
+    onTimeout: () {
+      request.abort(_timeoutError);
+      throw _timeoutError;
+    },
+  );
 
   // SSE의 _open/클라이언트 수명은 유지하고 공유 풀의 요청만 개별 취소한다.
-  Future<HttpClientRequest> _openShared(String method, String path) async {
+  Future<HttpClientRequest> _openShared(
+    String method,
+    String path, {
+    Duration timeout = _timeout,
+  }) async {
     final base = ServerAddress.normalize(
       tokenStore.baseUrl,
       allowPrivateCleartext: allowPrivateCleartext,
     );
     final pending = _client.openUrl(method, Uri.parse('$base$path'));
     final request = await pending.timeout(
-      _timeout,
+      timeout,
       onTimeout: () {
         unawaited(
           pending.then<void>(
@@ -700,11 +765,16 @@ class ApiClient {
     return request;
   }
 
-  Future<ApiException> _responseError(HttpClientResponse response) async {
-    final text = await response
-        .timeout(_timeout, onTimeout: _onStreamTimeout)
-        .transform(utf8.decoder)
-        .join();
+  Future<ApiException> _responseError(
+    HttpClientResponse response, [
+    String? body,
+  ]) async {
+    final text =
+        body ??
+        await response
+            .timeout(_timeout, onTimeout: _onStreamTimeout)
+            .transform(utf8.decoder)
+            .join();
     JsonMap? json;
     try {
       final value = jsonDecode(text);

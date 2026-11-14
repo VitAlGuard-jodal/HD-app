@@ -19,6 +19,21 @@ function inputs(n: number): RecommendationInput[] {
   return Array.from({ length: n }, (_, i) => ({ handle: `car-${i}`, followRequestId: i ? `follow-${i}` : null,
     origin: { ...at(0), stream: "1".repeat(16), seq: 0, at: 0, receivedAt: 0, handle: `car-${i}`, acc: 3 } }));
 }
+test("R14.5 a failed forward clamp retains the verified common-corridor candidate", async () => {
+  const current = inputs(3);
+  current[1].origin = { ...current[1].origin, ...at(320) };
+  const routes = [road([at(0), at(2000)]), road([at(315), at(2000)]),
+    road([at(0), at(290), at(311, 21), at(329, 21), at(350), at(2000)])];
+  const original = inputs(3);
+  original[1].origin = { ...original[1].origin, ...at(300) };
+  const beforeClamp = await recommendCorridor(routes, original, at(2000));
+  assert.equal(beforeClamp.result, "candidate");
+  assert.ok(distance(beforeClamp.joinPoint, at(300)) < .01);
+  const result = await recommendCorridor(routes, current, at(2000));
+  assert.equal(result.result, "candidate");
+  assert.ok(distance(result.joinPoint, beforeClamp.joinPoint) < .01);
+  assert.deepEqual(result.arrivals, beforeClamp.arrivals);
+});
 test("R1 recommended J never trails a participant already on the common corridor", async () => {
   const current = inputs(3);
   current[1].origin = { ...current[1].origin, ...at(315) };

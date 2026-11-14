@@ -169,11 +169,19 @@ export async function recommendCorridor(routes: ProviderRoute[], inputs: Recomme
       const projected = match(lead, p, next.x - start.x, next.y - start.y, 25);
       if (projected) floor = Math.max(floor, projected.s);
     }
-    while (selectedSegment + 1 < vertices.length - 1 && vertices[selectedSegment + 1].s < floor) selectedSegment++;
-    const a = vertices[selectedSegment], b = vertices[selectedSegment + 1];
+    let shiftedSegment = candidate;
+    while (shiftedSegment + 1 < vertices.length - 1 && vertices[shiftedSegment + 1].s < floor) shiftedSegment++;
+    const a = vertices[shiftedSegment], b = vertices[shiftedSegment + 1];
     const t = (floor - a.s) / (b.s - a.s);
-    selected = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t,
+    const shifted = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t,
       x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, s: floor };
+    // A clamp can land in a tolerated gap between valid samples. Retain the
+    // verified candidate unless this exact point still belongs to every road.
+    if (valid[shiftedSegment] && !detourBarrier[shiftedSegment]
+      && prepared.slice(1).every((p) => match(p, shifted, b.x - a.x, b.y - a.y))) {
+      selected = shifted;
+      selectedSegment = shiftedSegment;
+    }
   }
   const nearDestination = selected !== null && lead.length - selected.s <= 100;
   if (nearDestination) selected = null;

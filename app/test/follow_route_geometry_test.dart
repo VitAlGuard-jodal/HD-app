@@ -61,7 +61,6 @@ void main() {
       for (final next in [
         testFix(10, seq: 2, src: 'vehicle', acc: null),
         testFix(10, seq: 1, at: routeEpoch, src: 'vehicle', acc: null),
-        testFix(10, seq: 1, at: routeEpoch + 10001, src: 'vehicle', acc: null),
         testFix(
           10,
           seq: 1,
@@ -81,6 +80,15 @@ void main() {
           isTrue,
         );
       }
+      final parkedGap = testFix(
+        10,
+        seq: 1,
+        at: routeEpoch + 10001,
+        src: 'vehicle',
+        acc: null,
+      );
+      expect(traceContinuous(start, parkedGap), isFalse);
+      expect(splitFollowTrace([start, parkedGap]), hasLength(1));
     },
   );
   test(

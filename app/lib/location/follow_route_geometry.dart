@@ -69,6 +69,22 @@ bool traceContinuous(LocationFix a, LocationFix b) {
               routeAccuracyAllowance(b)!;
 }
 
+/// Recorded geometry may survive an upload gap at the same place. This is not
+/// stop, movement, or passage evidence; those keep traceContinuous's 10 s rule.
+bool recordedTraceContinuous(LocationFix a, LocationFix b) {
+  if (traceContinuous(a, b)) return true;
+  final elapsed = b.at - a.at;
+  return a.handle == b.handle &&
+      a.stream == b.stream &&
+      b.seq == a.seq + 1 &&
+      routeQuality(a) &&
+      routeQuality(b) &&
+      elapsed > 0 &&
+      elapsed <= 120000 &&
+      routeDistance(RoutePoint.fromFix(a), RoutePoint.fromFix(b)) <=
+          routeAccuracyAllowance(a)! + routeAccuracyAllowance(b)!;
+}
+
 class RouteProjection {
   const RouteProjection(
     this.point,
@@ -108,14 +124,27 @@ GuidanceRouteProjection projectGuidanceRoute(
   FollowRouteResult route, {
   double progress = 0,
   required double advance,
+  double? fallbackAdvance,
 }) {
   final full = projectRoute(self, route.points);
-  final window = projectRoute(
+  var window = projectRoute(
     self,
     route.points,
     minimum: progress,
     maximum: progress + advance,
   );
+  // Preserve a local visit (including an ambiguous one). A moving car may
+  // search the input's reachable range only after leaving that local window.
+  if (fallbackAdvance != null &&
+      window?.ambiguous != true &&
+      (window == null || window.distance > 60.000001)) {
+    window = projectRoute(
+      self,
+      route.points,
+      minimum: progress,
+      maximum: progress + fallbackAdvance,
+    );
+  }
   final distance = route.atAnchor
       ? routeDistance(self, route.anchor)
       : full?.distance ?? double.infinity;
@@ -129,6 +158,68 @@ GuidanceRouteProjection projectGuidanceRoute(
     usable ? math.max(progress, window?.along ?? 0) : progress,
     usable,
   );
+}
+
+/// Evidence for skipping a loop on an already accepted connector. This moves
+/// its progress only; waypoint passage and trace joining still need their own
+/// evidence. Competing visits to the road cannot establish this move.
+class ForwardRouteEvidence {
+  FollowRouteResult? _route;
+  LocationFix? _first, _last;
+  double? _firstAlong, _lastAlong;
+  int _count = 0;
+
+  void reset() {
+    _route = null;
+    _first = _last = null;
+    _firstAlong = _lastAlong = null;
+    _count = 0;
+  }
+
+  RouteProjection? observe(
+    FollowRouteResult route,
+    LocationFix fix,
+    GuidanceRouteProjection projection, {
+    required double maximum,
+    required bool moving,
+    required double? direction,
+  }) {
+    final p = projection.full;
+    if (route.atAnchor ||
+        !moving ||
+        direction == null ||
+        p == null ||
+        p.ambiguous ||
+        projection.ambiguous ||
+        p.distance > 25.000001 ||
+        p.along <= maximum ||
+        routeDirectionDifference(direction, p.bearing) > 60.000001) {
+      reset();
+      return null;
+    }
+    if (identical(_route, route) &&
+        _last != null &&
+        SampleRef.of(_last!) == SampleRef.of(fix))
+      return null;
+    if (!identical(_route, route) ||
+        _last != null &&
+            (!traceContinuous(_last!, fix) ||
+                p.along < _lastAlong! ||
+                p.along - _lastAlong! >
+                    routeReachableAdvance(fix.at - _last!.at))) {
+      reset();
+    }
+    _route = route;
+    _first ??= fix;
+    _firstAlong ??= p.along;
+    _last = fix;
+    _lastAlong = p.along;
+    _count++;
+    if (_count < 3 || fix.at - _first!.at < 2000 || p.along - _firstAlong! < 10)
+      return null;
+    reset();
+    return p;
+  }
 }
 
 /// Coordinates are geometry, never fabricated location samples/sequence IDs.
@@ -193,15 +284,71 @@ RouteProjection? projectRoute(
 double routeLength(List<RoutePoint> points) {
   var length = 0.0;
   for (var i = 1; i < points.length; i++) {
-    length += routeDistance(points[i - 1], points[i]);
+    final segment = routeDistance(points[i - 1], points[i]);
+    // Match projectRoute's along coordinate, including its tiny-segment guard.
+    if (segment >= .01) length += segment;
   }
   return length;
+}
+
+/// Same rule as server/src/trace_rejoin.ts. Use the actual trace projection,
+/// never a clamped end of the search window or a fabricated location sample.
+RouteProjection? projectTraceRejoinEndpoint(
+  RoutePoint endpoint,
+  List<RoutePoint> connector,
+  TracePath trace,
+  RouteAnchor requested,
+) {
+  final index = trace.fixes.indexWhere(
+    (f) => SampleRef.of(f) == requested.start,
+  );
+  if (requested.end == null ||
+      index < 0 ||
+      index + 1 >= trace.fixes.length ||
+      SampleRef.of(trace.fixes[index + 1]) != requested.end ||
+      connector.length < 2)
+    return null;
+  var minimum = routeLength(trace.points.sublist(0, index + 1));
+  final length = routeDistance(trace.points[index], trace.points[index + 1]);
+  if (length >= .01) minimum += length * requested.fraction;
+  final end = connector.last;
+  RoutePoint? before;
+  for (var i = connector.length - 2; i >= 0; i--) {
+    if (routeDistance(connector[i], end) >= 2.999999) {
+      before = connector[i];
+      break;
+    }
+  }
+  final p = projectRoute(endpoint, trace.points);
+  final requestedPoint = interpolateRoute(
+    trace.points[index],
+    trace.points[index + 1],
+    requested.fraction,
+  );
+  final angle = before == null || p == null
+      ? 180.0
+      : routeDirectionDifference(routeBearing(before, end), p.bearing);
+  final wrongDirection = routeDistance(endpoint, requestedPoint) <= 25.000001
+      ? angle >= 119.999999
+      : angle > 60.000001;
+  if (before == null ||
+      p == null ||
+      p.ambiguous ||
+      p.distance > 25.000001 ||
+      p.along < minimum - .000001 ||
+      p.along > minimum + traceRejoinForwardMeters + .000001 ||
+      wrongDirection)
+    return null;
+  return p;
 }
 
 /// A manual J may have snapped to the opposite carriageway. This is a warning
 /// heuristic, not a claim of road connectivity or proof that J was passed.
 bool hasOppositeJoinReturn(FollowRouteResult route) {
   if (route.atAnchor) return false;
+  // Starting beside J while facing away can legitimately require a U-turn;
+  // proximity at departure is not an earlier drive past the opposite lane.
+  if (routeDistance(route.origin, route.anchor) <= 25.000001) return false;
   final length = routeLength(route.points);
   if (length <= 2 * routeDistance(route.origin, route.anchor) + 300)
     return false;
@@ -310,7 +457,7 @@ List<TracePath> splitFollowTrace(List<LocationFix> fixes) {
   var current = <LocationFix>[];
   for (final fix in fixes) {
     if (!routeQuality(fix) ||
-        current.isNotEmpty && !traceContinuous(current.last, fix)) {
+        current.isNotEmpty && !recordedTraceContinuous(current.last, fix)) {
       if (current.isNotEmpty) paths.add(TracePath(current));
       current = [];
     }

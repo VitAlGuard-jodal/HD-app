@@ -34,7 +34,8 @@ enum FollowRouteCondition {
 FollowRouteCondition holdRouteDeparture(
   FollowRouteCondition condition, {
   bool ambiguous = false,
-}) => condition == FollowRouteCondition.offRoute
+  bool departed = false,
+}) => condition == FollowRouteCondition.offRoute && !departed
     ? ambiguous
           ? FollowRouteCondition.ambiguousRoute
           : FollowRouteCondition.routeMismatch
@@ -103,6 +104,7 @@ class FollowGuidance {
   SampleRef? originRef;
   FollowRouteResult? route;
   int generation = 0, joinRound = 0;
+  int? retrySeconds;
   double routeProgress = 0;
   bool anchorConfirmed = false, anchorReached = false;
   bool rejoining = false, aheadOfTrace = false;
@@ -200,13 +202,21 @@ class FollowGuidance {
           FollowRouteCondition.ambiguousRoute => '경로가 겹쳐 현재 위치 확인 중',
           FollowRouteCondition.routeMismatch => '현재 위치에서 경로를 확인 중입니다',
           FollowRouteCondition.traceBroken => '이어서 따라갈 이동 경로가 끊겼습니다',
-          FollowRouteCondition.noRoute => '추천 경로를 찾지 못했습니다',
+          FollowRouteCondition.noRoute =>
+            rejoining ? _rejoinFailureStatus : '추천 경로를 찾지 못했습니다',
           FollowRouteCondition.resetRequired => '정차 후 안내를 다시 설정해 주세요',
           FollowRouteCondition.consentRequired => '나와 앞차의 최신 위치 동의가 필요합니다',
           FollowRouteCondition.authorizationBlocked => '참여 권한 확인이 필요합니다',
           FollowRouteCondition.disabled => '추천 경로 기능을 사용할 수 없습니다',
-          FollowRouteCondition.retryWaiting => '추천 경로 다시 시도 대기',
+          FollowRouteCondition.retryWaiting =>
+            rejoining ? _rejoinFailureStatus : '추천 경로 다시 시도 대기',
         };
+
+  String get _rejoinFailureStatus => retrySeconds == null
+      ? '경로를 벗어났습니다 · 재합류 경로를 찾지 못했습니다'
+      : retrySeconds! > 0
+      ? '경로를 벗어났습니다 · 재합류 경로 재시도 대기 · ${retrySeconds}초'
+      : '경로를 벗어났습니다 · 이동 확인 후 재합류 경로를 다시 찾습니다';
 }
 
 class FollowRouteView {
@@ -286,6 +296,7 @@ class FollowRouteController extends ChangeNotifier {
   FollowRouteResult? _rejectedRoute;
   bool _rejectedAfterDeparture = false;
   num? _routeObservedAt;
+  final _forwardRoute = ForwardRouteEvidence();
   FollowRouteCondition? _beforeHold;
   String? _calculation;
   int _generation = 0, _ids = 0, _retries = 0, _extraCandidates = 0;
@@ -332,6 +343,7 @@ class FollowRouteController extends ChangeNotifier {
       _paths = splitFollowTrace(input.trace);
     }
     _evaluate();
+    _syncRetryStatus();
     if (kDebugMode) _logDiagnostic();
     notifyListeners();
   }
@@ -385,6 +397,7 @@ class FollowRouteController extends ChangeNotifier {
     s.rejoining = s.aheadOfTrace = false;
     _rejoinFloor = null;
     _evaluate();
+    _syncRetryStatus();
     notifyListeners();
     return true;
   }
@@ -526,10 +539,10 @@ class FollowRouteController extends ChangeNotifier {
                     routeAccuracyAllowance(previous)! +
                     routeAccuracyAllowance(fix)!) {
           _resetEvidence();
-          _offRoute = false;
+          if (!s.rejoining) _offRoute = false;
           _directionBase = fix;
           s.anchorReached = false;
-          s.condition = holdRouteDeparture(s.condition);
+          s.condition = holdRouteDeparture(s.condition, departed: s.rejoining);
           // Resume geometry after a gap, with no motion or join evidence.
           // Reordered refs and implausible jumps still cannot advance it.
           if (previous.stream == fix.stream &&
@@ -572,8 +585,8 @@ class FollowRouteController extends ChangeNotifier {
         // A stop/unknown movement breaks the continuous evidence. It must not
         // turn a parked car or GPS jitter into a delayed automatic request.
         _resetEvidence();
-        _offRoute = false;
-        s.condition = holdRouteDeparture(s.condition);
+        if (!s.rejoining) _offRoute = false;
+        s.condition = holdRouteDeparture(s.condition, departed: s.rejoining);
       }
       _judge(fix, moved, direction);
       if (_retryOnLocation &&
@@ -620,16 +633,46 @@ class FollowRouteController extends ChangeNotifier {
             ),
           );
     final judgingRoute = s.route ?? _rejectedRoute;
-    final connector = judgingRoute == null
+    final advance = s.route == null
+        ? math.max(120.0, moved + 50)
+        : routeReachableAdvance(fix.at - (_routeObservedAt ?? fix.at));
+    var connector = judgingRoute == null
         ? null
         : projectGuidanceRoute(
             RoutePoint.fromFix(fix),
             judgingRoute,
             progress: s.routeProgress,
-            advance: s.route == null
-                ? math.max(120, moved + 50)
-                : routeReachableAdvance(fix.at - (_routeObservedAt ?? fix.at)),
+            advance: advance,
+            fallbackAdvance:
+                s.route == null && !_rejectedAfterDeparture && moved > 0
+                ? routeReachableAdvance(_now() - _inputAt!)
+                : null,
           );
+    if (s.route != null &&
+        s.phase == FollowPhase.approaching &&
+        !s.rejoining &&
+        connector != null &&
+        projection?.ambiguous != true) {
+      final recovered = _forwardRoute.observe(
+        s.route!,
+        fix,
+        connector,
+        maximum: s.routeProgress + advance,
+        moving: _moving,
+        direction: direction,
+      );
+      if (recovered != null) {
+        connector = GuidanceRouteProjection(
+          connector.full,
+          recovered,
+          connector.distance,
+          recovered.along,
+          true,
+        );
+      }
+    } else {
+      _forwardRoute.reset();
+    }
     _routeObservedAt = fix.at;
     final connectorProjection = connector?.window;
     if (connector != null) s.routeProgress = connector.progress;
@@ -648,10 +691,14 @@ class FollowRouteController extends ChangeNotifier {
     if (projection?.ambiguous == true ||
         connectorProjection?.ambiguous == true) {
       _resetEvidence();
-      _offRoute = false;
+      if (!s.rejoining) _offRoute = false;
       _moving = false;
       s.anchorReached = false;
-      s.condition = holdRouteDeparture(s.condition, ambiguous: true);
+      s.condition = holdRouteDeparture(
+        s.condition,
+        ambiguous: true,
+        departed: s.rejoining,
+      );
       return;
     }
     final traceDistance = projection?.distance ?? double.infinity;
@@ -838,7 +885,7 @@ class FollowRouteController extends ChangeNotifier {
     _beforeHold ??= s.condition;
     s.condition = condition;
     _resetEvidence();
-    _offRoute = false;
+    if (!s.rejoining) _offRoute = false;
     _lastSelf = null;
     _directionBase = null;
     _moving = false;
@@ -1106,21 +1153,41 @@ class FollowRouteController extends ChangeNotifier {
     }
     if (!_disposed &&
         _state?.identity == input.identity &&
-        identical(_request, request))
+        identical(_request, request)) {
+      _syncRetryStatus();
       notifyListeners();
+    }
+  }
+
+  void _syncRetryStatus() {
+    _state?.retrySeconds = _nextAttempt == null
+        ? null
+        : math.max(0, ((_nextAttempt! - _now()) / 1000).ceil());
+  }
+
+  RouteProjection? _rejoinEndpoint(FollowRouteResult result, RoutePoint point) {
+    final path = _recoveryPath(), anchor = _state!.anchor;
+    if (path == null || anchor == null) return null;
+    return projectTraceRejoinEndpoint(point, result.points, path, anchor);
   }
 
   void _applyResult(FollowRouteResult result) {
     final s = _state!;
+    final endMatches =
+        result.atAnchor ||
+        (s.rejoining
+            ? _rejoinEndpoint(result, result.points.last) != null &&
+                  _rejoinEndpoint(result, result.actualEnd!) != null
+            : routeDistance(result.points.last, result.anchor) <= 25.000001 &&
+                  routeDistance(result.actualEnd!, result.anchor) <= 25.000001);
     if (routeDistance(result.origin, s.originPoint!) > 1 ||
         routeDistance(result.anchor, s.anchorPoint!) > 1 ||
         result.atAnchor &&
             routeDistance(result.origin, result.anchor) > 25.000001 ||
         !result.atAnchor &&
             (routeDistance(result.points.first, result.origin) > 25.000001 ||
-                routeDistance(result.points.last, result.anchor) > 25.000001 ||
                 routeDistance(result.actualStart!, result.origin) > 25.000001 ||
-                routeDistance(result.actualEnd!, result.anchor) > 25.000001)) {
+                !endMatches)) {
       _failed(const FollowRouteException('ENDPOINT_MISMATCH'));
       return;
     }
@@ -1148,6 +1215,21 @@ class FollowRouteController extends ChangeNotifier {
 
   void _acceptResult(FollowRouteResult result, RouteProjection? projection) {
     final s = _state!;
+    if (s.rejoining && !result.atAnchor) {
+      final endpoint = _rejoinEndpoint(result, result.points.last);
+      final path = _recoveryPath();
+      if (endpoint == null || path == null) {
+        _failed(const FollowRouteException('ENDPOINT_MISMATCH'));
+        return;
+      }
+      s.anchor = RouteAnchor.segment(
+        SampleRef.of(path.fixes[endpoint.index]),
+        SampleRef.of(path.fixes[endpoint.index + 1]),
+        endpoint.fraction,
+      );
+      s.anchorPoint = endpoint.point;
+      s.anchorAt = path.fixes[endpoint.index].at;
+    }
     s.route = result;
     _rejectedRoute = null;
     _rejectedAfterDeparture = false;
@@ -1267,6 +1349,7 @@ class FollowRouteController extends ChangeNotifier {
   }
 
   void _resetEvidence() {
+    _forwardRoute.reset();
     _resetJoin();
     _offSince = null;
     _offSamples = 0;

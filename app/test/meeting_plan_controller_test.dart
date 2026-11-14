@@ -282,7 +282,7 @@ void main() {
   );
 
   test(
-    'r12 stopping after confirmed departure clears the off-route message',
+    'r14 stopping after confirmed departure preserves the off-route message',
     () async {
       final f = MeetingFixture();
       addTearDown(f.dispose);
@@ -294,9 +294,9 @@ void main() {
       expect(f.controller.status, '경로를 벗어났습니다');
       for (var n = 0; n < 35; n++) {
         f.drive(28, y: 80, speed: 0);
-        expect(f.controller.status, isNot(contains('벗어났습니다')));
+        expect(f.controller.view!.condition, FollowRouteCondition.offRoute);
       }
-      expect(f.controller.status, contains('현재 위치에서 경로를 확인'));
+      expect(f.controller.status, '경로를 벗어났습니다');
       expect(f.routes, hasLength(1));
       for (var n = 1; n <= 6; n++) f.drive(28.0 + n * 3, y: 80, speed: 3);
       expect(f.routes, hasLength(2));

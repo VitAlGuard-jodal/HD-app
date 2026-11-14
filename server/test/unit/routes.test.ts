@@ -93,7 +93,9 @@ test("vehicle B continuity uses 25 m only for missing accuracy and still rejects
     { meters: 98, acc: 2, allowed: false },
     { meters: 10, acc: undefined, seq: 3, allowed: false },
     { meters: 10, acc: undefined, stream: selfStream, allowed: false },
-    { meters: 10, acc: undefined, gap: 10001, allowed: false },
+    { meters: 10, acc: undefined, gap: 10001, allowed: true },
+    { meters: 51, acc: undefined, gap: 20000, allowed: false },
+    { meters: 10, acc: undefined, gap: 120001, allowed: false },
   ]) {
     const f = serviceFixture(t);
     f.elapse(1000);
@@ -459,7 +461,7 @@ test("S9 inputs expire at 120 seconds and cannot reconstruct missing trace", asy
   const g = serviceFixture(t);
   g.setProvider(async () => { throw new RouteError("PROVIDER_UNAVAILABLE", 30_000); });
   const old = g.request(); await assert.rejects(g.run(old), error("PROVIDER_UNAVAILABLE"));
-  g.elapse(11_000); g.publish("leader"); g.publish("follower");
+  g.elapse(11_000); g.publish("leader", { lat: destination.lat + .001 }); g.publish("follower");
   await assert.rejects(g.run({ ...old, requestId: "broken" }), error("TRACE_DISCONTINUITY"));
   assert.equal(g.calls.length, 1);
 });

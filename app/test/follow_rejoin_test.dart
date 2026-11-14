@@ -65,13 +65,11 @@ void main() {
       expect(f.departures, hasLength(1));
       for (var n = 0; n < 30; n++) {
         f.drive(45, y: 80, speed: 0);
-        expect(f.state.status, isNot(contains('벗어났습니다')));
+        expect(f.state.condition, FollowRouteCondition.offRoute);
       }
       f.update();
       expect(f.calls, hasLength(1));
-      for (var n = 0; n < 5; n++) f.drive(48.0 + n * 3, y: 80);
-      expect(f.calls, hasLength(1));
-      f.drive(63, y: 80);
+      f.drive(48, y: 80);
       expect(f.calls, hasLength(2));
       expect(f.departures, hasLength(1));
     },

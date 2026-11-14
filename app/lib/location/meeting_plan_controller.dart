@@ -124,6 +124,7 @@ class MeetingPlanController extends ChangeNotifier {
   int _retries = 0, _offSamples = 0;
   double _routeProgress = 0;
   num? _routeObservedAt;
+  final _forwardRoute = ForwardRouteEvidence();
   final _routeProjections = <SampleRef, RouteProjection>{};
   final _recoveries = <int>[];
   SampleRef? _judgedRef;
@@ -293,6 +294,7 @@ class MeetingPlanController extends ChangeNotifier {
         (_samples.isEmpty ||
             SampleRef.of(_samples.last) != SampleRef.of(self))) {
       if (_samples.isNotEmpty && !traceContinuous(_samples.last, self)) {
+        _forwardRoute.reset();
         _samples.clear();
         _sampleReceipts.clear();
       }
@@ -308,6 +310,7 @@ class MeetingPlanController extends ChangeNotifier {
       }
     }
     if (!_freshSelf) {
+      _forwardRoute.reset();
       _samples.clear();
       _sampleReceipts.clear();
     }
@@ -1241,14 +1244,19 @@ class MeetingPlanController extends ChangeNotifier {
     _route = result;
     _rejectedRoute = null;
     _rejectedAfterDeparture = false;
-    _routeProgress = math.max(_routeProgress, projection?.along ?? 0);
+    // Progress and cached projections belong to this geometry, not the road
+    // retained for departure judgement while this result was in flight.
+    _routeProgress = projection?.along ?? 0;
+    _routeProjections.clear();
     _routeObservedAt = _input!.self!.at;
     if (projection != null) _rememberRouteProjection(_input!.self!, projection);
     if (routeKind == PlanRouteKind.planJoin) {
       _approachRoute = result;
       _approachIdentity = _activeIdentity;
     }
-    _condition = FollowRouteCondition.ready;
+    _condition = result.atAnchor
+        ? FollowRouteCondition.atAnchorWaitingTrace
+        : FollowRouteCondition.ready;
   }
 
   void _scheduleRoute(int delay) {
@@ -1281,21 +1289,61 @@ class MeetingPlanController extends ChangeNotifier {
     final moved = previous == null
         ? 0.0
         : routeDistance(RoutePoint.fromFix(previous), RoutePoint.fromFix(fix));
-    final judgement = projectGuidanceRoute(
+    final moving =
+        previous != null &&
+        (fix.speed != null
+            ? fix.speed!.isFinite && fix.speed! >= 2
+            : moved / ((fix.at - previous.at) / 1000) >= 2);
+    final advance = _route == null
+        ? math.max(120.0, moved + 50)
+        : routeReachableAdvance(fix.at - (_routeObservedAt ?? fix.at));
+    var judgement = projectGuidanceRoute(
       RoutePoint.fromFix(fix),
       result,
       progress: _routeProgress,
-      advance: _route == null
-          ? math.max(120, moved + 50)
-          : routeReachableAdvance(fix.at - (_routeObservedAt ?? fix.at)),
+      advance: advance,
+      fallbackAdvance: _route == null && !_rejectedAfterDeparture && moved > 0
+          ? routeReachableAdvance(_now() - _routeInputAt!)
+          : null,
     );
+    if (_route != null && routeKind == PlanRouteKind.planJoin) {
+      final recovered = _forwardRoute.observe(
+        result,
+        fix,
+        judgement,
+        maximum: _routeProgress + advance,
+        moving: moving,
+        direction: previous == null || moved == 0
+            ? null
+            : routeBearing(
+                RoutePoint.fromFix(previous),
+                RoutePoint.fromFix(fix),
+              ),
+      );
+      if (recovered != null) {
+        _routeProjections.clear();
+        judgement = GuidanceRouteProjection(
+          judgement.full,
+          recovered,
+          judgement.distance,
+          recovered.along,
+          true,
+        );
+      }
+    } else {
+      _forwardRoute.reset();
+    }
     _routeObservedAt = fix.at;
     final p = judgement.window;
     if (p?.ambiguous == true) {
       _offSince = null;
       _offSamples = 0;
       _routeProjections.clear();
-      _condition = holdRouteDeparture(_condition, ambiguous: true);
+      _condition = holdRouteDeparture(
+        _condition,
+        ambiguous: true,
+        departed: _rejectedAfterDeparture,
+      );
       return;
     }
     if (p != null) _rememberRouteProjection(fix, p);
@@ -1308,13 +1356,13 @@ class MeetingPlanController extends ChangeNotifier {
         )) {
       _acceptRoute(result, p);
     }
-    final moving =
-        previous != null &&
-        (fix.speed != null
-            ? fix.speed!.isFinite && fix.speed! >= 2
-            : moved / ((fix.at - previous.at) / 1000) >= 2);
     _routeProgress = judgement.progress;
-    if (!moving) _condition = holdRouteDeparture(_condition);
+    if (!moving) {
+      _condition = holdRouteDeparture(
+        _condition,
+        departed: _rejectedAfterDeparture,
+      );
+    }
     if (moving && distance > 60.000001) {
       _offSince ??= _now();
       _offSamples++;
@@ -1361,7 +1409,38 @@ class MeetingPlanController extends ChangeNotifier {
   void _maybePass(FollowRouteResult route) {
     if (_passPending || _now() - _lastPassAt < 1000 || _samples.length < 3)
       return;
-    final samples = _samples.sublist(_samples.length - 3);
+    var samples = _samples.sublist(_samples.length - 3);
+    if (route.atAnchor && routeKind == PlanRouteKind.planJoin) {
+      // atAnchor records a start near J, not a pass. Keep a continuous moving
+      // run from that radius so slow departures can still prove 10 m. The
+      // server reconstructs all fixes between these three original refs.
+      final last = _samples.last;
+      if (routeDistance(RoutePoint.fromFix(last), route.anchor) <= 25) return;
+      var first = _samples.length - 1;
+      while (first > 0) {
+        final a = _samples[first - 1], b = _samples[first];
+        if (!traceContinuous(a, b) || last.at - a.at > 10000) break;
+        final moved = routeDistance(
+          RoutePoint.fromFix(a),
+          RoutePoint.fromFix(b),
+        );
+        final moving = b.speed != null
+            ? b.speed!.isFinite && b.speed! >= 2
+            : moved / ((b.at - a.at) / 1000) >= 2;
+        if (!moving || moved < 1) break;
+        first--;
+      }
+      if (_samples.length - first < 3 ||
+          routeDistance(RoutePoint.fromFix(_samples[first]), route.anchor) >
+              25 ||
+          routeDistance(
+                RoutePoint.fromFix(_samples[first]),
+                RoutePoint.fromFix(last),
+              ) <
+              10)
+        return;
+      samples = [_samples[first], _samples[_samples.length - 2], last];
+    }
     if (samples.last.at - samples.first.at < 2000) return;
     final points = samples.map(RoutePoint.fromFix).toList();
     final crossing = projectRoute(route.anchor, points);
@@ -1513,6 +1592,7 @@ class MeetingPlanController extends ChangeNotifier {
   }
 
   void _cancelRoute() {
+    _forwardRoute.reset();
     _etaReport?.cancel();
     _etaReport = null;
     _reportedRoute = null;
@@ -1566,6 +1646,8 @@ class MeetingPlanController extends ChangeNotifier {
       FollowRouteCondition.disabled => '추천 경로 기능을 사용할 수 없습니다',
       FollowRouteCondition.authorizationBlocked => '합류 계획 참여 권한 확인이 필요합니다',
       FollowRouteCondition.locationDelayed => '위치 갱신 대기',
+      FollowRouteCondition.atAnchorWaitingTrace =>
+        routeKind == PlanRouteKind.planJoin ? '합류 지점 근처' : '목적지 근처',
       FollowRouteCondition.offRoute => '경로를 벗어났습니다',
       FollowRouteCondition.ambiguousRoute => '경로가 겹쳐 현재 위치 확인 중',
       FollowRouteCondition.routeMismatch => '현재 위치에서 경로를 확인 중입니다',

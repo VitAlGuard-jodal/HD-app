@@ -29,6 +29,15 @@ export function continuous(a: LocationFix, b: LocationFix): boolean {
     && elapsed > 0 && elapsed <= ROUTE_LOCATION_AGE_MS && b.receivedAt >= a.receivedAt
     && distance(a, b) <= 70 * elapsed / 1000 + accuracyAllowance(a)! + accuracyAllowance(b)!;
 }
+// Recorded geometry only. Stop/movement/pass evidence keeps continuous().
+export function recordedTraceContinuous(a: LocationFix, b: LocationFix): boolean {
+  if (continuous(a, b)) return true;
+  const elapsed = b.at - a.at;
+  return a.handle === b.handle && a.stream === b.stream && b.seq === a.seq + 1
+    && quality(a) && quality(b) && b.receivedAt >= a.receivedAt
+    && elapsed > 0 && elapsed <= 120_000
+    && distance(a, b) <= accuracyAllowance(a)! + accuracyAllowance(b)!;
+}
 export function context(samples: LocationFix[], now: number): boolean {
   return samples.length >= 3 && samples.at(-1)!.at - samples[0].at >= 2000
     && samples.at(-1)!.receivedAt - samples[0].receivedAt >= 2000

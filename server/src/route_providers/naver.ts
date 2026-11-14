@@ -1,11 +1,14 @@
 import { distance, finite, point, record, RouteError, ROUTE_ENDPOINT_GAP_METERS,
   ROUTE_INTERVAL_MS, ROUTE_POINT_LIMIT, ROUTE_RESPONSE_LIMIT } from "../route_contract.ts";
 import type { Point, ProviderRoute } from "../route_contract.ts";
+import { projectTraceRejoinEndpoint, REJOIN_POINT_GAP_METERS } from "../trace_rejoin.ts";
+import type { TraceRejoinEndpoint } from "../trace_rejoin.ts";
 
 export interface NaverConfig { provider: "naver"; keyId: string; key: string }
 export type RouteConfig = NaverConfig | { provider: "disabled" };
-export type RouteEndpoint = "reference" | "destination";
-// Only a user-selected D may end at a nearby road. J/P0/trace/origins stay at 25 m.
+export type RouteEndpoint = "reference" | "destination" | TraceRejoinEndpoint;
+// D keeps its road-end allowance. Trace rejoining uses a verified forward
+// trace segment; J/P0 and all origins keep the 25 m point rule.
 export const DESTINATION_ENDPOINT_GAP_METERS = 100;
 export type RouteProvider = (origin: Point, destination: Point, signal: AbortSignal, config: NaverConfig,
   endpoint?: RouteEndpoint) => Promise<ProviderRoute>;
@@ -29,7 +32,7 @@ function coordinate(value: unknown): Point {
   if (!point(result)) invalid();
   return result;
 }
-function atAnchor(origin: Point, destination: Point): ProviderRoute {
+export function atAnchor(origin: Point, destination: Point): ProviderRoute {
   if (distance(origin, destination) > ROUTE_ENDPOINT_GAP_METERS) throw new RouteError("NO_ROUTE");
   return { result: "atAnchor", provider: "naver", routeOption: "traoptimal", points: [], meters: 0, seconds: 0,
     actualStart: null, actualEnd: null, startGapMeters: null, endGapMeters: null };
@@ -37,7 +40,8 @@ function atAnchor(origin: Point, destination: Point): ProviderRoute {
 
 // Fixtures use invented coordinates, never saved product responses.
 export function parseNaverRoute(value: unknown, origin: Point, destination: Point, endpoint: RouteEndpoint = "reference"): ProviderRoute {
-  const endGapLimit = endpoint === "destination" ? DESTINATION_ENDPOINT_GAP_METERS : ROUTE_ENDPOINT_GAP_METERS;
+  const endGapLimit = typeof endpoint === "object" ? REJOIN_POINT_GAP_METERS
+    : endpoint === "destination" ? DESTINATION_ENDPOINT_GAP_METERS : ROUTE_ENDPOINT_GAP_METERS;
   if (!record(value) || !Number.isInteger(value.code)) invalid();
   if (value.code === 1) return atAnchor(origin, destination);
   if ([2, 3, 4, 5].includes(value.code as number)) throw new RouteError("NO_ROUTE");
@@ -78,6 +82,9 @@ export function parseNaverRoute(value: unknown, origin: Point, destination: Poin
   const startGapMeters = distance(origin, actualStart);
   const endGapMeters = distance(destination, actualEnd);
   if (startGapMeters > ROUTE_ENDPOINT_GAP_METERS || endGapMeters > endGapLimit) throw new RouteError("ENDPOINT_MISMATCH");
+  if (typeof endpoint === "object" && (!projectTraceRejoinEndpoint(actualEnd, points, endpoint)
+    || distance(destination, summaryEnd) > ROUTE_ENDPOINT_GAP_METERS
+      && !projectTraceRejoinEndpoint(summaryEnd, points, endpoint))) throw new RouteError("ENDPOINT_MISMATCH");
   return { result: "route", provider: "naver", routeOption: "traoptimal", points,
     meters: summary.distance, seconds: summary.duration / 1000,
     actualStart, actualEnd, startGapMeters, endGapMeters };

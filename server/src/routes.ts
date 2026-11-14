@@ -1,13 +1,14 @@
 import type { LocationInvalidation, RoomLocationStore } from "./locations.ts";
 import { canonicalJson, distance, parseAnyRouteRequest, RouteError, sameRef, ROUTE_INPUT_TTL_MS,
-  ROUTE_INTERVAL_MS, ROUTE_TIMEOUT_MS } from "./route_contract.ts";
+  ROUTE_INTERVAL_MS, ROUTE_TIMEOUT_MS, ROUTE_ENDPOINT_GAP_METERS } from "./route_contract.ts";
 import type { AnyRouteRequest, AnyRouteResponse, Point, RouteAnchor, RouteErrorCode } from "./route_contract.ts";
-import { fresh, quality, continuous } from "./location_quality.ts";
+import { fresh, quality, recordedTraceContinuous } from "./location_quality.ts";
 import { CallBudget, DEFAULT_ROUTE_LIMITS } from "./call_budget.ts";
 import type { Reservation } from "./call_budget.ts";
 import type { FollowPlanService } from "./follow_plans.ts";
-import { naverProvider, routeConfig } from "./route_providers/naver.ts";
-import type { RouteConfig, RouteProvider } from "./route_providers/naver.ts";
+import { atAnchor, naverProvider, routeConfig } from "./route_providers/naver.ts";
+import type { RouteConfig, RouteProvider, RouteEndpoint } from "./route_providers/naver.ts";
+import { projectTraceRejoinEndpoint } from "./trace_rejoin.ts";
 
 export { parseRouteRequest, RouteError } from "./route_contract.ts";
 export type { FollowRouteRequest } from "./route_contract.ts";
@@ -169,7 +170,7 @@ export class FollowRouteService {
       throw new RouteError("TRACE_DISCONTINUITY");
     }
     for (let i = index + 1; i < trail.length; i++) {
-      if (!continuous(trail[i - 1], trail[i])) throw new RouteError("TRACE_DISCONTINUITY");
+      if (!recordedTraceContinuous(trail[i - 1], trail[i])) throw new RouteError("TRACE_DISCONTINUITY");
     }
     const current = this.#locations.position(code, target);
     if (!current || !sameRef(trail.at(-1)!, current)) throw new RouteError("TRACE_DISCONTINUITY");
@@ -206,11 +207,32 @@ export class FollowRouteService {
     return input;
   }
 
-  #reserve(input: Input): Reservation {
+  #reserve(input: Input): Reservation | null {
     if (this.#active.has(input.requester)) throw new RouteError("ROUTE_IN_PROGRESS");
     if (input.done) throw input.lastError ? new RouteError(input.lastError.code, null, false) : new RouteError("CONTEXT_MISMATCH");
     if (input.retryAt > this.#clock()) throw new RouteError("RATE_LIMITED", Math.ceil(input.retryAt - this.#clock()));
-    return this.#budget.reserve([input.requester]);
+    // A local near-goal result is not a provider call. Existing real-call
+    // cooldowns stay intact for the next request that actually needs routing.
+    return distance(input.origin, input.anchor) <= ROUTE_ENDPOINT_GAP_METERS
+      ? null : this.#budget.reserve([input.requester]);
+  }
+
+  #endpoint(input: Input): RouteEndpoint {
+    const request = input.request;
+    const rejoining = request.schemaVersion === 1 ? request.mode === "B" : request.routeKind === "traceRejoin";
+    if (!rejoining || request.anchor.kind !== "segment") {
+      return request.schemaVersion === 2 && request.routeKind === "planDestination" ? "destination" : "reference";
+    }
+    const anchor = request.anchor;
+    const trail = this.#locations.trail(input.code, input.target);
+    const index = trail.findIndex((s) => sameRef(s, anchor.startRef));
+    if (index < 0 || !trail[index + 1] || !sameRef(trail[index + 1], anchor.endRef)) throw new RouteError("TRACE_DISCONTINUITY");
+    let minimum = 0;
+    for (let i = 0; i <= index; i++) {
+      const length = distance(trail[i], trail[i + 1]);
+      if (length >= .01) minimum += length * (i === index ? anchor.fraction : 1);
+    }
+    return { kind: "traceRejoin", points: trail.map(coordinates), minimum, anchor: { ...input.anchor } };
   }
 
   async calculate(code: string, requester: string, raw: unknown, authorize: () => string, signal?: AbortSignal): Promise<AnyRouteResponse> {
@@ -237,16 +259,26 @@ export class FollowRouteService {
       // The transport keeps the account slot until its cancellation settles.
       const transport = (async () => {
         controller.signal.throwIfAborted();
-        reservation.start(requester); input!.attempts++;
+        input!.attempts++;
+        if (reservation === null) {
+          return atAnchor(input!.origin, input!.anchor);
+        }
+        reservation.start(requester);
         return this.#provider({ ...input!.origin }, { ...input!.anchor }, controller.signal, config,
-          request.schemaVersion === 2 && request.routeKind === "planDestination" ? "destination" : "reference");
+          this.#endpoint(input!));
       })();
-      const release = () => { reservation.release(requester); if (this.#active.get(requester) === active) this.#active.delete(requester); };
+      const release = () => { reservation?.release(requester); if (this.#active.get(requester) === active) this.#active.delete(requester); };
       void transport.then(release, release);
       try {
         const result = await Promise.race([transport, aborted]);
         this.assertCurrent(code, requester, request, authorize);
         if (controller.signal.aborted) throw new RouteError("CONTEXT_MISMATCH");
+        const endpoint = this.#endpoint(input);
+        if (typeof endpoint === "object" && result.result !== "atAnchor"
+          && (!result.actualEnd || !projectTraceRejoinEndpoint(result.actualEnd, result.points, endpoint)
+            || !projectTraceRejoinEndpoint(result.points.at(-1)!, result.points, endpoint))) {
+          throw new RouteError("ENDPOINT_MISMATCH");
+        }
         // A reply can be lost after the provider succeeds. A new HTTP attempt
         // may recompute the same pinned input within the three-call budget;
         // no completed geometry is retained or replayed.

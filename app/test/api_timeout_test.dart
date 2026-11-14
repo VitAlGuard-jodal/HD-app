@@ -11,6 +11,107 @@ import 'package:unavo/net/api_client.dart';
 import 'package:unavo/net/models.dart';
 
 void main() {
+  test(
+    'R16.2 malformed location response completes once and cancels its body',
+    () {
+      fakeAsync((clock) {
+        final client = _Client('body');
+        final api = ApiClient(
+          tokenStore: _Store(),
+          clientFactory: () => client,
+        );
+        Object? failure;
+        unawaited(
+          api
+              .sendLocation(
+                'ABC123',
+                const LocationFix(
+                  handle: 'self',
+                  stream: '1111111111111111',
+                  seq: 0,
+                  lat: 0,
+                  lng: 0,
+                  at: 1000,
+                  acc: 2,
+                ),
+              )
+              .then<void>(
+                (_) => fail('invalid UTF-8 must fail'),
+                onError: (Object error) => failure = error,
+              ),
+        );
+        clock.flushMicrotasks();
+        final response = client.requests.single.response!;
+        response._bytes.add([0xff]);
+        response.close();
+        clock.flushMicrotasks();
+        expect(failure, isA<FormatException>());
+        expect(response.cancelled, isTrue);
+        expect(clock.pendingTimers, isEmpty);
+        api.close();
+      });
+    },
+  );
+  for (final stage in [
+    'open',
+    'headers',
+    'body',
+    'error-body',
+    'delayed-body',
+  ]) {
+    test('R16.2 location POST $stage has a five-second deadline', () {
+      fakeAsync((clock) {
+        final client = _Client(stage);
+        final api = ApiClient(
+          tokenStore: _Store(),
+          clientFactory: () => client,
+        );
+        Object? failure;
+        unawaited(
+          api
+              .sendLocation(
+                'ABC123',
+                const LocationFix(
+                  handle: 'self',
+                  stream: '1111111111111111',
+                  seq: 0,
+                  lat: 0,
+                  lng: 0,
+                  at: 1000,
+                  acc: 2,
+                ),
+              )
+              .then<void>(
+                (_) => fail('must time out'),
+                onError: (Object error) => failure = error,
+              ),
+        );
+        clock.flushMicrotasks();
+        clock.elapse(const Duration(milliseconds: 4999));
+        expect(failure, isNull);
+        clock.elapse(const Duration(milliseconds: 1));
+        expect(
+          failure,
+          isA<ApiException>().having((e) => e.code, 'code', 'timeout'),
+        );
+        expect(client.closed, isFalse, reason: 'keep the shared HTTP pool');
+        expect(client.opens, 1, reason: 'POST is not automatically replayed');
+        if (stage == 'body' ||
+            stage == 'error-body' ||
+            stage == 'delayed-body') {
+          expect(client.requests.single.response!.cancelled, isTrue);
+        }
+        if (stage == 'open') {
+          client.openGate!.complete(client.requests.single);
+          clock.flushMicrotasks();
+        }
+        expect(client.requests.single.aborted, isTrue);
+        api.close();
+        clock.flushMicrotasks();
+        expect(clock.pendingTimers, isEmpty);
+      });
+    });
+  }
   for (final stage in ['open', 'headers', 'body', 'error-body']) {
     test('$stage 타임아웃은 ApiException과 서버 응답 없음 문구를 전달한다', () {
       fakeAsync((clock) {
@@ -365,6 +466,10 @@ class _Request implements HttpClientRequest {
   void add(List<int> data) {}
   @override
   Future<HttpClientResponse> close() async {
+    if (stage == 'delayed-body') {
+      await Future<void>.delayed(const Duration(seconds: 4));
+      return response = _Response(200);
+    }
     if (stage == 'headers') {
       _headers = Completer<HttpClientResponse>();
       return _headers!.future;

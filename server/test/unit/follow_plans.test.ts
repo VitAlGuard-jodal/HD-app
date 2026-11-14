@@ -788,6 +788,7 @@ for (const requester of ["leader", "follower"]) test(`r8 HTTP approach ETA from 
 });
 test("schema 1 to schema 2 scopes generations separately and pins inputs across the shared 30-second budget", async (t) => {
   const f = planFixture(t); const service = new FollowRouteService(f.locations, { ...f.routeOptions, plans: f.plans }); t.after(() => service.close());
+  f.rest({ leader: 200 }); // A real provider call still consumes the shared budget.
   await service.calculate(f.room.code, "follower", f.request({ guidanceGeneration: 100 }), () => "leader");
   f.enroll(f.save()); const input = route(f, "planJoin", "follower");
   await assert.rejects(service.calculate(f.room.code, "follower", input, () => "leader"), (e: unknown) =>

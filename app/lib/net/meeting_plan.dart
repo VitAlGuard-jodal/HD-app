@@ -384,6 +384,7 @@ class PlanRouteRequest {
     return FollowRouteResult.fromPayload(
       j,
       destinationEndpoint: routeKind == PlanRouteKind.planDestination,
+      rejoinEndpoint: routeKind == PlanRouteKind.traceRejoin,
     );
   }
 }

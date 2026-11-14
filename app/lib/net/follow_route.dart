@@ -12,6 +12,10 @@ enum FollowPhase { approaching, onTrace }
 
 // Keep D-only endpoint tolerance in sync with server/route_providers/naver.ts.
 const destinationEndpointGapMeters = 100.0;
+// Rejoin payloads retain the real point gap. The controller must additionally
+// verify the forward trace interval, lateral distance and arrival direction.
+const traceRejoinForwardMeters = 120.0;
+const traceRejoinEndpointGapMeters = traceRejoinForwardMeters + 25;
 
 class RoutePoint {
   const RoutePoint(this.lat, this.lng);
@@ -136,7 +140,10 @@ class FollowRouteRequest {
 
 class FollowRouteResult {
   FollowRouteResult.fromJson(JsonMap json, FollowRouteRequest request)
-    : this.fromPayload(_validate(json, request));
+    : this.fromPayload(
+        _validate(json, request),
+        rejoinEndpoint: request.mode == FollowRouteKind.rejoin,
+      );
 
   static JsonMap _validate(JsonMap json, FollowRouteRequest request) {
     if (!request.matches(json) ||
@@ -155,6 +162,7 @@ class FollowRouteResult {
   FollowRouteResult.fromPayload(
     JsonMap json, {
     bool destinationEndpoint = false,
+    bool rejoinEndpoint = false,
   }) {
     if (json['provider'] != 'naver' || json['routeOption'] != 'traoptimal') {
       throw const FormatException('경로 제공처 오류');
@@ -193,7 +201,11 @@ class FollowRouteResult {
           meters <= 0 ||
           number('startGapMeters') > 25 ||
           number('endGapMeters') >
-              (destinationEndpoint ? destinationEndpointGapMeters : 25)) {
+              (rejoinEndpoint
+                  ? traceRejoinEndpointGapMeters
+                  : destinationEndpoint
+                  ? destinationEndpointGapMeters
+                  : 25)) {
         throw const FormatException('경로 형상 오류');
       }
       actualStart = RoutePoint.fromJson(json['actualStart']);

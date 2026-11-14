@@ -369,7 +369,7 @@ void main() {
       expect(f.controller.view!.connector, isEmpty);
       for (var n = 0; n < 3; n++) f.drive(28, y: 40, speed: 0);
       expect(f.controller.view!.connector, isEmpty);
-      expect(f.controller.status, isNot(contains('벗어났습니다')));
+      expect(f.controller.view!.condition, FollowRouteCondition.offRoute);
       expect(f.routes, hasLength(1));
       f.controller.applyRuntime(
         MeetingRuntime.fromJson(
@@ -395,7 +395,7 @@ void main() {
       for (var n = 0; n < 3; n++) f.drive(28, y: 40, speed: 0);
       expect(f.state.route, isNull);
       expect(f.state.connector, isEmpty);
-      expect(f.state.status, isNot(contains('벗어났습니다')));
+      expect(f.state.condition, FollowRouteCondition.offRoute);
       expect(f.calls, hasLength(1));
     },
   );

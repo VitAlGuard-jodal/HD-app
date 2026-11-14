@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { LocationFix, LocationInvalidation, RoomLocationStore } from "./locations.ts";
-import { context, continuous, fresh, quality, stopped, STOP_EVIDENCE_MIN_SAMPLES, STOP_EVIDENCE_MIN_SPAN_MS } from "./location_quality.ts";
+import { context, continuous, recordedTraceContinuous, fresh, quality, stopped, STOP_EVIDENCE_MIN_SAMPLES, STOP_EVIDENCE_MIN_SPAN_MS } from "./location_quality.ts";
 import { canonicalJson, distance, RouteError, sameRef } from "./route_contract.ts";
 import type { PlanRouteRequest, Point, RouteAnchor, SampleRef } from "./route_contract.ts";
 import { parseDeletePlan, parseDepart, parseGuidanceStatus, parseParticipation, parsePassEvidence, parseSavePlan } from "./follow_plan_contract.ts";
@@ -342,7 +342,7 @@ export class FollowPlanService extends EventEmitter {
     const index = trail.findIndex((s) => sameRef(s, start));
     if (index < 0 || !quality(trail[index])) return false;
     if (anchor.kind === "segment" && (!trail[index + 1] || !sameRef(trail[index + 1], anchor.endRef))) return false;
-    return trail.slice(index + 1).every((s, i) => continuous(trail[index + i], s));
+    return trail.slice(index + 1).every((s, i) => recordedTraceContinuous(trail[index + i], s));
   }
   #refresh(entry: Entry): void {
     const { plan, runtime: r } = entry;
