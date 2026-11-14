@@ -84,7 +84,7 @@ export async function recommendCorridor(routes: ProviderRoute[], inputs: Recomme
     }
     prepared.push({ vertices, grid, length, route });
   }
-  function match(route: Prepared, p: Vertex, dx: number, dy: number): Match | null {
+  function match(route: Prepared, p: Vertex, dx: number, dy: number, maxGap = 20): Match | null {
     const candidates = new Set<number>();
     const x = Math.floor(p.x / 20), y = Math.floor(p.y / 20);
     for (let ix = x - 2; ix <= x + 2; ix++) for (let iy = y - 2; iy <= y + 2; iy++) {
@@ -101,7 +101,7 @@ export async function recommendCorridor(routes: ProviderRoute[], inputs: Recomme
       if (!length2 || (sx * dx + sy * dy) / Math.sqrt(length2 * (dx * dx + dy * dy)) < Math.SQRT1_2) continue;
       const f = Math.max(0, Math.min(1, ((p.x - a.x) * sx + (p.y - a.y) * sy) / length2));
       const gap = Math.hypot(a.x + sx * f - p.x, a.y + sy * f - p.y);
-      if (gap <= 20) matches.push({ s: a.s + (b.s - a.s) * f, gap });
+      if (gap <= maxGap) matches.push({ s: a.s + (b.s - a.s) * f, gap });
     }
     if (!matches.length) return null;
     matches.sort((a, b) => a.gap - b.gap);
@@ -152,12 +152,35 @@ export async function recommendCorridor(routes: ProviderRoute[], inputs: Recomme
       && prepared.slice(1).every((p) => match(p, vertices[i], vertices[i + 1].x - vertices[i].x, vertices[i + 1].y - vertices[i].y))) candidate = i;
     await yieldWork();
   }
-  const nearDestination = candidate >= 0 && lead.length - vertices[candidate].s <= 100;
-  let selected = candidate >= 0 && !nearDestination ? vertices[candidate] : null;
+  let selected = candidate >= 0 ? vertices[candidate] : null;
+  let selectedSegment = candidate;
+  if (selected) {
+    // Matching a 20 m segment can include a participant just beyond its start.
+    // Clamp J to the latest current position on this same forward corridor,
+    // using the original fix (provider snapping can itself be behind the car).
+    let floor = selected.s;
+    for (let i = 0; i < inputs.length; i++) {
+      const start = prepared[i].vertices[0], next = prepared[i].vertices[1];
+      if (!start || !next) continue;
+      const origin = inputs[i].origin;
+      const p: Vertex = { lat: origin.lat, lng: origin.lng, s: 0,
+        x: (origin.lng - destination.lng) * lngScale, y: (origin.lat - destination.lat) * latScale };
+      // Origin snapping allows 25 m; corridor-to-corridor matching stays 20 m.
+      const projected = match(lead, p, next.x - start.x, next.y - start.y, 25);
+      if (projected) floor = Math.max(floor, projected.s);
+    }
+    while (selectedSegment + 1 < vertices.length - 1 && vertices[selectedSegment + 1].s < floor) selectedSegment++;
+    const a = vertices[selectedSegment], b = vertices[selectedSegment + 1];
+    const t = (floor - a.s) / (b.s - a.s);
+    selected = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t,
+      x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, s: floor };
+  }
+  const nearDestination = selected !== null && lead.length - selected.s <= 100;
+  if (nearDestination) selected = null;
   let positions = prepared.map((p) => p.length);
   if (selected) {
-    const end = vertices[candidate + 1];
-    const matches = prepared.slice(1).map((p) => match(p, selected!, end.x - selected!.x, end.y - selected!.y));
+    const start = vertices[selectedSegment], end = vertices[selectedSegment + 1];
+    const matches = prepared.slice(1).map((p) => match(p, selected!, end.x - start.x, end.y - start.y));
     if (matches.some((m) => !m)) selected = null;
     else positions = [selected.s, ...matches.map((m) => m!.s)];
   }

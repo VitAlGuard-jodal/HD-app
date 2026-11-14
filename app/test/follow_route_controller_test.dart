@@ -6,6 +6,93 @@ import 'package:unavo/net/models.dart';
 import 'support/follow_route_fakes.dart';
 
 void main() {
+  test(
+    'r12 connector progress stays on the later visit after a full loop',
+    () async {
+      final f = RouteFixture();
+      addTearDown(f.dispose);
+      f.update();
+      f.calls.single.succeed(
+        points: [
+          testPoint(-50),
+          testPoint(150),
+          testPoint(150, 100),
+          testPoint(-50, 100),
+          testPoint(-50, 4),
+          testPoint(0),
+        ],
+      );
+      await flush();
+      f.grow(500);
+      for (var x = -30.0; x <= 150; x += 20) f.drive(x, speed: 20);
+      expect(f.joins, isEmpty);
+      for (var y = 20.0; y <= 100; y += 20) f.drive(150, y: y, speed: 20);
+      for (var x = 130.0; x >= -50; x -= 20) f.drive(x, y: 100, speed: 20);
+      for (var y = 80.0; y >= 20; y -= 20) f.drive(-50, y: y, speed: 20);
+      f.drive(-50, y: 4, speed: 20);
+      expect(f.state.routeProgress, greaterThan(590));
+      expect(f.joins, isEmpty);
+      f.drive(-30, y: 2.4, speed: 20);
+      expect(f.state.routeProgress, greaterThan(610));
+      f.drive(-10, y: .8, speed: 20);
+      expect(f.state.routeProgress, greaterThan(630));
+      for (final x in [0.0, 6.0, 12.0, 18.0]) f.drive(x, speed: 6);
+      expect(f.joins, hasLength(1));
+      expect(f.departures, isEmpty);
+      expect(f.calls, hasLength(1));
+    },
+  );
+
+  test(
+    'r12 ambiguous initial route explains why a parked car must wait',
+    () async {
+      final f = RouteFixture();
+      addTearDown(f.dispose);
+      f.update();
+      f.calls.single.succeed(
+        points: [testPoint(-50), testPoint(0), testPoint(-50, 4), testPoint(0)],
+      );
+      await flush();
+      expect(f.state.connector, isEmpty);
+      expect(f.state.status, contains('경로가 겹쳐'));
+      for (var n = 0; n < 35; n++) f.drive(-50, speed: 0);
+      expect(f.state.status, contains('경로가 겹쳐'));
+      expect(f.calls, hasLength(1));
+      expect(f.joins, isEmpty);
+      expect(f.departures, isEmpty);
+      f.drive(-30, speed: 20);
+      f.drive(-10, speed: 20);
+      expect(f.state.connector, isNotEmpty);
+      expect(f.state.status, isNot(contains('경로가 겹쳐')));
+      expect(f.calls, hasLength(1));
+    },
+  );
+
+  test(
+    'r12 initial route keeps the first visit while parked at its origin',
+    () async {
+      final f = RouteFixture();
+      addTearDown(f.dispose);
+      f.update();
+      final points = [
+        testPoint(-50),
+        testPoint(150),
+        testPoint(-50, 4),
+        testPoint(0),
+      ];
+      f.calls.single.succeed(points: points);
+      await flush();
+      expect(f.state.connector, points);
+      expect(f.state.routeProgress, closeTo(0, .01));
+      for (var n = 0; n < 6; n++) f.drive(-50, speed: 0);
+      expect(f.state.connector, points);
+      expect(f.state.routeProgress, closeTo(0, .01));
+      expect(f.joins, isEmpty);
+      expect(f.departures, isEmpty);
+      expect(f.calls, hasLength(1));
+    },
+  );
+
   test('r8 parked leader then 160 m approach joins within 3 s of P0', () async {
     final f = RouteFixture();
     addTearDown(f.dispose);
@@ -518,7 +605,7 @@ void main() {
       f.drive(-25, y: 100, elapsed: 2000);
       next.succeed();
       await flush();
-      expect(f.state.condition, FollowRouteCondition.offRoute);
+      expect(f.state.condition, FollowRouteCondition.routeMismatch);
       expect(f.state.connector, isEmpty);
     },
   );

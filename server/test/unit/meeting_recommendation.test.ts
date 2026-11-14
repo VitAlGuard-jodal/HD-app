@@ -19,6 +19,39 @@ function inputs(n: number): RecommendationInput[] {
   return Array.from({ length: n }, (_, i) => ({ handle: `car-${i}`, followRequestId: i ? `follow-${i}` : null,
     origin: { ...at(0), stream: "1".repeat(16), seq: 0, at: 0, receivedAt: 0, handle: `car-${i}`, acc: 3 } }));
 }
+test("R1 recommended J never trails a participant already on the common corridor", async () => {
+  const current = inputs(3);
+  current[1].origin = { ...current[1].origin, ...at(315) };
+  current[2].origin = { ...current[2].origin, ...at(327) };
+  const result = await recommendCorridor([
+    road([at(0), at(2000)]), road([at(315), at(2000)]), road([at(327), at(2000)]),
+  ], current, at(2000));
+  assert.equal(result.result, "candidate");
+  assert.ok(result.joinPoint.lat >= at(327).lat - 1e-10, "J is behind the furthest participant");
+  assert.ok(distance(result.joinPoint, at(327)) < .01, "use the projected position, not the next sampled vertex");
+  assert.ok(result.arrivals[1].etaToJoinSeconds > 0);
+  assert.ok(result.arrivals[2].etaToJoinSeconds < .001);
+});
+test("R1 uses current fixes beyond snapped route starts and rechecks the 100 m destination boundary", async () => {
+  for (const currentMeters of [327, 1901]) {
+    const current = inputs(2);
+    current[1].origin = { ...current[1].origin, ...at(currentMeters) };
+    const result = await recommendCorridor([
+      road([at(0), at(2000)]), road([at(currentMeters - 15), at(2000)]),
+    ], current, at(2000));
+    assert.equal(result.result, currentMeters === 1901 ? "destinationOnly" : "candidate");
+    assert.ok(result.joinPoint.lat >= at(currentMeters).lat - 1e-10);
+    if (currentMeters === 1901) assert.equal(result.reason, "NEAR_DESTINATION");
+  }
+});
+test("R1 clamps an origin within the existing 25 m provider start allowance", async () => {
+  const current = inputs(2);
+  current[1].origin = { ...current[1].origin, ...at(327, 21) };
+  assert.ok(distance(current[1].origin, at(315)) <= 25);
+  const result = await recommendCorridor([road([at(0), at(2000)]), road([at(315), at(2000)])], current, at(2000));
+  assert.equal(result.result, "candidate");
+  assert.ok(result.joinPoint.lat >= at(327).lat - 1e-10);
+});
 test("recommendation geometry: full identical routes, long segments and multi-car common suffix", async () => {
   const lead = road([at(0), at(2000)]);
   const identical = await recommendCorridor([lead, lead], inputs(2), at(2000));

@@ -7,6 +7,7 @@ import '../net/follow_route.dart';
 import '../net/models.dart';
 import '../net/meeting_plan.dart';
 import 'follow_route_geometry.dart';
+import 'follow_route_diagnostics.dart';
 
 export '../net/follow_route.dart' show FollowMode, FollowPhase, RoutePoint;
 
@@ -19,6 +20,8 @@ enum FollowRouteCondition {
   locationDelayed,
   poorAccuracy,
   offRoute,
+  ambiguousRoute,
+  routeMismatch,
   traceBroken,
   noRoute,
   resetRequired,
@@ -27,6 +30,27 @@ enum FollowRouteCondition {
   disabled,
   retryWaiting,
 }
+
+FollowRouteCondition holdRouteDeparture(
+  FollowRouteCondition condition, {
+  bool ambiguous = false,
+}) => condition == FollowRouteCondition.offRoute
+    ? ambiguous
+          ? FollowRouteCondition.ambiguousRoute
+          : FollowRouteCondition.routeMismatch
+    : condition;
+
+bool canResumeUnacceptedRoute(
+  GuidanceRouteProjection? projection,
+  FollowRouteCondition condition, {
+  required bool departed,
+}) =>
+    !departed &&
+    projection?.usable == true &&
+    {
+      FollowRouteCondition.ambiguousRoute,
+      FollowRouteCondition.routeMismatch,
+    }.contains(condition);
 
 class FollowRouteInput {
   const FollowRouteInput({
@@ -98,6 +122,7 @@ class FollowGuidance {
           !(rejoining && subdued) &&
           !{
             FollowRouteCondition.offRoute,
+            FollowRouteCondition.routeMismatch,
             FollowRouteCondition.noRoute,
             FollowRouteCondition.resetRequired,
             FollowRouteCondition.disabled,
@@ -166,10 +191,14 @@ class FollowGuidance {
                 ? '앞차가 지나간 경로를 따라갑니다'
                 : rejoining
                 ? '회색 경로를 따라 다시 합류'
+                : mode == FollowMode.meetingPoint
+                ? '앞차 이동 경로 확인 중'
                 : '추천 경로로 기준 지점까지 이동',
           FollowRouteCondition.locationDelayed => '위치 갱신 대기',
           FollowRouteCondition.poorAccuracy => '위치 정확도 확인 중',
           FollowRouteCondition.offRoute => '경로를 벗어났습니다',
+          FollowRouteCondition.ambiguousRoute => '경로가 겹쳐 현재 위치 확인 중',
+          FollowRouteCondition.routeMismatch => '현재 위치에서 경로를 확인 중입니다',
           FollowRouteCondition.traceBroken => '이어서 따라갈 이동 경로가 끊겼습니다',
           FollowRouteCondition.noRoute => '추천 경로를 찾지 못했습니다',
           FollowRouteCondition.resetRequired => '정차 후 안내를 다시 설정해 주세요',
@@ -255,6 +284,8 @@ class FollowRouteController extends ChangeNotifier {
   FollowRouteRequest? _request;
   FollowRouteResult? _pendingResult;
   FollowRouteResult? _rejectedRoute;
+  bool _rejectedAfterDeparture = false;
+  num? _routeObservedAt;
   FollowRouteCondition? _beforeHold;
   String? _calculation;
   int _generation = 0, _ids = 0, _retries = 0, _extraCandidates = 0;
@@ -498,6 +529,18 @@ class FollowRouteController extends ChangeNotifier {
           _offRoute = false;
           _directionBase = fix;
           s.anchorReached = false;
+          s.condition = holdRouteDeparture(s.condition);
+          // Resume geometry after a gap, with no motion or join evidence.
+          // Reordered refs and implausible jumps still cannot advance it.
+          if (previous.stream == fix.stream &&
+              fix.seq > previous.seq &&
+              dt > 10 &&
+              moved <=
+                  70 * dt +
+                      routeAccuracyAllowance(previous)! +
+                      routeAccuracyAllowance(fix)!) {
+            _judge(fix, moved, null);
+          }
           return;
         }
         final base =
@@ -530,6 +573,7 @@ class FollowRouteController extends ChangeNotifier {
         // turn a parked car or GPS jitter into a delayed automatic request.
         _resetEvidence();
         _offRoute = false;
+        s.condition = holdRouteDeparture(s.condition);
       }
       _judge(fix, moved, direction);
       if (_retryOnLocation &&
@@ -576,11 +620,19 @@ class FollowRouteController extends ChangeNotifier {
             ),
           );
     final judgingRoute = s.route ?? _rejectedRoute;
-    final connectorProjection = judgingRoute == null
+    final connector = judgingRoute == null
         ? null
-        : projectRoute(RoutePoint.fromFix(fix), judgingRoute.points);
-    if (connectorProjection != null && !connectorProjection.ambiguous)
-      s.routeProgress = connectorProjection.along;
+        : projectGuidanceRoute(
+            RoutePoint.fromFix(fix),
+            judgingRoute,
+            progress: s.routeProgress,
+            advance: s.route == null
+                ? math.max(120, moved + 50)
+                : routeReachableAdvance(fix.at - (_routeObservedAt ?? fix.at)),
+          );
+    _routeObservedAt = fix.at;
+    final connectorProjection = connector?.window;
+    if (connector != null) s.routeProgress = connector.progress;
 
     if (direction != null) {
       s.aheadOfTrace =
@@ -599,17 +651,34 @@ class FollowRouteController extends ChangeNotifier {
       _offRoute = false;
       _moving = false;
       s.anchorReached = false;
+      s.condition = holdRouteDeparture(s.condition, ambiguous: true);
       return;
     }
     final traceDistance = projection?.distance ?? double.infinity;
+    // A progress window identifies the current visit; it is not the road.
+    // After a tunnel or slow progress, a later part can still be under the car.
+    final fullTraceDistance = path == null
+        ? double.infinity
+        : projectRoute(RoutePoint.fromFix(fix), path.points)?.distance ??
+              double.infinity;
     final connectorDistance =
         judgingRoute?.atAnchor == true && s.anchorPoint != null
         ? routeDistance(RoutePoint.fromFix(fix), s.anchorPoint!)
         : connectorProjection?.distance ?? double.infinity;
+    if (s.phase == FollowPhase.approaching &&
+        s.route == null &&
+        judgingRoute != null &&
+        canResumeUnacceptedRoute(
+          connector,
+          s.condition,
+          departed: _rejectedAfterDeparture,
+        )) {
+      _acceptResult(judgingRoute, connectorProjection);
+    }
     final outside =
-        traceDistance > 60.000001 &&
+        fullTraceDistance > 60.000001 &&
         (s.phase == FollowPhase.onTrace ||
-            judgingRoute != null && connectorDistance > 60.000001);
+            judgingRoute != null && connector!.distance > 60.000001);
     if (_moving) {
       if (outside) {
         _offSince ??= _now();
@@ -650,11 +719,12 @@ class FollowRouteController extends ChangeNotifier {
       }
     }
     if (s.phase == FollowPhase.onTrace && !s.rejoining) {
-      if (projection != null &&
-          projection.distance <= 25.000001 &&
-          direction != null) {
+      if (projection != null && projection.distance <= 25.000001) {
+        // Tracking may resume after a gap, but authoritative progress still
+        // requires a new measured direction on this branch.
         _tracking = path!.at(projection.along);
-        if (routeDirectionDifference(direction, projection.bearing) <=
+        if (direction != null &&
+            routeDirectionDifference(direction, projection.bearing) <=
                 60.000001 &&
             projection.along >= (floor ?? 0)) {
           s.progress = _tracking;
@@ -714,6 +784,7 @@ class FollowRouteController extends ChangeNotifier {
     _lastSelf = self;
     _moving = true;
     _rejectedRoute = rejected;
+    _rejectedAfterDeparture = true;
     s.route = null;
     s.rejoining = true;
     s.condition = FollowRouteCondition.offRoute;
@@ -861,6 +932,7 @@ class FollowRouteController extends ChangeNotifier {
     s.anchorReached = false;
     s.route = null;
     _rejectedRoute = null;
+    s.routeProgress = 0;
     s.phase = FollowPhase.approaching;
     _tracking = null;
     _hadAnchorInTrace = false;
@@ -886,6 +958,9 @@ class FollowRouteController extends ChangeNotifier {
           .at;
       s.anchorConfirmed = true;
       s.route = _input!.planApproachRoute;
+      // This retained connector has already reached J. Do not restart its
+      // projection at the origin when entering the actual trace controller.
+      s.routeProgress = s.route == null ? 0 : routeLength(s.route!.points);
       // Server already verified this round's J passage/departure. This only
       // opens the trace gate; direction + 3 samples / 2 s / 10 m still apply.
       s.anchorReached = true;
@@ -1050,23 +1125,35 @@ class FollowRouteController extends ChangeNotifier {
       return;
     }
     final current = RoutePoint.fromFix(_input!.self!);
-    final projection = projectRoute(current, result.points);
-    if (result.atAnchor
-        ? routeDistance(current, result.anchor) > 60.000001
-        : projection == null ||
-              projection.ambiguous ||
-              projection.distance > 60.000001) {
+    final judgement = projectGuidanceRoute(
+      current,
+      result,
+      advance: routeReachableAdvance(_now() - _inputAt!),
+    );
+    final projection = judgement.window;
+    debugGuidanceProjection(s.rejoining ? 'rejoin' : 'initial', judgement);
+    if (!judgement.usable) {
       s.route = null;
       _rejectedRoute = result;
+      _rejectedAfterDeparture = false;
       _resetEvidence();
       _offRoute = false;
-      s.condition = FollowRouteCondition.offRoute;
+      s.condition = projection?.ambiguous == true
+          ? FollowRouteCondition.ambiguousRoute
+          : FollowRouteCondition.routeMismatch;
       return;
     }
+    _acceptResult(result, projection);
+  }
+
+  void _acceptResult(FollowRouteResult result, RouteProjection? projection) {
+    final s = _state!;
     s.route = result;
     _rejectedRoute = null;
+    _rejectedAfterDeparture = false;
     s.anchorConfirmed = true;
-    s.routeProgress = projection?.along ?? 0;
+    s.routeProgress = math.max(s.routeProgress, projection?.along ?? 0);
+    _routeObservedAt = _input!.self!.at;
     s.condition = result.atAnchor
         ? FollowRouteCondition.atAnchorWaitingTrace
         : (_activePath()?.points.length ?? 0) < 2
@@ -1189,6 +1276,8 @@ class FollowRouteController extends ChangeNotifier {
 
   void _invalidate({bool clearVoice = true}) {
     _rejectedRoute = null;
+    _rejectedAfterDeparture = false;
+    _routeObservedAt = null;
     _cancellation?.cancel();
     _cancellation = null;
     _request = null;

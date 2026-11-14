@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:unavo/location/follow_route_controller.dart';
 import 'package:unavo/net/follow_route.dart';
@@ -7,6 +8,301 @@ import 'support/follow_route_fakes.dart';
 import 'support/meeting_plan_fakes.dart';
 
 void main() {
+  test('r12 trace handoff starts at the completed approach endpoint', () async {
+    final f = RouteFixture();
+    addTearDown(f.dispose);
+    const request = PlanRouteRequest(
+      planId: 'plan-1',
+      planRevision: 1,
+      followRequestId: 'follow-1',
+      guidanceGeneration: 1,
+      calculationId: 'approach',
+      requestId: 'approach-1',
+      routeKind: PlanRouteKind.planJoin,
+      originRef: SampleRef('0123456789abcdef', 0),
+    );
+    final call = PlanRouteCall(
+      request,
+      RouteCancellation(),
+      testPoint(-50),
+      testPoint(0),
+    );
+    call.succeed(
+      points: [
+        testPoint(-50),
+        testPoint(40),
+        testPoint(-50, 4),
+        testPoint(200, 4),
+        testPoint(200, 100),
+        testPoint(0, 100),
+        testPoint(0),
+      ],
+    );
+    final approach = await call.pending.future;
+    final trace = [for (var n = 0; n <= 50; n++) testFix(n * 10, seq: n)];
+    for (var n = 0; n < 5; n++) {
+      f.time += 1000;
+      final fix = testFix(
+        n * 6,
+        handle: 'self',
+        seq: n,
+        at: routeEpoch + f.time,
+        speed: 6,
+      );
+      f.controller.update(
+        FollowRouteInput(
+          room: 'ROOM',
+          account: 'self',
+          device: 'device',
+          relationship: 'follow-1',
+          target: 'leader',
+          self: fix,
+          origin: fix,
+          leader: trace.last,
+          selfAgeMs: 0,
+          originAgeMs: 0,
+          leaderAgeMs: 0,
+          trace: trace,
+          consent: true,
+          connected: true,
+          planApproachRoute: approach,
+          planTrace: const PlanTraceContext(
+            'plan-1',
+            1,
+            RouteAnchor.sample(SampleRef('0123456789abcdef', 0)),
+          ),
+        ),
+      );
+    }
+    expect(f.joins, hasLength(1));
+    expect(f.state.phase, FollowPhase.onTrace);
+    expect(f.calls, isEmpty);
+  });
+
+  test(
+    'r12 route diagnostics expose only projection metrics in debug builds',
+    () async {
+      final previous = debugPrint;
+      final logs = <String>[];
+      debugPrint = (message, {wrapWidth}) {
+        if (message != null) logs.add(message);
+      };
+      addTearDown(() => debugPrint = previous);
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      f.stop();
+      await f.enroll();
+      f.routes.single.succeed(
+        points: [testPoint(0), testPoint(200), testPoint(0, 4), testPoint(100)],
+      );
+      await flush();
+      expect(
+        logs,
+        kDebugMode
+            ? [
+                'follow-guidance: projection=planJoin/full ambiguous=true distance=0.0 along=0.0 candidates=3',
+                'follow-guidance: projection=planJoin/window ambiguous=false distance=0.0 along=0.0 candidates=1',
+              ]
+            : isEmpty,
+      );
+    },
+  );
+
+  for (final owner in [false, true]) {
+    for (final destination in [false, true]) {
+      if (!owner && !destination)
+        continue; // Covered by the original repro below.
+      test(
+        'r12 ${owner ? 'owner' : 'follower'} ${destination ? 'D' : 'J'} route retains a parked origin revisit',
+        () async {
+          final f = owner
+              ? MeetingFixture(
+                  account: 'leader',
+                  target: null,
+                  relationship: null,
+                )
+              : MeetingFixture();
+          addTearDown(f.dispose);
+          f.stop();
+          final plan = planJson(join: destination ? 1000 : 100);
+          if (owner) {
+            f.controller.applyPlan(
+              snapshot(
+                plan: plan,
+                runtime: runtimeJson(follower: 'follower'),
+              ),
+            );
+            await f.controller.selectOwnGuidance();
+          } else {
+            await f.enroll(plan: plan);
+          }
+          final call = f.routes.single;
+          final points = [
+            testPoint(0),
+            testPoint(200),
+            testPoint(0, 4),
+            call.goal,
+          ];
+          call.succeed(points: points);
+          await flush();
+          for (var n = 0; n < 6; n++) f.drive(0);
+          expect(f.controller.view!.connector, points);
+          expect(
+            f.controller.status,
+            destination ? (owner ? '목적지로 이동' : '목적지로 먼저 이동') : '합류 지점으로 이동',
+          );
+          expect(
+            call.request.routeKind,
+            destination
+                ? PlanRouteKind.planDestination
+                : PlanRouteKind.planJoin,
+          );
+          expect(f.routes, hasLength(1));
+          expect(
+            f.calls.where((c) => c.path.endsWith('/pass-evidence')),
+            isEmpty,
+          );
+        },
+      );
+    }
+  }
+
+  test(
+    'r12 a delayed result cannot snap a parked car to a distant later leg',
+    () async {
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      f.stop();
+      await f.enroll();
+      f.drive(0, y: 100, elapsed: 2000, speed: 0);
+      f.routes.single.succeed(
+        points: [
+          testPoint(0),
+          testPoint(200),
+          testPoint(200, 200),
+          testPoint(0, 200),
+          testPoint(0, 100),
+          testPoint(100),
+        ],
+      );
+      await flush();
+      for (var n = 0; n < 35; n++) {
+        f.drive(0, y: 100, speed: 0);
+        expect(f.controller.status, contains('현재 위치에서 경로를 확인'));
+        expect(f.controller.view!.connector, isEmpty);
+      }
+      expect(f.routes, hasLength(1));
+      expect(f.calls.where((c) => c.path.endsWith('/pass-evidence')), isEmpty);
+    },
+  );
+
+  test(
+    'r12 proceed uses the later visit only after driving the loop',
+    () async {
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      f.stop();
+      await f.enroll(plan: planJson(policy: 'proceed'));
+      f.routes.single.succeed(
+        points: [
+          testPoint(0),
+          testPoint(200),
+          testPoint(200, 100),
+          testPoint(0, 100),
+          testPoint(0, 4),
+          testPoint(100),
+        ],
+      );
+      await flush();
+      final evidence = f.calls.where((c) => c.path.endsWith('/pass-evidence'));
+      for (var x = 20.0; x <= 200; x += 20) f.drive(x, speed: 20);
+      expect(
+        evidence,
+        isEmpty,
+        reason: 'the first visit to J is not the route endpoint',
+      );
+      for (var y = 20.0; y <= 100; y += 20) f.drive(200, y: y, speed: 20);
+      for (var x = 180.0; x >= 0; x -= 20) f.drive(x, y: 100, speed: 20);
+      for (var y = 80.0; y >= 20; y -= 20) f.drive(0, y: y, speed: 20);
+      f.drive(0, y: 4, speed: 20);
+      expect(evidence, isEmpty);
+      for (var x = 20.0; x <= 100; x += 20)
+        f.drive(x, y: 4 * (1 - x / 100), speed: 20);
+      expect(evidence, hasLength(1));
+      expect(f.routes, hasLength(1));
+      expect(f.controller.ownRuntime!.branch, 'pending');
+    },
+  );
+
+  test('r12 parked follower keeps a route that revisits its origin', () async {
+    final f = MeetingFixture();
+    addTearDown(f.dispose);
+    f.stop();
+    await f.enroll();
+    final points = [
+      testPoint(0),
+      testPoint(200),
+      testPoint(0, 4),
+      testPoint(100),
+    ];
+    f.routes.single.succeed(points: points);
+    await flush();
+    expect(f.controller.view!.connector, points);
+    expect(f.controller.status, '합류 지점으로 이동');
+    for (var n = 0; n < 6; n++) f.drive(0);
+    expect(f.controller.view!.connector, points);
+    expect(f.controller.status, '합류 지점으로 이동');
+    expect(f.routes, hasLength(1));
+    expect(f.calls.where((c) => c.path.endsWith('/pass-evidence')), isEmpty);
+  });
+
+  test(
+    'r12 overlapping visits inside the window explain the hold while parked',
+    () async {
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      f.stop();
+      await f.enroll();
+      f.routes.single.succeed(
+        points: [testPoint(0), testPoint(50), testPoint(0, 4), testPoint(100)],
+      );
+      await flush();
+      expect(f.controller.view!.connector, isEmpty);
+      expect(f.controller.status, contains('경로가 겹쳐'));
+      for (var n = 0; n < 35; n++) f.drive(0);
+      expect(f.controller.status, contains('경로가 겹쳐'));
+      expect(f.routes, hasLength(1));
+      expect(f.calls.where((c) => c.path.endsWith('/pass-evidence')), isEmpty);
+      f.drive(20, speed: 20);
+      f.drive(40, speed: 20);
+      expect(f.controller.view!.connector, isNotEmpty);
+      expect(f.controller.status, '합류 지점으로 이동');
+      expect(f.routes, hasLength(1));
+    },
+  );
+
+  test(
+    'r12 stopping after confirmed departure clears the off-route message',
+    () async {
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      f.stop();
+      await f.enroll();
+      f.routes.single.succeed();
+      await flush();
+      for (var n = 0; n < 7; n++) f.drive(10.0 + n * 3, y: 80, speed: 3);
+      expect(f.controller.status, '경로를 벗어났습니다');
+      for (var n = 0; n < 35; n++) {
+        f.drive(28, y: 80, speed: 0);
+        expect(f.controller.status, isNot(contains('벗어났습니다')));
+      }
+      expect(f.controller.status, contains('현재 위치에서 경로를 확인'));
+      expect(f.routes, hasLength(1));
+      for (var n = 1; n <= 6; n++) f.drive(28.0 + n * 3, y: 80, speed: 3);
+      expect(f.routes, hasLength(2));
+    },
+  );
+
   test(
     'r11 B8 repeated timer and SSE observations cannot move the first upload observation',
     () {

@@ -7,6 +7,7 @@ import '../net/meeting_plan.dart';
 import '../net/models.dart';
 import 'follow_route_controller.dart';
 import 'follow_route_geometry.dart';
+import 'follow_route_diagnostics.dart';
 import 'meeting_stop_evidence.dart';
 
 typedef MeetingRequest =
@@ -108,6 +109,8 @@ class MeetingPlanController extends ChangeNotifier {
   String? _draftPlanId;
   int _draftRevision = 0;
   FollowRouteResult? _route, _rejectedRoute;
+  bool _rejectedAfterDeparture = false;
+  bool _joinDirectionWarning = false;
   FollowRouteResult? _reportedRoute;
   RouteCancellation? _etaReport;
   FollowRouteResult? _approachRoute;
@@ -117,7 +120,11 @@ class MeetingPlanController extends ChangeNotifier {
   Object? _routeKey;
   FollowRouteCondition _condition = FollowRouteCondition.waitingLocation;
   int? _nextAttempt, _expires, _lastAttempt, _offSince, _calculatedAt;
+  int? _routeInputAt;
   int _retries = 0, _offSamples = 0;
+  double _routeProgress = 0;
+  num? _routeObservedAt;
+  final _routeProjections = <SampleRef, RouteProjection>{};
   final _recoveries = <int>[];
   SampleRef? _judgedRef;
   bool _rejoining = false, _destinationBranch = false;
@@ -1060,7 +1067,15 @@ class MeetingPlanController extends ChangeNotifier {
       originRef: SampleRef.of(fix),
     );
     _originPoint = RoutePoint.fromFix(fix);
-    _expires = _now() + 120000;
+    _routeProgress = 0;
+    _routeProjections.clear();
+    // Keep a departed road solely for deviation judgement if this new
+    // calculation fails. It must never become guidance again (A5).
+    _route = null;
+    if (!_rejectedAfterDeparture) _rejectedRoute = null;
+    _judgedRef = null;
+    _routeInputAt = _now();
+    _expires = _routeInputAt! + 120000;
     _retries = 0;
     _sendRoute();
   }
@@ -1127,19 +1142,39 @@ class MeetingPlanController extends ChangeNotifier {
                     routeDistance(result.actualEnd!, goal) > endGapLimit)) {
         throw const FollowRouteException('ENDPOINT_MISMATCH');
       }
-      final p = projectRoute(RoutePoint.fromFix(_input!.self!), result.points);
-      final usable = result.atAnchor
-          ? routeDistance(RoutePoint.fromFix(_input!.self!), goal) <= 60
-          : p != null && !p.ambiguous && p.distance <= 60;
-      _route = usable ? result : null;
-      _rejectedRoute = usable ? null : result;
-      if (usable && r.routeKind == PlanRouteKind.planJoin) {
-        _approachRoute = result;
-        _approachIdentity = _activeIdentity;
+      // The current API does not expose the owner's D road before plan
+      // confirmation. Hold this specific suspicious J route before displaying
+      // guidance; never infer a pass from the straight bearing towards D.
+      if (owner &&
+          r.routeKind == PlanRouteKind.planJoin &&
+          active!.plan.joinPoint!.source != 'recommendation' &&
+          hasOppositeJoinReturn(result)) {
+        _joinDirectionWarning = true;
+        _route = _rejectedRoute = null;
+        _routeProjections.clear();
+        releaseApproach();
+        _condition = FollowRouteCondition.resetRequired;
+        _nextAttempt = null;
+        return;
       }
-      _condition = usable
-          ? FollowRouteCondition.ready
-          : FollowRouteCondition.offRoute;
+      final self = RoutePoint.fromFix(_input!.self!);
+      final judgement = projectGuidanceRoute(
+        self,
+        result,
+        advance: routeReachableAdvance(_now() - _routeInputAt!),
+      );
+      final p = judgement.window;
+      debugGuidanceProjection(r.routeKind.name, judgement);
+      if (judgement.usable) {
+        _acceptRoute(result, p);
+      } else {
+        _route = null;
+        _rejectedRoute = result;
+        _rejectedAfterDeparture = false;
+        _condition = p?.ambiguous == true
+            ? FollowRouteCondition.ambiguousRoute
+            : FollowRouteCondition.routeMismatch;
+      }
       _calculatedAt = _now();
       _nextAttempt = null;
       _reportRouteEta();
@@ -1202,6 +1237,20 @@ class MeetingPlanController extends ChangeNotifier {
     }
   }
 
+  void _acceptRoute(FollowRouteResult result, RouteProjection? projection) {
+    _route = result;
+    _rejectedRoute = null;
+    _rejectedAfterDeparture = false;
+    _routeProgress = math.max(_routeProgress, projection?.along ?? 0);
+    _routeObservedAt = _input!.self!.at;
+    if (projection != null) _rememberRouteProjection(_input!.self!, projection);
+    if (routeKind == PlanRouteKind.planJoin) {
+      _approachRoute = result;
+      _approachIdentity = _activeIdentity;
+    }
+    _condition = FollowRouteCondition.ready;
+  }
+
   void _scheduleRoute(int delay) {
     _nextAttempt = _now() + math.max(30000, delay);
     if (_nextAttempt! >= _expires!) {
@@ -1217,31 +1266,55 @@ class MeetingPlanController extends ChangeNotifier {
     if (result == null ||
         fix == null ||
         !_fresh ||
+        {
+          FollowRouteCondition.resetRequired,
+          FollowRouteCondition.consentRequired,
+          FollowRouteCondition.authorizationBlocked,
+          FollowRouteCondition.disabled,
+        }.contains(_condition) ||
         _judgedRef == SampleRef.of(fix))
       return;
     _judgedRef = SampleRef.of(fix);
-    final p = projectRoute(RoutePoint.fromFix(fix), result.points);
-    if (p?.ambiguous == true) {
-      _offSince = null;
-      _offSamples = 0;
-      return;
-    }
-    final distance = result.atAnchor
-        ? routeDistance(RoutePoint.fromFix(fix), result.anchor)
-        : p?.distance ?? double.infinity;
     final previous = _samples.length >= 2
         ? _samples[_samples.length - 2]
         : null;
+    final moved = previous == null
+        ? 0.0
+        : routeDistance(RoutePoint.fromFix(previous), RoutePoint.fromFix(fix));
+    final judgement = projectGuidanceRoute(
+      RoutePoint.fromFix(fix),
+      result,
+      progress: _routeProgress,
+      advance: _route == null
+          ? math.max(120, moved + 50)
+          : routeReachableAdvance(fix.at - (_routeObservedAt ?? fix.at)),
+    );
+    _routeObservedAt = fix.at;
+    final p = judgement.window;
+    if (p?.ambiguous == true) {
+      _offSince = null;
+      _offSamples = 0;
+      _routeProjections.clear();
+      _condition = holdRouteDeparture(_condition, ambiguous: true);
+      return;
+    }
+    if (p != null) _rememberRouteProjection(fix, p);
+    final distance = judgement.distance;
+    if (_route == null &&
+        canResumeUnacceptedRoute(
+          judgement,
+          _condition,
+          departed: _rejectedAfterDeparture,
+        )) {
+      _acceptRoute(result, p);
+    }
     final moving =
         previous != null &&
         (fix.speed != null
             ? fix.speed!.isFinite && fix.speed! >= 2
-            : routeDistance(
-                        RoutePoint.fromFix(previous),
-                        RoutePoint.fromFix(fix),
-                      ) /
-                      ((fix.at - previous.at) / 1000) >=
-                  2);
+            : moved / ((fix.at - previous.at) / 1000) >= 2);
+    _routeProgress = judgement.progress;
+    if (!moving) _condition = holdRouteDeparture(_condition);
     if (moving && distance > 60.000001) {
       _offSince ??= _now();
       _offSamples++;
@@ -1255,6 +1328,7 @@ class MeetingPlanController extends ChangeNotifier {
         _routeCancel == null) {
       _route = null;
       _rejectedRoute = result;
+      _rejectedAfterDeparture = true;
       releaseApproach();
       _condition = FollowRouteCondition.offRoute;
       if (_lastAttempt == null || _now() - _lastAttempt! >= 30000) {
@@ -1277,6 +1351,13 @@ class MeetingPlanController extends ChangeNotifier {
       _maybePass(result);
   }
 
+  void _rememberRouteProjection(LocationFix fix, RouteProjection projection) {
+    _routeProjections[SampleRef.of(fix)] = projection;
+    while (_routeProjections.length > 3) {
+      _routeProjections.remove(_routeProjections.keys.first);
+    }
+  }
+
   void _maybePass(FollowRouteResult route) {
     if (_passPending || _now() - _lastPassAt < 1000 || _samples.length < 3)
       return;
@@ -1290,8 +1371,10 @@ class MeetingPlanController extends ChangeNotifier {
         routeDistance(points.first, points.last) < 3)
       return;
     if (!route.atAnchor) {
-      final projections = points
-          .map((p) => projectRoute(p, route.points))
+      // Reuse the forward-window judgement for each original fix. A global
+      // re-projection here could switch to a different visit to the same road.
+      final projections = samples
+          .map((f) => _routeProjections[SampleRef.of(f)])
           .toList();
       final bearing = routeBearing(points.first, points.last);
       for (var n = 0; n < points.length; n++) {
@@ -1437,10 +1520,14 @@ class MeetingPlanController extends ChangeNotifier {
     _routeCancel = null;
     _routeRequest = null;
     _route = _rejectedRoute = null;
+    _rejectedAfterDeparture = _joinDirectionWarning = false;
+    _routeObservedAt = _routeInputAt = null;
     _originPoint = null;
     _routeKey = null;
     _nextAttempt = _expires = _offSince = _calculatedAt = null;
     _offSamples = 0;
+    _routeProgress = 0;
+    _routeProjections.clear();
     _judgedRef = null;
     _rejoining = false;
     _condition = FollowRouteCondition.waitingLocation;
@@ -1466,6 +1553,9 @@ class MeetingPlanController extends ChangeNotifier {
     if (active!.runtime == null || active!.runtime!.enrollments.isEmpty)
       return '합류 안내 참여를 기다립니다';
     if (routeKind == null) return ownRuntime?.status ?? '합류 상태 확인 중';
+    if (_joinDirectionWarning) {
+      return '합류 지점의 접근 방향을 확인해 주세요 · 정차 후 진행 방향 도로 위로 옮겨 주세요';
+    }
     return switch (_condition) {
       FollowRouteCondition.calculating => '추천 경로 계산 중',
       FollowRouteCondition.retryWaiting =>
@@ -1477,6 +1567,8 @@ class MeetingPlanController extends ChangeNotifier {
       FollowRouteCondition.authorizationBlocked => '합류 계획 참여 권한 확인이 필요합니다',
       FollowRouteCondition.locationDelayed => '위치 갱신 대기',
       FollowRouteCondition.offRoute => '경로를 벗어났습니다',
+      FollowRouteCondition.ambiguousRoute => '경로가 겹쳐 현재 위치 확인 중',
+      FollowRouteCondition.routeMismatch => '현재 위치에서 경로를 확인 중입니다',
       _ =>
         routeKind == PlanRouteKind.planDestination
             ? (owner ? '목적지로 이동' : '목적지로 먼저 이동')

@@ -6,6 +6,34 @@ import 'package:unavo/net/follow_route.dart';
 import 'support/follow_route_fakes.dart';
 
 void main() {
+  test('r12 grey rejoin keeps a route that revisits its origin', () async {
+    final f = RouteFixture();
+    addTearDown(f.dispose);
+    await f.join();
+    f.grow(500);
+    f.depart();
+    f.driveUntil(30000);
+    final call = f.calls.last;
+    final x = call.origin.lng * metersPerDegree;
+    final y = call.origin.lat * metersPerDegree;
+    final points = [
+      call.origin,
+      testPoint(x, y + 200),
+      testPoint(x + 4, y),
+      call.anchor,
+    ];
+    call.succeed(points: points);
+    await flush();
+    expect(f.state.connector, points);
+    expect(f.state.status, '회색 경로를 따라 다시 합류');
+    expect(f.state.routeProgress, closeTo(0, .01));
+    for (var n = 0; n < 6; n++) f.drive(x, y: y, speed: 0);
+    expect(f.state.connector, points);
+    expect(f.state.routeProgress, closeTo(0, .01));
+    expect(f.rejoinedEvents, [false]);
+    expect(f.calls, hasLength(2));
+  });
+
   for (final speed in <double?>[0, 1.99, null]) {
     test(
       'parked off trace ($speed m/s) does not accumulate or calculate',
@@ -37,6 +65,7 @@ void main() {
       expect(f.departures, hasLength(1));
       for (var n = 0; n < 30; n++) {
         f.drive(45, y: 80, speed: 0);
+        expect(f.state.status, isNot(contains('벗어났습니다')));
       }
       f.update();
       expect(f.calls, hasLength(1));

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:unavo/location/follow_route_geometry.dart';
 import 'package:unavo/location/meeting_plan_controller.dart';
 import 'package:unavo/net/follow_route.dart';
 import 'package:unavo/net/meeting_plan.dart';
@@ -135,7 +136,14 @@ class PlanRouteCall {
     return {...j, ...request.toJson()};
   }
 
-  void succeed() => pending.complete(request.parseResult(json));
+  void succeed({List<RoutePoint>? points}) {
+    final j = json;
+    if (points != null) {
+      j['points'] = points.map((p) => {'lat': p.lat, 'lng': p.lng}).toList();
+      j['meters'] = routeLength(points);
+    }
+    pending.complete(request.parseResult(j));
+  }
 }
 
 class MeetingFixture {

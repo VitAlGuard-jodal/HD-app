@@ -6,6 +6,11 @@ import '../net/models.dart';
 const _radians = math.pi / 180;
 const _earth = 6371000.0;
 
+/// A reachability bound, not evidence of motion. Uses the existing 70 m/s
+/// continuity ceiling and 50 m projection margin, never straight-line travel.
+double routeReachableAdvance(num elapsedMs) =>
+    math.max(120, math.max(0, elapsedMs) / 1000 * 70 + 50);
+
 double routeDistance(RoutePoint a, RoutePoint b) {
   final lat = (b.lat - a.lat) * _radians;
   final lng = (b.lng - a.lng) * _radians;
@@ -73,11 +78,57 @@ class RouteProjection {
     this.along,
     this.bearing, {
     this.ambiguous = false,
+    this.candidateCount = 1,
   });
   final RoutePoint point;
   final int index;
   final double fraction, distance, along, bearing;
   final bool ambiguous;
+  final int candidateCount;
+}
+
+/// The whole road measures deviation; the reachable window estimates progress
+/// and selects a visit to overlapping geometry. Neither proves a moving pass.
+class GuidanceRouteProjection {
+  const GuidanceRouteProjection(
+    this.full,
+    this.window,
+    this.distance,
+    this.progress,
+    this.usable,
+  );
+  final RouteProjection? full, window;
+  final double distance, progress;
+  final bool usable;
+  bool get ambiguous => window?.ambiguous == true;
+}
+
+GuidanceRouteProjection projectGuidanceRoute(
+  RoutePoint self,
+  FollowRouteResult route, {
+  double progress = 0,
+  required double advance,
+}) {
+  final full = projectRoute(self, route.points);
+  final window = projectRoute(
+    self,
+    route.points,
+    minimum: progress,
+    maximum: progress + advance,
+  );
+  final distance = route.atAnchor
+      ? routeDistance(self, route.anchor)
+      : full?.distance ?? double.infinity;
+  final usable = route.atAnchor
+      ? distance <= 60.000001
+      : window != null && !window.ambiguous && window.distance <= 60.000001;
+  return GuidanceRouteProjection(
+    full,
+    window,
+    distance,
+    usable ? math.max(progress, window?.along ?? 0) : progress,
+    usable,
+  );
 }
 
 /// Coordinates are geometry, never fabricated location samples/sequence IDs.
@@ -135,6 +186,7 @@ RouteProjection? projectRoute(
     best.along,
     best.bearing,
     ambiguous: ambiguous,
+    candidateCount: candidates.length,
   );
 }
 
@@ -144,6 +196,25 @@ double routeLength(List<RoutePoint> points) {
     length += routeDistance(points[i - 1], points[i]);
   }
   return length;
+}
+
+/// A manual J may have snapped to the opposite carriageway. This is a warning
+/// heuristic, not a claim of road connectivity or proof that J was passed.
+bool hasOppositeJoinReturn(FollowRouteResult route) {
+  if (route.atAnchor) return false;
+  final length = routeLength(route.points);
+  if (length <= 2 * routeDistance(route.origin, route.anchor) + 300)
+    return false;
+  final early = projectRoute(route.anchor, route.points, maximum: length - 300);
+  final arrival = projectRoute(
+    route.points.last,
+    route.points,
+    minimum: length - 25,
+  );
+  return early != null &&
+      arrival != null &&
+      early.distance <= 25 &&
+      routeDirectionDifference(early.bearing, arrival.bearing) >= 120;
 }
 
 /// Only a locally aligned extension of the latest recorded segment suggests
