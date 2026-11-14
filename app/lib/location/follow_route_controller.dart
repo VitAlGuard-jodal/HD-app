@@ -1222,13 +1222,18 @@ class FollowRouteController extends ChangeNotifier {
         _failed(const FollowRouteException('ENDPOINT_MISMATCH'));
         return;
       }
-      s.anchor = RouteAnchor.segment(
+      final acceptedAnchor = RouteAnchor.segment(
         SampleRef.of(path.fixes[endpoint.index]),
         SampleRef.of(path.fixes[endpoint.index + 1]),
         endpoint.fraction,
       );
-      s.anchorPoint = endpoint.point;
-      s.anchorAt = path.fixes[endpoint.index].at;
+      // A short backward endpoint allowance must not lower the requested
+      // anchor floor or accumulate across subsequent endpoint validations.
+      if (path.resolve(acceptedAnchor)! > path.resolve(s.anchor!)!) {
+        s.anchor = acceptedAnchor;
+        s.anchorPoint = endpoint.point;
+        s.anchorAt = path.fixes[endpoint.index].at;
+      }
     }
     s.route = result;
     _rejectedRoute = null;

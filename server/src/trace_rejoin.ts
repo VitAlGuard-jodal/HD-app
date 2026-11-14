@@ -2,6 +2,8 @@ import { distance, RouteError, ROUTE_ENDPOINT_GAP_METERS } from "./route_contrac
 import type { Point } from "./route_contract.ts";
 
 export const REJOIN_FORWARD_METERS = 120;
+// Keep in sync with traceRejoinBackwardMeters in the app geometry helper.
+export const REJOIN_BACKWARD_METERS = 10;
 // Wire endGapMeters remains the real distance to the requested point. This is
 // only a coarse bound; the trace and direction checks below are mandatory.
 export const REJOIN_POINT_GAP_METERS = REJOIN_FORWARD_METERS + ROUTE_ENDPOINT_GAP_METERS;
@@ -81,18 +83,22 @@ function inspectTraceRejoinEndpoint(point: Point | null | undefined, route: Poin
   const best = candidates[0];
   const angle = best && direction !== null ? Math.abs((direction - best.bearing + 540) % 360 - 180) : null;
   const targetDistance = point ? distance(point, target.anchor) : null;
+  // The near-target radius permits only a bounded backward projection, not a
+  // different visit to the road. Keep the same lower bound in the app.
+  const nearTarget = targetDistance !== null && targetDistance <= 25.000001;
+  const backwardAllowance = nearTarget ? REJOIN_BACKWARD_METERS : 0;
   const ambiguousSegments = best ? candidates.filter((p) => Math.abs(p.along - best.along) > 40
     && p.gap <= 25 && Math.abs(p.gap - best.gap) <= 5).length : 0;
   // Keep ordinary T-junction approaches inside the original point allowance.
   // Extending that point allowance requires alignment; opposite arrivals are
   // rejected in both cases.
-  const wrongDirection = angle !== null && (targetDistance! <= 25.000001
+  const wrongDirection = angle !== null && (nearTarget
     ? angle >= 119.999999 : angle > 60.000001);
   const condition: RejoinCondition | null = !point ? "missing_point"
     : !before ? "arrival_direction_missing"
     : !best ? "trace_projection_missing"
     : best.gap > 25.000001 ? "trace_distance"
-    : best.along < target.minimum - .000001 ? "before_minimum"
+    : best.along < target.minimum - backwardAllowance - .000001 ? "before_minimum"
     : best.along > target.minimum + REJOIN_FORWARD_METERS + .000001 ? "after_maximum"
     : wrongDirection ? "arrival_direction"
     : ambiguousSegments > 0 ? "ambiguous" : null;

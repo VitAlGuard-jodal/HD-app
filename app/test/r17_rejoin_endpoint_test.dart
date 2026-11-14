@@ -20,6 +20,258 @@ Future<RouteFixture> rejoining() async {
 
 void main() {
   test(
+    'R20b the opposite U-turn leg 215 m behind is rejected by the lower bound',
+    () {
+      final trace = TracePath([
+        testFix(0),
+        testFix(200, seq: 1, at: routeEpoch + 3000),
+        testFix(200, y: 15, seq: 2, at: routeEpoch + 4000),
+        testFix(0, y: 15, seq: 3, at: routeEpoch + 7000),
+      ]);
+      final anchor = RouteAnchor.segment(
+        SampleRef.of(trace.fixes[2]),
+        SampleRef.of(trace.fixes[3]),
+        .5,
+      );
+      final end = testPoint(100, 2), route = [testPoint(60, 2), end];
+      final best = projectRoute(end, trace.points)!;
+      expect(best.ambiguous, isFalse);
+      expect(best.along - trace.resolve(anchor)!, closeTo(-215, .000001));
+      expect(
+        routeDirectionDifference(routeBearing(route.first, end), best.bearing),
+        closeTo(0, .000001),
+      );
+      expect(projectTraceRejoinEndpoint(end, route, trace, anchor), isNull);
+      final sameLeg = testPoint(108, 15);
+      final accepted = projectTraceRejoinEndpoint(
+        sameLeg,
+        [testPoint(148, 15), sameLeg],
+        trace,
+        anchor,
+      );
+      expect(accepted, isNotNull);
+      expect(accepted!.along - trace.resolve(anchor)!, closeTo(-8, .000001));
+      expect(accepted.bearing, closeTo(270, .000001));
+    },
+  );
+
+  for (final c in <(double, bool)>[
+    (8, true),
+    (10, true),
+    (10.01, false),
+    (15, false),
+  ]) {
+    test(
+      'R20b a near endpoint ${c.$1} m behind has the bounded acceptance ${c.$2}',
+      () {
+        final trace = TracePath([
+          testFix(0),
+          testFix(400, seq: 1, at: routeEpoch + 6000),
+        ]);
+        final anchor = RouteAnchor.segment(
+          SampleRef.of(trace.fixes[0]),
+          SampleRef.of(trace.fixes[1]),
+          .25,
+        );
+        final end = testPoint(100 - c.$1, 5.7),
+            route = [testPoint(60 - c.$1, 5.7), end];
+        expect(routeDistance(end, testPoint(100)), lessThan(25));
+        expect(
+          projectTraceRejoinEndpoint(end, route, trace, anchor) != null,
+          c.$2,
+        );
+      },
+    );
+  }
+
+  test(
+    'R20b accepting a near endpoint 8 m behind retains the request anchor and its next validation floor',
+    () async {
+      final f = await rejoining();
+      final call = f.calls.last;
+      final requestedPoint = f.state.anchorPoint!,
+          requestedAt = f.state.anchorAt;
+      final x = requestedPoint.lng * metersPerDegree;
+      call.succeed(
+        points: [call.origin, testPoint(x - 48, 5.7), testPoint(x - 8, 5.7)],
+      );
+      await flush();
+      expect(f.state.connector, isNotEmpty);
+      expect(f.state.anchor, call.request.anchor);
+      expect(f.state.anchorPoint, requestedPoint);
+      expect(f.state.anchorAt, requestedAt);
+      final trace = TracePath(f.trace);
+      expect(
+        trace.resolve(f.state.anchor!),
+        trace.resolve(call.request.anchor),
+      );
+      // A later validation must still measure from the requested floor: -15 m
+      // cannot turn into an acceptable -7 m after the first -8 m result.
+      final later = testPoint(x - 15, 5.7);
+      expect(
+        projectTraceRejoinEndpoint(
+          later,
+          [testPoint(x - 55, 5.7), later],
+          trace,
+          f.state.anchor!,
+        ),
+        isNull,
+      );
+      expect(f.rejoinedEvents, [false]);
+      expect(f.calls, hasLength(2));
+    },
+  );
+  test(
+    'R20 an endpoint 5.7 m beside the target may project 0.001 m behind minimum',
+    () {
+      final trace = TracePath([
+        testFix(0),
+        testFix(400, seq: 1, at: routeEpoch + 6000),
+      ]);
+      final anchor = RouteAnchor.segment(
+        SampleRef.of(trace.fixes.first),
+        SampleRef.of(trace.fixes.last),
+        .25,
+      );
+      final end = testPoint(99.999, 5.7);
+      final before = testPoint(
+        59.999,
+        5.7 - 40 * math.tan(1.4 * math.pi / 180),
+      );
+      final p = projectTraceRejoinEndpoint(end, [before, end], trace, anchor);
+      expect(p, isNotNull);
+      expect(p!.along - 100, closeTo(-.001, .000001));
+      expect(p.distance, closeTo(5.7, .000001));
+    },
+  );
+
+  test(
+    'R20 an endpoint 30 m from the target and 10 m behind remains rejected',
+    () {
+      final trace = TracePath([
+        testFix(0),
+        testFix(400, seq: 1, at: routeEpoch + 6000),
+      ]);
+      final anchor = RouteAnchor.segment(
+        SampleRef.of(trace.fixes.first),
+        SampleRef.of(trace.fixes.last),
+        .025,
+      );
+      final end = testPoint(-20);
+      expect(routeDistance(end, testPoint(10)), closeTo(30, .000001));
+      expect(
+        projectTraceRejoinEndpoint(end, [testPoint(-40), end], trace, anchor),
+        isNull,
+      );
+    },
+  );
+
+  test(
+    'R20 an opposite endpoint inside 25 m stays rejected even behind minimum',
+    () {
+      final trace = TracePath([
+        testFix(0),
+        testFix(400, seq: 1, at: routeEpoch + 6000),
+      ]);
+      final anchor = RouteAnchor.segment(
+        SampleRef.of(trace.fixes.first),
+        SampleRef.of(trace.fixes.last),
+        .25,
+      );
+      final end = testPoint(99.999, 5.7);
+      expect(
+        projectTraceRejoinEndpoint(
+          end,
+          [testPoint(139.999, 5.7), end],
+          trace,
+          anchor,
+        ),
+        isNull,
+      );
+    },
+  );
+
+  test(
+    'R20 the near-target radius does not bypass the upper bound or ambiguity',
+    () {
+      final shapes = [
+        [
+          (0.0, 20.0),
+          (100.0, 20.0),
+          (100.0, 100.0),
+          (0.0, 100.0),
+          (0.0, 0.0),
+          (100.0, 0.0),
+        ],
+        [
+          (0.0, 0.0),
+          (100.0, 0.0),
+          (100.0, 100.0),
+          (0.0, 100.0),
+          (0.0, 4.0),
+          (100.0, 4.0),
+        ],
+      ];
+      for (final shape in shapes) {
+        final trace = TracePath([
+          for (var i = 0; i < shape.length; i++)
+            testFix(
+              shape[i].$1,
+              y: shape[i].$2,
+              seq: i,
+              at: routeEpoch + i * 2000,
+            ),
+        ]);
+        final anchor = RouteAnchor.segment(
+          SampleRef.of(trace.fixes[0]),
+          SampleRef.of(trace.fixes[1]),
+          .5,
+        );
+        final end = testPoint(50);
+        expect(
+          routeDistance(end, trace.pointAt(trace.resolve(anchor)!)),
+          lessThanOrEqualTo(25),
+        );
+        expect(
+          projectTraceRejoinEndpoint(end, [testPoint(30), end], trace, anchor),
+          isNull,
+        );
+      }
+    },
+  );
+
+  test(
+    'R20 the near-boundary result paints the grey route without an early join',
+    () async {
+      final f = await rejoining();
+      final call = f.calls.last;
+      final endX = call.anchor.lng * metersPerDegree - .001;
+      final points = [
+        call.origin,
+        testPoint(endX - 40, 5.7),
+        testPoint(endX, 5.7),
+      ];
+      call.succeed(points: points);
+      await flush();
+      expect(f.state.connector, points);
+      expect(f.state.status, '회색 경로를 따라 다시 합류');
+      expect(
+        f.state.anchorPoint!.lng * metersPerDegree,
+        closeTo(call.anchor.lng * metersPerDegree, .000001),
+      );
+      expect(f.state.anchor, call.request.anchor);
+      expect(f.rejoinedEvents, [false]);
+      for (var n = 1; n <= 4; n++) {
+        final p = interpolateRoute(call.origin, points[1], n / 4);
+        f.drive(p.lng * metersPerDegree, y: p.lat * metersPerDegree, speed: 50);
+      }
+      for (final x in [endX - 20, endX, endX + 6])
+        f.drive(x, y: 5.7, speed: 20);
+      expect(f.rejoinedEvents, [false, true]);
+      expect(f.calls, hasLength(2));
+    },
+  );
+  test(
     'R17 grey route accepts a shifted endpoint and uses its trace projection as the marker',
     () async {
       final f = await rejoining();
@@ -111,7 +363,9 @@ void main() {
         (0, 0, 0, true),
         (120, 25, 0, true),
         (120.01, 0, 0, false),
-        (-.01, 0, 0, false),
+        (-.01, 0, 0, true),
+        (-25, 0, 0, false),
+        (-25.01, 0, 0, false),
         (80, 25.01, 0, false),
         (80, 0, 60, true),
         (80, 0, 60.01, false),

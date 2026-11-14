@@ -75,10 +75,11 @@ test("R19.4 an accepted endpoint emits no rejection diagnostic", async (t) => {
   assert.deepEqual(f.lines, []);
 });
 
-for (const [meters, condition, signed] of [[190, "before_minimum", "-10.0"], [330, "after_maximum", "+130.0"]] as const) {
+for (const [meters, offset, condition, signed] of [[190, 24, "before_minimum", "-10.0"], [330, 0, "after_maximum", "+130.0"]] as const) {
   test(`R19.4 ${condition} preserves the signed forward distance`, async (t) => {
     const f = fixture(t);
-    f.setProvider(async () => f.providerResult(at(meters), at(meters), at(meters - 40)));
+    // The lower-bound case remains outside the target's 25 m radius (26 m).
+    f.setProvider(async () => f.providerResult(at(meters, offset), at(meters, offset), at(meters - 40, offset)));
     await assert.rejects(f.run(), (e: unknown) => e instanceof RouteError && e.code === "ENDPOINT_MISMATCH");
     assert.equal(f.lines.length, 1);
     assert.ok(f.lines[0].includes(`condition=${condition} `));

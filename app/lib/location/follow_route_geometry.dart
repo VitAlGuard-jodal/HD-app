@@ -291,6 +291,9 @@ double routeLength(List<RoutePoint> points) {
   return length;
 }
 
+// Keep in sync with REJOIN_BACKWARD_METERS in server/src/trace_rejoin.ts.
+const traceRejoinBackwardMeters = 10.0;
+
 /// Same rule as server/src/trace_rejoin.ts. Use the actual trace projection,
 /// never a clamped end of the search window or a fabricated location sample.
 RouteProjection? projectTraceRejoinEndpoint(
@@ -328,14 +331,16 @@ RouteProjection? projectTraceRejoinEndpoint(
   final angle = before == null || p == null
       ? 180.0
       : routeDirectionDifference(routeBearing(before, end), p.bearing);
-  final wrongDirection = routeDistance(endpoint, requestedPoint) <= 25.000001
-      ? angle >= 119.999999
-      : angle > 60.000001;
+  // The near-target radius permits only a bounded backward projection, not a
+  // different visit to the road. Keep the same lower bound on the server.
+  final nearTarget = routeDistance(endpoint, requestedPoint) <= 25.000001;
+  final backwardAllowance = nearTarget ? traceRejoinBackwardMeters : 0.0;
+  final wrongDirection = nearTarget ? angle >= 119.999999 : angle > 60.000001;
   if (before == null ||
       p == null ||
       p.ambiguous ||
       p.distance > 25.000001 ||
-      p.along < minimum - .000001 ||
+      p.along < minimum - backwardAllowance - .000001 ||
       p.along > minimum + traceRejoinForwardMeters + .000001 ||
       wrongDirection)
     return null;
