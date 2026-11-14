@@ -19,6 +19,21 @@ function inputs(n: number): RecommendationInput[] {
   return Array.from({ length: n }, (_, i) => ({ handle: `car-${i}`, followRequestId: i ? `follow-${i}` : null,
     origin: { ...at(0), stream: "1".repeat(16), seq: 0, at: 0, receivedAt: 0, handle: `car-${i}`, acc: 3 } }));
 }
+test("R19.1 the next segment must pass the full common-corridor quality test", async () => {
+  const current = inputs(3);
+  current[1].origin = { ...current[1].origin, ...at(320) };
+  const result = await recommendCorridor([
+    road([at(0), at(2000)]), road([at(315), at(2000)]),
+    road([at(0), at(290), at(311, 21), at(329, 21), at(350),
+      at(520), at(541, 21), at(559, 21), at(580), at(2000)]),
+  ], current, at(2000));
+  assert.equal(result.result, "candidate");
+  // 340 m itself matches, but its sampled front window contains 20 m of
+  // mismatch, exceeding the existing 5% quality limit.
+  assert.ok(result.joinPoint.lat >= at(560).lat - 1e-10,
+    "a locally matching point before the bad section is not a qualified candidate");
+  assert.ok(distance(result.joinPoint, at(560)) < .01);
+});
 test("R18.5 a failed forward clamp selects the next verified point after the participant floor", async () => {
   const current = inputs(3);
   current[1].origin = { ...current[1].origin, ...at(320) };
@@ -35,7 +50,7 @@ test("R18.5 a failed forward clamp selects the next verified point after the par
   assert.ok(distance(result.joinPoint, at(340)) < .01);
   assert.ok(result.arrivals[1].etaToJoinSeconds > beforeClamp.arrivals[1].etaToJoinSeconds);
 });
-test("R18.5 if no valid segment remains after the floor the original candidate is retained", async () => {
+test("R19.2 no qualified segment after the floor recommends meeting at the destination", async () => {
   const current = inputs(2);
   const goal = at(1995, 5);
   current[1].origin = { ...current[1].origin, ...goal };
@@ -43,9 +58,11 @@ test("R18.5 if no valid segment remains after the floor the original candidate i
     road([at(0), at(1995), goal]),
     road([at(1995, -20), at(1995, -19.9), at(1800, -19.9), at(1800, 5), goal]),
   ], current, goal);
-  assert.equal(result.result, "candidate");
-  assert.ok(result.joinPoint.lat < at(1900).lat);
-  assert.ok(result.remainingToDestinationMeters > 100);
+  assert.equal(result.result, "destinationOnly");
+  assert.equal(result.reason, "NO_COMMON_CORRIDOR");
+  assert.ok(distance(result.joinPoint, goal) < .01);
+  assert.equal(result.joinPoint.label, "목적지에서 만나요");
+  assert.equal(result.remainingToDestinationMeters, 0);
 });
 test("R1 recommended J never trails a participant already on the common corridor", async () => {
   const current = inputs(3);

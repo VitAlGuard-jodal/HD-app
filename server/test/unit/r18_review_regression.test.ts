@@ -98,8 +98,47 @@ test("R18.3 a later continuous loop cannot change the in-flight endpoint judgeme
   assert.equal(f.calls.length, 1);
 });
 
+for (const change of ["jump", "gap", "stream"] as const) {
+  test(`R19.3 a pinned result rejects a live ${change} after its anchor`, async (t) => {
+    const f = traceFixture(t);
+    if (change === "gap") f.elapse(8000);
+    const pending = Promise.withResolvers<ProviderRoute>(); f.setProvider(() => pending.promise);
+    const started = f.nextCall(); const result = f.run();
+    const rejected = assert.rejects(result, error("TRACE_DISCONTINUITY"));
+    await started;
+    if (change === "jump") f.put(1200);
+    else if (change === "gap") f.put(700, 0, 3000);
+    else { f.elapse(1000); f.publish("leader", { ...at(600), stream: "f".repeat(16), seq: 0 }); }
+    f.publish("follower", { ...at(200, 200) });
+    pending.resolve(road(f.self, at(200)));
+    await rejected;
+    assert.equal(f.calls.length, 1);
+  });
+}
+
+test("R19.3 retrying a pinned input rechecks live continuity before another provider call", async (t) => {
+  const f = traceFixture(t);
+  f.setProvider(async () => { throw new RouteError("PROVIDER_UNAVAILABLE", 30000); });
+  await assert.rejects(f.run(), error("PROVIDER_UNAVAILABLE"));
+  f.put(700, 0, 30000); f.publish("follower", { ...at(200, 200) });
+  f.setProvider(async () => road(f.self, at(200)));
+  await assert.rejects(f.service.calculate(f.room.code, "follower", { ...f.request, requestId: "retry-broken" }, () => "leader"),
+    error("TRACE_DISCONTINUITY"));
+  assert.equal(f.calls.length, 1);
+});
+
+test("R19.3 a late provider failure also rechecks the live trace", async (t) => {
+  const f = traceFixture(t);
+  const pending = Promise.withResolvers<ProviderRoute>(); f.setProvider(() => pending.promise);
+  const started = f.nextCall(); const result = f.run();
+  const rejected = assert.rejects(result, error("TRACE_DISCONTINUITY"));
+  await started; f.put(1200);
+  pending.reject(new RouteError("NO_ROUTE"));
+  await rejected;
+});
+
 for (const local of [false, true]) {
-  test(`R18.3 ring pruning cannot invalidate a pinned ${local ? "atAnchor" : "provider"} result`, async (t) => {
+  test(`R19.3 ring pruning invalidates a pinned ${local ? "atAnchor" : "provider"} result`, async (t) => {
     const f = traceFixture(t);
     const anchor = f.request.anchor;
     assert.equal(anchor.kind, "segment"); if (anchor.kind !== "segment") return;
@@ -112,12 +151,13 @@ for (const local of [false, true]) {
     const pending = Promise.withResolvers<ProviderRoute>(); f.setProvider(() => pending.promise);
     const started = f.nextCall();
     const result = f.service.calculate(f.room.code, "follower", request, () => "leader");
+    const rejected = assert.rejects(result, error("REFERENCE_EXPIRED"));
     if (!local) await started;
     f.put(600);
     assert.notEqual(f.locations.trail(f.room.code, "leader")[0].seq, anchor.startRef.seq);
     if (!local) pending.resolve(road(self, at(200)));
-    assert.equal((await result).result, local ? "atAnchor" : "route");
-    f.service.assertCurrent(f.room.code, "follower", request, () => "leader");
+    await rejected;
+    assert.throws(() => f.service.assertCurrent(f.room.code, "follower", request, () => "leader"), error("REFERENCE_EXPIRED"));
     assert.equal(f.calls.length, local ? 0 : 1);
   });
 }
@@ -133,8 +173,8 @@ test("R18.3 freezing geometry must not freeze live authorization", async (t) => 
   await started; allowed = false; pending.resolve(road(f.self, at(200))); await rejected;
 });
 
-for (const revoke of [false, true]) {
-  test(`R18.3 schema 2 HTTP keeps pinned geometry and live consent (revoke=${revoke})`, async (t) => {
+for (const change of ["prune", "jump", "revoke"] as const) {
+  test(`R19.3 schema 2 HTTP rechecks live plan validity (${change})`, async (t) => {
     const f = planFixture(t); f.plans.close();
     const app = createApp({ ...f, routeOptions: f.routeOptions });
     const api = (handle: string, path: string, body?: unknown, method = "POST") =>
@@ -160,32 +200,35 @@ for (const revoke of [false, true]) {
     const index = trail.findIndex((s) => s.seq === anchor.startRef.seq);
     // Seed the bounded history without thousands of unrelated runtime snapshots.
     f.locations.removeAllListeners("accepted");
-    for (let n = trail.length - index; n < LOCATION_TRAIL_LIMIT; n++) {
-      f.elapse(1000); f.publish("leader", { ...at(600) });
+    if (change !== "jump") {
+      for (let n = trail.length - index; n < LOCATION_TRAIL_LIMIT; n++) {
+        f.elapse(1000); f.publish("leader", { ...at(600) });
+      }
     }
+    if (change === "jump") f.elapse(1000);
     const self = f.publish("follower", { ...at(100, 200) });
-    assert.equal(f.locations.trail(f.room.code, "leader")[0].seq, anchor.startRef.seq);
+    if (change !== "jump") assert.equal(f.locations.trail(f.room.code, "leader")[0].seq, anchor.startRef.seq);
     const pending = Promise.withResolvers<ProviderRoute>(); f.setProvider(() => pending.promise);
     const started = f.nextCall();
     const reply = api("follower", "follow-route", { schemaVersion: 2, planId: plan.planId, planRevision: 1,
       followRequestId: f.relation.requestId, guidanceGeneration: 1, calculationId: "frozen", requestId: "frozen",
       routeKind: "traceRejoin", originRef: { stream: self.stream, seq: self.seq }, anchor });
     await started;
-    f.elapse(1000); f.publish("leader", { ...at(600) });
-    if (revoke) updateUserConsent(f.db, f.users.find((u) => u.handle === "leader")!.id,
+    f.elapse(1000); f.publish("leader", { ...at(change === "jump" ? 1200 : 600) });
+    if (change === "revoke") updateUserConsent(f.db, f.users.find((u) => u.handle === "leader")!.id,
       { privacyVersion: "5", locationVersion: "5" });
     pending.resolve(road(self, at(100), at(180), at(140)));
     const result = await reply;
-    if (revoke) {
+    if (change === "revoke") {
       // Owner consent loss may clear the plan during the live context check.
       assert.ok([403, 409].includes(result.statusCode));
       assert.ok(["CONSENT_REQUIRED_TARGET", "PLAN_CHANGED"].includes(result.json().error.code));
       assert.equal(result.json().points, undefined);
       return;
     }
-    assert.equal(result.statusCode, 200, JSON.stringify(result.json()));
-    assert.deepEqual(result.json().anchor, anchor);
-    // Finishing the old calculation does not restore a pruned runtime trace.
+    assert.equal(result.statusCode, 409, JSON.stringify(result.json()));
+    assert.equal(result.json().error.code, "TRACE_UNAVAILABLE");
+    assert.equal(result.json().points, undefined);
     const now = (await api("leader", "follow-plans/leader", undefined, "GET")).json();
     assert.equal(now.runtime.phase, "traceUnavailable");
   });

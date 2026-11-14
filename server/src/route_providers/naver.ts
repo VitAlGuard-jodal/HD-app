@@ -1,8 +1,8 @@
 import { distance, finite, point, record, RouteError, ROUTE_ENDPOINT_GAP_METERS,
   ROUTE_INTERVAL_MS, ROUTE_POINT_LIMIT, ROUTE_RESPONSE_LIMIT } from "../route_contract.ts";
 import type { Point, ProviderRoute } from "../route_contract.ts";
-import { projectTraceRejoinEndpoint, REJOIN_POINT_GAP_METERS } from "../trace_rejoin.ts";
-import type { TraceRejoinEndpoint } from "../trace_rejoin.ts";
+import { RejoinEndpointError, validateTraceRejoinEndpoint, REJOIN_POINT_GAP_METERS } from "../trace_rejoin.ts";
+import type { RejoinGapDiagnostic, TraceRejoinEndpoint } from "../trace_rejoin.ts";
 
 export interface NaverConfig { provider: "naver"; keyId: string; key: string }
 export type RouteConfig = NaverConfig | { provider: "disabled" };
@@ -38,6 +38,11 @@ export function atAnchor(origin: Point, destination: Point): ProviderRoute {
     actualStart: null, actualEnd: null, startGapMeters: null, endGapMeters: null };
 }
 
+function endpointMismatch(endpoint: RouteEndpoint, diagnostic: RejoinGapDiagnostic): never {
+  if (typeof endpoint === "object") throw new RejoinEndpointError(diagnostic);
+  throw new RouteError("ENDPOINT_MISMATCH");
+}
+
 // Fixtures use invented coordinates, never saved product responses.
 export function parseNaverRoute(value: unknown, origin: Point, destination: Point, endpoint: RouteEndpoint = "reference"): ProviderRoute {
   const endGapLimit = typeof endpoint === "object" ? REJOIN_POINT_GAP_METERS
@@ -56,8 +61,14 @@ export function parseNaverRoute(value: unknown, origin: Point, destination: Poin
     || !record(summary.start) || !record(summary.goal)) invalid();
   const summaryStart = coordinate(summary.start.location);
   const summaryEnd = coordinate(summary.goal.location);
-  if (distance(origin, summaryStart) > ROUTE_ENDPOINT_GAP_METERS
-    || distance(destination, summaryEnd) > endGapLimit) throw new RouteError("ENDPOINT_MISMATCH");
+  const summaryStartGap = distance(origin, summaryStart);
+  if (summaryStartGap > ROUTE_ENDPOINT_GAP_METERS) endpointMismatch(endpoint, {
+    point: "summaryStart", condition: "summary_start_gap", distanceMeters: summaryStartGap, limitMeters: ROUTE_ENDPOINT_GAP_METERS,
+  });
+  const summaryEndGap = distance(destination, summaryEnd);
+  if (summaryEndGap > endGapLimit) endpointMismatch(endpoint, {
+    point: "summaryEnd", condition: "summary_end_gap", distanceMeters: summaryEndGap, limitMeters: endGapLimit,
+  });
   const points: Point[] = [];
   let length = 0;
   for (const raw of route.path) {
@@ -69,8 +80,18 @@ export function parseNaverRoute(value: unknown, origin: Point, destination: Poin
   }
   if (summary.distance === 0) {
     if (length > ROUTE_ENDPOINT_GAP_METERS || summary.duration !== 0) invalid();
-    if (points.some((p) => distance(p, origin) > ROUTE_ENDPOINT_GAP_METERS
-      || distance(p, destination) > ROUTE_ENDPOINT_GAP_METERS)) throw new RouteError("ENDPOINT_MISMATCH");
+    for (const p of points) {
+      const originGap = distance(p, origin);
+      if (originGap > ROUTE_ENDPOINT_GAP_METERS) endpointMismatch(endpoint, {
+        point: "zeroRoutePoint", condition: "zero_route_point", distanceMeters: originGap,
+        limitMeters: ROUTE_ENDPOINT_GAP_METERS, reference: "origin",
+      });
+      const anchorGap = distance(p, destination);
+      if (anchorGap > ROUTE_ENDPOINT_GAP_METERS) endpointMismatch(endpoint, {
+        point: "zeroRoutePoint", condition: "zero_route_point", distanceMeters: anchorGap,
+        limitMeters: ROUTE_ENDPOINT_GAP_METERS, reference: "anchor",
+      });
+    }
     return atAnchor(origin, destination);
   }
   if (points.length < 2 || summary.duration === 0) invalid();
@@ -81,10 +102,17 @@ export function parseNaverRoute(value: unknown, origin: Point, destination: Poin
   const actualEnd = points.at(-1)!;
   const startGapMeters = distance(origin, actualStart);
   const endGapMeters = distance(destination, actualEnd);
-  if (startGapMeters > ROUTE_ENDPOINT_GAP_METERS || endGapMeters > endGapLimit) throw new RouteError("ENDPOINT_MISMATCH");
-  if (typeof endpoint === "object" && (!projectTraceRejoinEndpoint(actualEnd, points, endpoint)
-    || distance(destination, summaryEnd) > ROUTE_ENDPOINT_GAP_METERS
-      && !projectTraceRejoinEndpoint(summaryEnd, points, endpoint))) throw new RouteError("ENDPOINT_MISMATCH");
+  if (startGapMeters > ROUTE_ENDPOINT_GAP_METERS) endpointMismatch(endpoint, {
+    point: "actualStart", condition: "start_gap", distanceMeters: startGapMeters, limitMeters: ROUTE_ENDPOINT_GAP_METERS,
+  });
+  if (endGapMeters > endGapLimit) endpointMismatch(endpoint, {
+    point: "actualEnd", condition: "end_gap", distanceMeters: endGapMeters, limitMeters: endGapLimit,
+  });
+  if (typeof endpoint === "object") {
+    validateTraceRejoinEndpoint(actualEnd, points, endpoint, "actualEnd");
+    if (distance(destination, summaryEnd) > ROUTE_ENDPOINT_GAP_METERS)
+      validateTraceRejoinEndpoint(summaryEnd, points, endpoint, "summaryEnd");
+  }
   return { result: "route", provider: "naver", routeOption: "traoptimal", points,
     meters: summary.distance, seconds: summary.duration / 1000,
     actualStart, actualEnd, startGapMeters, endGapMeters };

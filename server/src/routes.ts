@@ -1,14 +1,15 @@
 import type { LocationInvalidation, RoomLocationStore } from "./locations.ts";
 import { canonicalJson, distance, parseAnyRouteRequest, RouteError, sameRef, ROUTE_INPUT_TTL_MS,
   ROUTE_INTERVAL_MS, ROUTE_TIMEOUT_MS, ROUTE_ENDPOINT_GAP_METERS } from "./route_contract.ts";
-import type { AnyRouteRequest, AnyRouteResponse, PlanRouteRequest, Point, RouteAnchor, RouteErrorCode } from "./route_contract.ts";
+import type { AnyRouteRequest, AnyRouteResponse, Point, RouteAnchor, RouteErrorCode } from "./route_contract.ts";
 import { fresh, quality, recordedTraceContinuous } from "./location_quality.ts";
 import { CallBudget, DEFAULT_ROUTE_LIMITS } from "./call_budget.ts";
 import type { Reservation } from "./call_budget.ts";
 import type { FollowPlanService } from "./follow_plans.ts";
 import { atAnchor, naverProvider, routeConfig } from "./route_providers/naver.ts";
 import type { RouteConfig, RouteProvider, RouteEndpoint } from "./route_providers/naver.ts";
-import { projectTraceRejoinEndpoint } from "./trace_rejoin.ts";
+import { RejoinEndpointError, validateTraceRejoinEndpoint } from "./trace_rejoin.ts";
+import type { RejoinRejectionDiagnostic } from "./trace_rejoin.ts";
 
 export { parseRouteRequest, RouteError } from "./route_contract.ts";
 export type { FollowRouteRequest } from "./route_contract.ts";
@@ -50,6 +51,21 @@ interface ActiveCall {
 }
 
 function coordinates(fix: Point): Point { return { lat: fix.lat, lng: fix.lng }; }
+function logRejoinRejection(d: RejoinRejectionDiagnostic): void {
+  const number = (value: number | null) => value !== null && Number.isFinite(value) ? value.toFixed(1) : "na";
+  if ("distanceMeters" in d) {
+    process.stdout.write(`follow-rejoin-rejected point=${d.point} condition=${d.condition}`
+      + ` distance_m=${number(d.distanceMeters)} limit_m=${number(d.limitMeters)}`
+      + (d.reference ? ` reference=${d.reference}` : "") + "\n");
+    return;
+  }
+  const forward = d.forwardMeters !== null && Number.isFinite(d.forwardMeters)
+    ? `${d.forwardMeters >= 0 ? "+" : ""}${number(d.forwardMeters)}` : "na";
+  process.stdout.write(`follow-rejoin-rejected point=${d.point} condition=${d.condition}`
+    + ` trace_m=${number(d.traceDistanceMeters)} forward_m=${forward} angle_deg=${number(d.directionDifferenceDegrees)}`
+    + ` target_m=${number(d.targetDistanceMeters)} ambiguous_segments=${d.ambiguousSegments}`
+    + ` trace_points=${d.tracePointCount} trace_length_m=${number(d.traceLengthMeters)}\n`);
+}
 function fingerprint(request: AnyRouteRequest): string {
   const { requestId: _attempt, ...input } = request;
   return canonicalJson(input);
@@ -126,14 +142,6 @@ export class FollowRouteService {
     this.#locations.off("invalidated", this.#onInvalidated);
   }
 
-  planRouteContext(code: string, requester: string, request: PlanRouteRequest): { target: string; anchor: Point } {
-    if (!this.#plans) throw new RouteError("PLAN_NOT_READY");
-    const input = this.#inputs.get(requester);
-    const pinnedTrace = !!input && input.code === code && typeof input.endpoint === "object"
-      && input.fingerprint === fingerprint(request) && this.#clock() < input.deadline;
-    return this.#plans.routeContext(code, requester, request, { pinnedTrace });
-  }
-
   assertCurrent(code: string, requester: string, request: AnyRouteRequest, authorize: () => string): void {
     const { target } = this.#check(code, requester, request, authorize);
     const input = this.#inputs.get(requester);
@@ -144,7 +152,7 @@ export class FollowRouteService {
       this.#drop(input, "REFERENCE_EXPIRED");
       throw new RouteError("REFERENCE_EXPIRED");
     }
-    if (typeof input.endpoint !== "object") this.#requestAnchor(code, requester, target, request, false);
+    this.#requestAnchor(code, requester, target, request, false);
   }
 
   #check(code: string, requester: string, request: AnyRouteRequest, authorize: () => string): { target: string; config: RouteConfig & { provider: "naver" } } {
@@ -157,7 +165,7 @@ export class FollowRouteService {
     if (!this.#locations.isSharing(code, requester) || !this.#locations.isSharing(code, target)
       || !fresh(this.#locations.position(code, requester), this.#now())
       || !fresh(this.#locations.position(code, target), this.#now())) throw new RouteError("LOCATION_NOT_READY");
-    if (request.schemaVersion === 2 && (!this.#plans || this.planRouteContext(code, requester, request).target !== target)) throw new RouteError("PLAN_CHANGED");
+    if (request.schemaVersion === 2 && this.#plans?.routeContext(code, requester, request).target !== target) throw new RouteError("PLAN_CHANGED");
     return { target, config };
   }
 
@@ -199,7 +207,7 @@ export class FollowRouteService {
     }
     if (previous && previous.request.calculationId === request.calculationId) {
       if (previous.code !== code || previous.target !== target || previous.fingerprint !== fingerprint(request)) throw new RouteError("CONTEXT_MISMATCH");
-      if (typeof previous.endpoint !== "object") this.#requestAnchor(code, requester, target, request, false);
+      this.#requestAnchor(code, requester, target, request, false);
       return previous;
     }
     if (previous && previous.request.followRequestId === request.followRequestId && previous.request.schemaVersion === request.schemaVersion
@@ -290,10 +298,9 @@ export class FollowRouteService {
         this.assertCurrent(code, requester, request, authorize);
         if (controller.signal.aborted) throw new RouteError("CONTEXT_MISMATCH");
         const endpoint = input.endpoint;
-        if (typeof endpoint === "object" && result.result !== "atAnchor"
-          && (!result.actualEnd || !projectTraceRejoinEndpoint(result.actualEnd, result.points, endpoint)
-            || !projectTraceRejoinEndpoint(result.points.at(-1)!, result.points, endpoint))) {
-          throw new RouteError("ENDPOINT_MISMATCH");
+        if (typeof endpoint === "object" && result.result !== "atAnchor") {
+          validateTraceRejoinEndpoint(result.actualEnd, result.points, endpoint, "actualEnd");
+          validateTraceRejoinEndpoint(result.points.at(-1), result.points, endpoint, "pathEnd");
         }
         // A reply can be lost after the provider succeeds. A new HTTP attempt
         // may recompute the same pinned input within the three-call budget;
@@ -302,14 +309,19 @@ export class FollowRouteService {
         const { timing: _timing, ...wireResult } = result as typeof result & { timing?: unknown };
         return { ...request, ...wireResult, requestedOrigin: { ...input.origin }, requestedAnchor: { ...input.anchor }, serverNowMs: this.#now() };
       } catch (error) {
+        if (error instanceof RejoinEndpointError) logRejoinRejection(error.diagnostic);
+        // Provider protection survives a later context/trace rejection. Keep
+        // calculation-specific retry/error state below the live checks.
+        if (error instanceof RouteError && error.code === "PROVIDER_RATE_LIMITED" && error.retryable) {
+          this.#budget.defer(Math.max(ROUTE_INTERVAL_MS, error.retryAfterMs ?? 0));
+        }
         // Late failures must not describe a no-longer-authorized calculation.
         this.#check(code, requester, request, authorize);
         if (this.#inputs.get(requester) !== input) throw new RouteError("CONTEXT_MISMATCH");
-        if (typeof input.endpoint !== "object") this.#requestAnchor(code, requester, target, request, false);
+        this.#requestAnchor(code, requester, target, request, false);
         let failure = error instanceof RouteError ? error : new RouteError("PROVIDER_UNAVAILABLE", ROUTE_INTERVAL_MS);
         if (failure.retryable && failure.code !== "RATE_LIMITED") {
           input.retryAt = this.#clock() + Math.max(ROUTE_INTERVAL_MS, failure.retryAfterMs ?? 0);
-          if (failure.code === "PROVIDER_RATE_LIMITED") this.#budget.defer(input.retryAt - this.#clock());
           if (input.attempts >= 3) failure = new RouteError(failure.code, null, false);
         }
         input.lastError = failure;

@@ -137,6 +137,7 @@ export async function recommendCorridor(routes: ProviderRoute[], inputs: Recomme
   const badPrefix = [0];
   for (let i = 0; i < valid.length; i++) badPrefix.push(badPrefix[i] + (valid[i] ? 0 : vertices[i + 1].s - vertices[i].s));
   let frontEnd = valid.length;
+  const qualified = new Array<boolean>(valid.length).fill(false);
   for (let i = valid.length - 1; i >= 0; i--) {
     if (detourBarrier[i]) break;
     const length = vertices[i + 1].s - vertices[i].s;
@@ -149,7 +150,10 @@ export async function recommendCorridor(routes: ProviderRoute[], inputs: Recomme
     extraDistance[i]?.forEach((gap, j) => { extraUnmatched[j] += gap; });
     if (valid[i] && unmatched <= remaining * .05 + .001 && badPrefix[frontEnd] - badPrefix[i] <= frontLength * .05 + .001
       && prepared.slice(1).every((p, j) => unmatched + extraUnmatched[j] <= (p.length - mappedPositions[i][j] + length / 2) * .05 + .001)
-      && prepared.slice(1).every((p) => match(p, vertices[i], vertices[i + 1].x - vertices[i].x, vertices[i + 1].y - vertices[i].y))) candidate = i;
+      && prepared.slice(1).every((p) => match(p, vertices[i], vertices[i + 1].x - vertices[i].x, vertices[i + 1].y - vertices[i].y))) {
+      qualified[i] = true;
+      candidate = i;
+    }
     await yieldWork();
   }
   let selected = candidate >= 0 ? vertices[candidate] : null;
@@ -178,15 +182,16 @@ export async function recommendCorridor(routes: ProviderRoute[], inputs: Recomme
     const usable = (point: Vertex, segment: number) => valid[segment] && !detourBarrier[segment]
       && prepared.slice(1).every((p) => match(p, point,
         vertices[segment + 1].x - vertices[segment].x, vertices[segment + 1].y - vertices[segment].y));
-    // A clamp can land in a tolerated gap. Prefer the next verified segment
-    // after the participant floor; retain the original only if none remains.
+    // A clamp can land in a tolerated gap. Use the next fully qualified segment
+    // after the participant floor, or meet at D rather than send a car back.
     if (usable(shifted, shiftedSegment)) {
       selected = shifted;
       selectedSegment = shiftedSegment;
     } else {
+      selected = null;
       for (let i = shiftedSegment + 1; i < valid.length; i++) {
         await yieldWork();
-        if (!usable(vertices[i], i)) continue;
+        if (!qualified[i]) continue;
         selected = vertices[i]; selectedSegment = i; break;
       }
     }

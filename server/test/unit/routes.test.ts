@@ -27,6 +27,41 @@ function httpFixture(t: TestContext) {
   return { ...f, app, post };
 }
 
+for (const [retrySeconds, change] of [[undefined, "trace"], ["45", "trace"], ["45", "configuration"]] as const) {
+  test(`R19b.4 provider 429 protects the global budget after a late ${change} error (${retrySeconds ?? "default"})`, async (t) => {
+    const f = serviceFixture(t);
+    f.elapse(1000); const start = f.publish("leader");
+    f.elapse(1000); const end = f.publish("leader", { lat: destination.lat + .0001 });
+    const relation = f.locations.requestFollow(f.room.code, "third", "leader");
+    f.publish("third");
+    const input = f.request({ mode: "B", anchor: { kind: "segment",
+      startRef: { stream: start.stream, seq: start.seq }, endRef: { stream: end.stream, seq: end.seq }, fraction: .5 } });
+    const pending = Promise.withResolvers<Response>();
+    f.setProvider(naverProvider(() => pending.promise));
+    const started = f.nextCall(); const first = f.run(input);
+    const rejected = assert.rejects(first, error(change === "trace" ? "TRACE_DISCONTINUITY" : "ROUTING_DISABLED"));
+    await started;
+    f.elapse(1000);
+    if (change === "trace") f.publish("leader", { lat: destination.lat + .01 });
+    else f.setConfig({ provider: "disabled" });
+    pending.resolve(new Response(null, { status: 429, headers: retrySeconds ? { "retry-after": retrySeconds } : {} }));
+    await rejected;
+    f.setConfig(naverConfig);
+    f.setProvider(async (origin, goal) => parseNaverRoute(naverBody(origin, goal), origin, goal));
+    const peerInput = () => {
+      const self = f.locations.position(f.room.code, "third")!;
+      return { ...f.request(), followRequestId: relation.requestId, originRef: { stream: self.stream, seq: self.seq } };
+    };
+    const delay = Number(retrySeconds ?? 30) * 1000;
+    await assert.rejects(f.service.calculate(f.room.code, "third", peerInput(), () => "leader"),
+      (e: unknown) => e instanceof RouteError && e.code === "RATE_LIMITED" && e.retryAfterMs === delay);
+    assert.equal(f.calls.length, 1, "a different account must not reach Naver during its global cooldown");
+    f.advance(delay); f.publish("third");
+    assert.equal((await f.service.calculate(f.room.code, "third", peerInput(), () => "leader")).result, "route");
+    assert.equal(f.calls.length, 2);
+  });
+}
+
 test("vehicle fixes without metre accuracy pass A routing", async (t) => {
   const f = serviceFixture(t);
   f.elapse(1000);

@@ -534,8 +534,7 @@ export class FollowPlanService extends EventEmitter {
     if (JSON.stringify(v) !== before) this.#changed(entry);
     return this.#snapshot(entry);
   }
-  routeContext(code: string, requester: string, request: PlanRouteRequest,
-    { pinnedTrace = false }: { pinnedTrace?: boolean } = {}): { target: string; anchor: Point } {
+  routeContext(code: string, requester: string, request: PlanRouteRequest): { target: string; anchor: Point } {
     const entry = [...this.#entries.values()].find((e) => e.plan.roomCode === code && e.plan.planId === request.planId);
     if (!entry || entry.plan.revision !== request.planRevision) throw new RouteError("PLAN_CHANGED");
     this.#relation(entry, requester, request.followRequestId); this.#refresh(entry);
@@ -551,12 +550,7 @@ export class FollowPlanService extends EventEmitter {
       if (!destinationOnly(plan) && !(v.branch === "destination" || requester === plan.leaderHandle && r.departureAnnouncedAtMs !== null)) throw new RouteError("PLAN_NOT_READY");
       return { target: plan.leaderHandle, anchor: { lat: plan.destination.lat, lng: plan.destination.lng } };
     }
-    if (v.branch !== "trace" || request.anchor.kind !== "segment") throw new RouteError("TRACE_UNAVAILABLE");
-    // The route service alone supplies this proof after matching an unexpired
-    // pinned input. Live plan/relation/vehicle checks above still apply; this
-    // only avoids revalidating its immutable geometry against a newer ring.
-    if (pinnedTrace) return { target: plan.leaderHandle, anchor: { lat: plan.joinPoint!.lat, lng: plan.joinPoint!.lng } };
-    if (!this.#traceValid(entry)) throw new RouteError("TRACE_UNAVAILABLE");
+    if (v.branch !== "trace" || !this.#traceValid(entry) || request.anchor.kind !== "segment") throw new RouteError("TRACE_UNAVAILABLE");
     const trail = this.#locations.trail(code, plan.leaderHandle);
     const start = r.traceStartRef!;
     const startIndex = trail.findIndex((s) => sameRef(s, start.kind === "sample" ? start.ref : start.startRef));
