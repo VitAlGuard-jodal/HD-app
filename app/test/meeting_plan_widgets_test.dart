@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:unavo/location/meeting_plan_controller.dart';
+import 'package:unavo/net/meeting_plan.dart';
 import 'package:unavo/map/map_tiles.dart';
 import 'package:unavo/map/room_map.dart';
 import 'package:unavo/map/room_map_widgets.dart';
@@ -14,6 +15,58 @@ import 'support/meeting_plan_fakes.dart';
 import 'support/icon_bundle.dart';
 
 void main() {
+  testWidgets(
+    'r8 waiting group shows the approaching driver ETA, expiry and delay',
+    (tester) async {
+      final f = MeetingFixture();
+      f.stop();
+      final runtime = runtimeJson(followerPhase: 'atJoinWaiting');
+      final leader = Map<String, dynamic>.from(
+        (runtime['vehicles'] as List).first as Map,
+      );
+      (runtime['vehicles'] as List)[0] = leader;
+      leader.addAll({
+        'reportedStage': 'toJoin',
+        'etaSeconds': 120,
+        'calculatedAtMs': routeEpoch,
+      });
+      await f.enroll(runtime: runtime);
+      Future<void> mount() => tester.pumpWidget(
+        MaterialApp(
+          builder: testIconBuilder,
+          home: Scaffold(
+            body: MeetingPlanPanel(
+              controller: f.controller,
+              onClose: () {},
+              onShowPoint: (_, __) {},
+              displayName: (h) => h == 'leader' ? '앞차' : '나',
+            ),
+          ),
+        ),
+      );
+      await mount();
+      expect(
+        find.textContaining('앞차 · 합류 지점으로 이동 · 계산 당시 약 2분'),
+        findsOneWidget,
+      );
+      f.time = 60000;
+      f.update();
+      leader['etaSeconds'] = null;
+      runtime['runtimeRevision'] = 2;
+      f.controller.applyRuntime(MeetingRuntime.fromJson(runtime));
+      await tester.pump();
+      expect(find.textContaining('예상 시간 갱신 필요'), findsOneWidget);
+      expect(find.textContaining('약 2분'), findsNothing);
+      leader['condition'] = 'locationDelayed';
+      runtime['runtimeRevision'] = 3;
+      f.controller.applyRuntime(MeetingRuntime.fromJson(runtime));
+      await tester.pump();
+      expect(find.textContaining('예상 시간 갱신 필요'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      f.dispose();
+    },
+  );
   for (final car in [false, true]) {
     for (final brightness in Brightness.values) {
       testWidgets('합류 편집 $car/$brightness 는 아이콘과 한국어 설명을 유지하고 정차 해제 시 닫힌다', (

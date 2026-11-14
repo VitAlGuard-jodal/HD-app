@@ -114,6 +114,9 @@ class _MeetingPlanPanelState extends State<MeetingPlanPanel> {
                         : '먼저 목적지까지 가기',
                   ),
                   if (plan.plan.destinationOnly) const Text('목적지에서 만나요'),
+                  if (plan.runtime?.vehicle(plan.plan.leaderHandle)
+                      case final leader?)
+                    Text(_vehicleStatus(c, leader)),
                   for (final id in plan.plan.participantFollowRequestIds)
                     Text(_participantStatus(c, id)),
                 ],
@@ -363,12 +366,16 @@ class _MeetingPlanPanelState extends State<MeetingPlanPanel> {
     final plan = c.active ?? c.targetPlan ?? c.ownPlan;
     final vehicles = plan?.runtime?.vehicles ?? const [];
     for (final v in vehicles) {
-      if (v.followRequestId == id)
-        return '${widget.displayName(v.handle)} · ${v.status}${c.vehicleEtaText(v) == null ? '' : ' · ${c.vehicleEtaText(v)}'}';
+      if (v.followRequestId == id) return _vehicleStatus(c, v);
     }
     for (final p in c.participants) {
       if (p.followRequestId == id) return '${p.displayName} · 안내 미시작';
     }
     return '초대한 차량 · 안내 미시작';
+  }
+
+  String _vehicleStatus(MeetingPlanController c, PlanVehicle vehicle) {
+    final eta = c.vehicleEtaText(vehicle);
+    return '${widget.displayName(vehicle.handle)} · ${vehicle.status}${eta == null ? '' : ' · $eta'}';
   }
 }

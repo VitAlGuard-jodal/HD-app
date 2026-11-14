@@ -6,6 +6,49 @@ import 'package:unavo/net/models.dart';
 import 'support/follow_route_fakes.dart';
 
 void main() {
+  test('r8 parked leader then 160 m approach joins within 3 s of P0', () async {
+    final f = RouteFixture();
+    addTearDown(f.dispose);
+    f.self = testFix(0, handle: 'self', speed: 0);
+    f.leader = testFix(160, speed: 0, acc: null, src: 'vehicle');
+    f.trace = [f.leader!];
+    await f.start();
+    final anchor = f.state.anchor;
+    var leaderSeq = 0;
+    // A minute of 5 s stationary heartbeats after accepting the request.
+    for (var second = 5; second <= 65; second += 5) {
+      f.leader = testFix(
+        160,
+        seq: ++leaderSeq,
+        at: routeEpoch + second * 1000,
+        speed: 0,
+        acc: null,
+        src: 'vehicle',
+      );
+      f.trace = [...f.trace, f.leader!];
+      f.drive(0, elapsed: 5000, speed: 0);
+    }
+    for (var second = 1; second <= 18; second++) {
+      f.leader = testFix(
+        160 + second * 13.9,
+        seq: ++leaderSeq,
+        at: routeEpoch + (65 + second) * 1000,
+        speed: 13.9,
+        acc: null,
+        src: 'vehicle',
+      );
+      f.trace = [...f.trace, f.leader!];
+      f.drive(
+        second <= 3 ? 0 : (second - 3) * 13.9,
+        speed: second <= 3 ? 0 : 13.9,
+      );
+    }
+    expect(f.state.anchor, anchor);
+    expect(f.state.phase, FollowPhase.onTrace);
+    expect(f.joins, [('follow-1', 1)]);
+    expect(f.calls, hasLength(1));
+  });
+
   test('vehicle fixes without metre accuracy start A and join once', () async {
     final f = RouteFixture(mapFix: vehicleFix);
     addTearDown(f.dispose);

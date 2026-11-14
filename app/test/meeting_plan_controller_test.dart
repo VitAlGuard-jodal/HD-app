@@ -7,6 +7,183 @@ import 'support/follow_route_fakes.dart';
 import 'support/meeting_plan_fakes.dart';
 
 void main() {
+  for (final owner in [false, true]) {
+    test(
+      'r8 approach ETA reports once for ${owner ? 'leader' : 'follower'}',
+      () async {
+        final f = owner
+            ? MeetingFixture(
+                account: 'leader',
+                target: null,
+                relationship: null,
+              )
+            : MeetingFixture();
+        addTearDown(f.dispose);
+        f.stop();
+        if (owner) {
+          f.controller.applyPlan(snapshot());
+          await f.controller.selectOwnGuidance();
+        } else {
+          await f.enroll();
+        }
+        f.routes.single.succeed();
+        await flush();
+        final reports = f.calls.where(
+          (c) => c.path.endsWith('/guidance-status'),
+        );
+        expect(reports, hasLength(1));
+        final report = reports.single;
+        expect(report.method, 'PUT');
+        expect(report.body, {
+          'planId': 'plan-1',
+          'revision': 1,
+          'followRequestId': owner ? null : 'follow-1',
+          'originRef': SampleRef.of(f.self!).toJson(),
+          'stage': 'toJoin',
+          'etaSeconds': 12.345,
+          'calculatedAtMs': routeEpoch,
+        });
+        report.complete({});
+        await flush();
+        for (var n = 0; n < 30; n++) f.drive(0);
+        expect(reports, hasLength(1));
+        expect(f.routes, hasLength(1));
+        expect(f.controller.etaText, contains('계산 당시 약 1분'));
+        expect(f.controller.ownRuntime!.phase, 'toJoin');
+        expect(f.controller.ownRuntime!.branch, 'pending');
+        // The server calculation clock, not receipt time, defines the 60 s TTL.
+        f.time = 60000;
+        f.update();
+        expect(f.controller.etaText, '예상 시간 갱신 필요');
+      },
+    );
+  }
+
+  test(
+    'r8 group ETA expires visibly and is hidden on delay or arrival',
+    () async {
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      f.stop();
+      await f.enroll();
+      PlanVehicle vehicle({
+        String phase = 'toJoin',
+        String? condition,
+        double? seconds = 120,
+      }) => PlanVehicle(
+        handle: 'leader',
+        followRequestId: null,
+        phase: phase,
+        branch: 'pending',
+        condition: condition,
+        reportedStage: 'toJoin',
+        etaSeconds: seconds,
+        calculatedAtMs: routeEpoch,
+      );
+      expect(f.controller.vehicleEtaText(vehicle()), contains('2분'));
+      f.time = 30000;
+      f.update();
+      expect(f.controller.vehicleEtaText(vehicle()), contains('2분'));
+      f.time = 60000;
+      f.update();
+      expect(
+        f.controller.vehicleEtaText(vehicle(seconds: null)),
+        '예상 시간 갱신 필요',
+      );
+      expect(
+        f.controller.vehicleEtaText(vehicle(condition: 'locationDelayed')),
+        isNull,
+      );
+      expect(
+        f.controller.vehicleEtaText(vehicle(phase: 'atJoinWaiting')),
+        isNull,
+      );
+      f.connected = false;
+      f.update();
+      expect(f.controller.vehicleEtaText(vehicle()), isNull);
+    },
+  );
+
+  for (final invalidation in ['plan', 'device', 'arrival', 'consent']) {
+    test(
+      'r8 late approach result cannot report after $invalidation changes',
+      () async {
+        final f = MeetingFixture();
+        addTearDown(f.dispose);
+        f.stop();
+        await f.enroll();
+        final route = f.routes.single;
+        switch (invalidation) {
+          case 'plan':
+            f.controller.planCleared('plan-1', 'leader');
+          case 'device':
+            f.device = 'replacement';
+            f.update();
+          case 'arrival':
+            f.controller.applyRuntime(
+              MeetingRuntime.fromJson(
+                runtimeJson(runtimeRevision: 2, followerPhase: 'atJoinWaiting'),
+              ),
+            );
+          case 'consent':
+            f.consent = false;
+            f.update();
+        }
+        route.succeed();
+        await flush();
+        expect(
+          f.calls.where((c) => c.path.endsWith('/guidance-status')),
+          isEmpty,
+        );
+      },
+    );
+  }
+
+  test(
+    'r8 delayed location defers ETA report; failure never stops guidance or repeats routing',
+    () async {
+      final f = MeetingFixture();
+      addTearDown(f.dispose);
+      f.stop();
+      await f.enroll();
+      f.age = 10001;
+      f.update();
+      f.routes.single.succeed();
+      await flush();
+      final reports = f.calls.where((c) => c.path.endsWith('/guidance-status'));
+      expect(reports, isEmpty);
+      f.age = 0;
+      f.drive(0);
+      expect(reports, hasLength(1));
+      expect(reports.single.body!['originRef'], SampleRef.of(f.self!).toJson());
+      reports.single.pending.completeError(
+        const FollowRouteException('NETWORK_ERROR'),
+      );
+      await flush();
+      f.drive(0);
+      expect(f.controller.view!.connector, isNotEmpty);
+      expect(f.controller.ownRuntime!.phase, 'toJoin');
+      expect(reports, hasLength(1));
+      expect(f.routes, hasLength(1));
+    },
+  );
+
+  test('r8 an ETA acknowledgement cannot restore a cleared plan', () async {
+    final f = MeetingFixture();
+    addTearDown(f.dispose);
+    f.stop();
+    await f.enroll();
+    f.routes.single.succeed();
+    await flush();
+    final report = f.calls.last;
+    expect(report.path, endsWith('/guidance-status'));
+    f.controller.planCleared('plan-1', 'leader');
+    expect(report.cancellation.isCancelled, isTrue);
+    report.complete({'plan': planJson(), 'runtime': runtimeJson()});
+    await flush();
+    expect(f.controller.active, isNull);
+  });
+
   test(
     'plan trace keeps progress through a location hold and uses schema 2 for actual rejoining',
     () {

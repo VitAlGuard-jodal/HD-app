@@ -275,6 +275,8 @@ class FollowRouteController extends ChangeNotifier {
   bool _hadAnchorInTrace = false;
   bool _selfConsentBlocked = false;
   bool _featureBlocked = false;
+  String? _diagnosticState;
+  int? _diagnosticAt;
   String? get calculationId => _calculation;
   bool get calculating => _cancellation != null;
 
@@ -299,7 +301,37 @@ class FollowRouteController extends ChangeNotifier {
       _paths = splitFollowTrace(input.trace);
     }
     _evaluate();
+    if (kDebugMode) _logDiagnostic();
     notifyListeners();
+  }
+
+  void _logDiagnostic() {
+    String age(double value) => value.isFinite ? '${value.round()}' : 'unknown';
+    final s = _state!, path = _activePath();
+    final state =
+        '${s.phase.name}/${s.condition.name}/${_paths.length}/${path != null}';
+    if (_diagnosticState == state &&
+        (s.phase == FollowPhase.onTrace ||
+            _diagnosticAt != null && _now() - _diagnosticAt! < 5000))
+      return;
+    _diagnosticState = state;
+    _diagnosticAt = _now();
+    final index = path == null ? -1 : _paths.indexOf(path);
+    final next = index >= 0 && index + 1 < _paths.length
+        ? _paths[index + 1].fixes.first
+        : null;
+    final tail = path?.fixes.last;
+    // Debug builds only. No coordinates, account IDs or provider geometry.
+    // Distinguish a missing seed, a broken P0 branch, and join-evidence delay.
+    debugPrint(
+      'follow-guidance: $state '
+      'trace=${_input!.trace.length} active=${path?.fixes.length ?? 0} '
+      'anchorSeq=${s.anchor?.start.seq} selfSeq=${_input!.self?.seq} '
+      'anchorReached=${s.anchorReached} joins=$_joinSamples '
+      'selfAge=${age(_input!.selfAgeMs)} leaderAge=${age(_input!.leaderAgeMs)} '
+      'badQuality=${_input!.trace.where((f) => !routeQuality(f)).length}'
+      '${tail == null || next == null ? '' : ' gapSeq=${next.seq - tail.seq} gapMs=${next.at - tail.at} sameStream=${next.stream == tail.stream}'}',
+    );
   }
 
   bool changeMode(FollowMode mode) {
@@ -1183,6 +1215,8 @@ class FollowRouteController extends ChangeNotifier {
 
   void clear() {
     if (_state == null) return;
+    _diagnosticState = null;
+    _diagnosticAt = null;
     _invalidate();
     _clearCalculation();
     _state = null;

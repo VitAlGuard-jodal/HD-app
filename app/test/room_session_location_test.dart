@@ -14,12 +14,16 @@ import 'package:unavo/core/driving_state.dart';
 import 'package:unavo/location/location_share.dart';
 import 'package:unavo/location/location_source.dart';
 import 'package:unavo/location/follow_voice_guidance.dart';
+import 'package:unavo/location/follow_route_controller.dart';
+import 'package:unavo/location/follow_route_geometry.dart';
+import 'package:unavo/net/follow_route.dart';
 import 'package:unavo/net/api_client.dart';
 import 'package:unavo/net/models.dart';
 import 'package:unavo/net/meeting_plan.dart';
 import 'package:unavo/room/room_session.dart';
 
 import 'support/location_fakes.dart';
+import 'support/follow_route_fakes.dart' as route;
 import 'support/meeting_plan_fakes.dart' as meeting;
 import 'support/consent_fakes.dart' show testConsent;
 
@@ -42,6 +46,120 @@ LocationFix _fix(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('r8 accepted trail and parked heartbeats join within 3 s of P0', () {
+    fakeAsync((clock) {
+      final f = _Fixture.create(clock);
+      f.store.updateConsent(
+        testConsent(),
+        sessionRevision: f.store.sessionRevision,
+      );
+      f.open();
+      f.startSharing();
+      var leaderSeq = 0, revision = 1;
+      LocationFix leader(double x, double speed) => route.testFix(
+        x,
+        handle: 'alice',
+        seq: leaderSeq++,
+        at: f.now().millisecondsSinceEpoch,
+        speed: speed,
+        src: 'vehicle',
+        acc: null,
+      );
+      void self(double x, double speed) {
+        final point = route.testPoint(x);
+        f.source.add(
+          LocationSample(
+            lat: point.lat,
+            lng: point.lng,
+            speed: speed,
+            src: 'vehicle',
+            at: f.now(),
+          ),
+        );
+        clock.flushMicrotasks();
+      }
+
+      var current = leader(160, 0);
+      f.event(
+        Hello(
+          'bob',
+          f.api.members,
+          'alice',
+          [current],
+          const {},
+          null,
+          const [],
+          revision,
+          null,
+          null,
+          f.now().millisecondsSinceEpoch,
+          const FollowRouteFeature(enabled: true),
+        ),
+      );
+      self(0, 0);
+      f.api.accepted = false;
+      f.api.revision = revision;
+      f.api.routeLoader = (room, request, cancellation) async =>
+          FollowRouteResult.fromJson(
+            route.routeJson(request, route.testPoint(0), route.testPoint(160)),
+            request,
+          );
+      _finish(clock, f.session.startFollowing('alice'));
+      clock.elapse(const Duration(seconds: 5));
+      self(0, 0);
+      current = leader(160, 0);
+      f.event(
+        LocationUpdated(
+          current,
+          revision: ++revision,
+          serverNowMs: f.now().millisecondsSinceEpoch,
+        ),
+      );
+      // The server sends the trail before the acceptance response.
+      f.event(TrailUpdated('alice', [current], revision: ++revision));
+      f.event(
+        FollowResponse(
+          'alice',
+          true,
+          requestId: 'alice-request',
+          requester: 'bob',
+          revision: revision,
+        ),
+      );
+      for (var second = 5; second <= 65; second += 5) {
+        clock.elapse(const Duration(seconds: 5));
+        current = leader(160, 0);
+        f.event(
+          LocationUpdated(
+            current,
+            revision: ++revision,
+            serverNowMs: f.now().millisecondsSinceEpoch,
+          ),
+        );
+        self(0, 0);
+      }
+      final anchor = f.session.followRoute.state!.anchor;
+      expect(anchor, isNotNull);
+      for (var second = 1; second <= 18; second++) {
+        clock.elapse(const Duration(seconds: 1));
+        current = leader(160 + second * 13.9, 13.9);
+        f.event(
+          LocationUpdated(
+            current,
+            revision: ++revision,
+            serverNowMs: f.now().millisecondsSinceEpoch,
+          ),
+        );
+        self(second <= 3 ? 0 : (second - 3) * 13.9, second <= 3 ? 0 : 13.9);
+      }
+      expect(splitFollowTrace(f.session.trailOf('alice')), hasLength(1));
+      expect(f.session.followRoute.state!.anchor, anchor);
+      expect(f.session.followRoute.state!.phase, FollowPhase.onTrace);
+      expect(f.session.followRoute.state!.joinRound, 1);
+      f.dispose();
+    });
+  });
 
   test('합류 계획 hello는 위치 revision과 독립이며 빈 재접속은 ②를 종료한다', () {
     fakeAsync((clock) {
@@ -1796,6 +1914,7 @@ class _Fixture {
       driving: driving,
       locationSource: source,
       locationNow: now,
+      monotonicNow: () => clock.elapsed.inMilliseconds,
       followVoice: speech == null
           ? null
           : FollowVoiceGuidance(
@@ -1909,6 +2028,15 @@ class _Api extends ApiClient {
     Member('bob', '보비', '2'),
   ];
   final follows = <String>[];
+  FollowRouteLoader? routeLoader;
+  @override
+  Future<FollowRouteResult> followRoute(
+    String code,
+    FollowRouteRequest request,
+    RouteCancellation cancellation,
+  ) => routeLoader == null
+      ? super.followRoute(code, request, cancellation)
+      : routeLoader!(code, request, cancellation);
   Future<void>? followGate;
   Future<void>? stopGate, responseGate;
   int unfollows = 0;

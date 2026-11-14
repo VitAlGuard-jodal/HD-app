@@ -106,6 +106,8 @@ class MeetingPlanController extends ChangeNotifier {
   String? _draftPlanId;
   int _draftRevision = 0;
   FollowRouteResult? _route, _rejectedRoute;
+  FollowRouteResult? _reportedRoute;
+  RouteCancellation? _etaReport;
   FollowRouteResult? _approachRoute;
   Object? _approachIdentity;
   RoutePoint? _originPoint;
@@ -1042,6 +1044,7 @@ class MeetingPlanController extends ChangeNotifier {
         _sendRoute();
     }
     _judgeFixedRoute();
+    _reportRouteEta();
   }
 
   void _startRoute(PlanRouteKind kind) {
@@ -1138,6 +1141,7 @@ class MeetingPlanController extends ChangeNotifier {
           : FollowRouteCondition.offRoute;
       _calculatedAt = _now();
       _nextAttempt = null;
+      _reportRouteEta();
     } catch (e) {
       if (!_currentRoute(r, c, identity, epoch)) return;
       final f = e is FollowRouteException
@@ -1366,6 +1370,53 @@ class MeetingPlanController extends ChangeNotifier {
     }
   }
 
+  void _reportRouteEta() {
+    final result = _route, r = _routeRequest, a = active, i = _input;
+    if (result == null ||
+        r == null ||
+        a == null ||
+        i?.self == null ||
+        !_fresh ||
+        identical(_reportedRoute, result) ||
+        _condition != FollowRouteCondition.ready ||
+        routeKind != r.routeKind ||
+        _etaExpired)
+      return;
+    // One advisory report per usable calculation, with the server's calculation
+    // clock and a currently acknowledged sample. Never count down while parked.
+    _reportedRoute = result;
+    _etaReport?.cancel();
+    final c = _etaReport = _operation();
+    unawaited(() async {
+      try {
+        await request(
+          i!.room,
+          'PUT',
+          '/follow-plans/${Uri.encodeComponent(a.plan.leaderHandle)}/guidance-status',
+          {
+            'planId': a.plan.planId,
+            'revision': a.plan.revision,
+            'followRequestId': owner ? null : i.relationship,
+            'originRef': SampleRef.of(i.self!).toJson(),
+            'stage': r.routeKind == PlanRouteKind.planJoin
+                ? 'toJoin'
+                : 'toDestination',
+            'etaSeconds': result.seconds,
+            'calculatedAtMs': result.serverNowMs.toInt(),
+          },
+          c,
+        );
+        // Progress arrives through the revision-checked SSE stream. An advisory
+        // acknowledgement must not restore an old plan or change a branch.
+      } catch (_) {
+        // Reporting failure does not stop local guidance or trigger routing.
+      } finally {
+        _pending.remove(c);
+        if (identical(_etaReport, c)) _etaReport = null;
+      }
+    }());
+  }
+
   bool resetGuidance() {
     if (!canEditMeetingPlan || !selected || active == null) return false;
     restored = false;
@@ -1378,6 +1429,9 @@ class MeetingPlanController extends ChangeNotifier {
   }
 
   void _cancelRoute() {
+    _etaReport?.cancel();
+    _etaReport = null;
+    _reportedRoute = null;
     _routeCancel?.cancel();
     _routeCancel = null;
     _routeRequest = null;
@@ -1429,19 +1483,30 @@ class MeetingPlanController extends ChangeNotifier {
     };
   }
 
+  bool get _etaExpired =>
+      _calculatedAt == null ||
+      _now() - _calculatedAt! >= 60000 ||
+      _route != null &&
+          _input?.serverNowMs != null &&
+          _input!.serverNowMs! - _route!.serverNowMs >= 60000;
+
   String? get etaText => !_fresh || _route == null
       ? null
-      : _calculatedAt == null || _now() - _calculatedAt! >= 60000
+      : _etaExpired
       ? '예상 시간 갱신 필요'
       : '계산 당시 약 ${(_route!.seconds / 60).ceil()}분 · 실시간 남은 시간 아님';
   String? vehicleEtaText(PlanVehicle vehicle) {
     final now = _input?.serverNowMs;
-    if (vehicle.condition != null ||
+    if (_input?.connected != true ||
+        vehicle.condition != null ||
         now == null ||
-        vehicle.etaSeconds == null ||
-        vehicle.calculatedAtMs == null)
+        vehicle.calculatedAtMs == null ||
+        vehicle.reportedStage == 'toJoin' && vehicle.phase != 'toJoin' ||
+        vehicle.phase == 'completed')
       return null;
     if (now - vehicle.calculatedAtMs! >= 60000) return '예상 시간 갱신 필요';
+    if (vehicle.etaSeconds == null || now < vehicle.calculatedAtMs!)
+      return null;
     return '계산 당시 약 ${(vehicle.etaSeconds! / 60).ceil()}분';
   }
 

@@ -75,10 +75,12 @@ class RoomSession extends ChangeNotifier {
     this.driving,
     LocationSource? locationSource,
     DateTime Function()? locationNow,
+    int Function()? monotonicNow,
     FollowVoiceGuidance? followVoice,
     VehicleState? vehicle,
     FollowVoiceGuidance? vehicleVoice,
   }) {
+    _routeNow = monotonicNow ?? () => _routeClock.elapsedMilliseconds;
     final speech = SpeechOutputCoordinator(now: locationNow);
     // AppServices supplies the platform stream. Standalone/test sessions retain
     // the same manual fallback without constructing a platform dependency.
@@ -109,6 +111,7 @@ class RoomSession extends ChangeNotifier {
       output: speech.scope(),
     );
     followRoute = FollowRouteController(
+      now: _routeNow,
       load: api.followRoute,
       loadPlan: api.planRoute,
       canChange: () => !followNeedsStop && !state.isLeaving && !_deviceReplaced,
@@ -151,6 +154,7 @@ class RoomSession extends ChangeNotifier {
     );
     followRoute.addListener(_routeChanged);
     meetingPlan = MeetingPlanController(
+      now: _routeNow,
       request: api.meetingRequest,
       loadRoute: api.planRoute,
       onInvalidated: _routeVoice.clear,
@@ -181,6 +185,7 @@ class RoomSession extends ChangeNotifier {
           !state.isLeaving && !_deviceReplaced && !_exitStopsLocation,
       selfHandle: () => store.handle,
       now: locationNow,
+      monotonicNow: _routeNow,
     );
     _lastLocationState = _locationState();
     locationShare.addListener(_locationChanged);
@@ -282,9 +287,8 @@ class RoomSession extends ChangeNotifier {
   }
 
   final _routeClock = Stopwatch()..start();
-  late final _remoteRouteClock = FollowLocationClock(
-    () => _routeClock.elapsedMilliseconds,
-  );
+  late final int Function() _routeNow;
+  late final _remoteRouteClock = FollowLocationClock(() => _routeNow());
   Timer? _routeTimer;
   bool _updatingRoute = false, _routeRestored = false;
   FollowRouteFeature? _routeFeature;
@@ -293,7 +297,7 @@ class RoomSession extends ChangeNotifier {
   void _observePlanClock(num? value) {
     if (value != null && value.isFinite && value > 0) {
       _planServerNow = value;
-      _planClockAt = _routeClock.elapsedMilliseconds;
+      _planClockAt = _routeNow();
     }
   }
 
@@ -980,6 +984,14 @@ class RoomSession extends ChangeNotifier {
         _applyFollowResponse(event);
         return;
       case TrailUpdated():
+        if (kDebugMode &&
+            event.handle == followIntent &&
+            event.revision < _serverRevision) {
+          debugPrint(
+            'follow-guidance: ignoredTrail revision=${event.revision} '
+            'current=$_serverRevision points=${event.points.length}',
+          );
+        }
         if ((event.handle != followIntent &&
                 event.handle != _deferredFollowIntent) ||
             event.revision < _serverRevision)
@@ -2328,9 +2340,7 @@ class RoomSession extends ChangeNotifier {
           leaderAgeMs: _remoteRouteClock.age(leader),
           serverNowMs: _planServerNow == null
               ? _remoteRouteClock.serverNowMs
-              : _planServerNow! +
-                    _routeClock.elapsedMilliseconds -
-                    _planClockAt,
+              : _planServerNow! + _routeNow() - _planClockAt,
         ),
       );
       if (!locationShare.sharing) {

@@ -357,7 +357,9 @@ export class FollowPlanService extends EventEmitter {
       const fix = this.#locations.position(plan.roomCode, v.handle);
       v.condition = !fix || !fresh(fix, this.#now()) ? fix && !quality(fix) ? "poorAccuracy" : "locationDelayed" : null;
       if (v.condition) { v.etaSeconds = null; v.calculatedAtMs = null; continue; }
-      if (v.calculatedAtMs !== null && this.#now() - v.calculatedAtMs >= 60_000) { v.etaSeconds = null; v.calculatedAtMs = null; }
+      // Keep the calculation time after expiry so viewers can ask for a refresh.
+      // Delayed/poor locations above still remove the entire ETA immediately.
+      if (v.calculatedAtMs !== null && this.#now() - v.calculatedAtMs >= 60_000) v.etaSeconds = null;
     }
     if (r.departureCohort && r.departedAtMs === null && (entry.announcedClock === undefined || this.#clock() - entry.announcedClock >= 60_000
       || r.vehicles.some((v) => v.phase !== "invited" && v.condition !== null))) this.#unprepare(entry);
@@ -412,6 +414,13 @@ export class FollowPlanService extends EventEmitter {
       }
       const active = r.vehicles.filter((v) => v.phase !== "invited");
       if (active.length && active.every((v) => v.phase === "completed")) r.phase = "completed";
+    }
+    for (const v of r.vehicles) {
+      if (v.phase === "completed" || v.reportedStage === "toJoin" && (v.phase !== "toJoin" || v.passedAtMs !== null)
+        || v.reportedStage === "toDestination" && !destinationOnly(plan) && v.branch !== "destination"
+          && !(v.handle === plan.leaderHandle && r.departureAnnouncedAtMs !== null)) {
+        v.reportedStage = null; v.etaSeconds = null; v.calculatedAtMs = null;
+      }
     }
     if (JSON.stringify(r) !== before) this.#changed(entry);
   }
@@ -489,11 +498,12 @@ export class FollowPlanService extends EventEmitter {
     const v = entry.runtime.vehicles.find((v) => v.handle === requester)!;
     if (v.phase === "invited" || v.phase === "completed" || entry.runtime.phase === "idle") throw new RouteError("PLAN_NOT_READY");
     if (["onTrace", "rejoining"].includes(input.stage) && (v.branch !== "trace" || !this.#traceValid(entry))) throw new RouteError("TRACE_UNAVAILABLE");
-    if (input.stage === "toJoin" && v.phase !== "toJoin") throw new RouteError("PLAN_NOT_READY");
+    if (input.stage === "toJoin" && (v.phase !== "toJoin" || v.branch !== "pending" || v.passedAtMs !== null)) throw new RouteError("PLAN_NOT_READY");
     if (input.stage === "toDestination" && !destinationOnly(entry.plan) && v.branch !== "destination"
       && !(requester === leader && entry.runtime.departureAnnouncedAtMs !== null)) throw new RouteError("PLAN_NOT_READY");
     if (!fresh(this.#locations.recentSample(code, requester, input.originRef), this.#now())) throw new RouteError("REFERENCE_EXPIRED");
     if (input.calculatedAtMs !== undefined && (input.calculatedAtMs > this.#now() || this.#now() - input.calculatedAtMs >= 60_000)) throw new RouteError("INVALID_REQUEST");
+    if (input.calculatedAtMs !== undefined && v.calculatedAtMs !== null && input.calculatedAtMs < v.calculatedAtMs) throw new RouteError("INVALID_REQUEST");
     const before = JSON.stringify(v);
     // Deliberately advisory: an app report never changes authoritative phase,
     // branch, arrival, departure or permissions.

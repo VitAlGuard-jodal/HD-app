@@ -152,6 +152,40 @@ test("plan update, progress and clear events are silent on replay and unchanged 
   f.plans.sweep();
   assert.deepEqual(events, []);
 });
+test("r8 acceptance sends P0 trail before response, then continuous parked and moving location events", async (t) => {
+  const f = planFixture(t); f.plans.close(); f.locations.clear(f.room.code);
+  const app = createApp({ ...f, routeOptions: f.routeOptions });
+  const events: { name: string; data: any }[] = [];
+  t.after(f.hub.subscribe(f.room.code, "follower", tokenHash(f.tokens.get("follower")!), (name, data) => events.push({ name, data })));
+  const api = (handle: string, path: string, body: unknown) => dispatch(app, f.tokens.get(handle)!, body,
+    { path: `/v1/rooms/${f.room.code}/${path}` }).done;
+  const pending = (await api("follower", "follow", { target: "leader" })).json();
+  assert.equal(pending.accepted, false);
+  const publish = async (seq: number, meters: number, speed: number) => {
+    const response = await api("leader", "location", { stream: "2222222222222222", seq, ...at(meters), at: f.now(), src: "vehicle", speed });
+    assert.equal(response.statusCode, 202); assert.equal(response.json().dropped, false);
+  };
+  f.elapse(5000); await publish(0, 160, 0);
+  events.length = 0;
+  await api("leader", "follow/respond", { requestId: pending.requestId, accepted: true });
+  assert.deepEqual(events.map((e) => e.name), ["trail", "follow-response"]);
+  const trail = [...events[0].data.points];
+  assert.equal(trail.length, 1); assert.equal(trail[0].seq, 0); assert.equal(trail[0].src, "vehicle");
+  assert.equal(events[0].data.revision, events[1].data.revision);
+  events.length = 0;
+  let seq = 0;
+  for (let second = 5; second <= 65; second += 5) { f.elapse(5000); await publish(++seq, 160, 0); }
+  for (let second = 1; second <= 18; second++) { f.elapse(1000); await publish(++seq, 160 + second * 13.9, 13.9); }
+  trail.push(...events.filter((e) => e.name === "location").map((e) => e.data));
+  assert.equal(trail.length, 32);
+  for (let i = 1; i < trail.length; i++) {
+    assert.equal(trail[i].stream, trail[i - 1].stream);
+    assert.equal(trail[i].seq, trail[i - 1].seq + 1);
+    assert.ok(trail[i].at > trail[i - 1].at && trail[i].at - trail[i - 1].at <= 10000);
+    assert.ok(trail[i].revision > (trail[i - 1].revision ?? 0));
+    assert.equal(trail[i].src, "vehicle");
+  }
+});
 test("gate 1: strict schema 2 preserves schema 1 and explicit owner-null references", (t) => {
   const f = planFixture(t); f.enroll(f.save());
   const input = route(f, "planJoin"); assert.deepEqual(parseAnyRouteRequest(input), input);
@@ -393,6 +427,82 @@ test("advisory approach ETA remains fixed while stopped, expires at 60 s, and ca
   assert.equal(v.etaSeconds, 100); assert.equal(v.branch, "pending"); assert.equal(v.arrivedAtMs, null);
   for (let i = 0; i < 30; i++) f.step();
   assert.equal(f.get().runtime!.vehicles.find((v) => v.handle === "follower")!.etaSeconds, null);
+  assert.equal(f.get().runtime!.vehicles.find((v) => v.handle === "follower")!.calculatedAtMs, input.calculatedAtMs,
+    "retain the calculation timestamp so the group can show refresh-needed instead of silently losing the ETA");
+});
+test("r8 approach ETA clears at authoritative arrival and rejects late approach reports", (t) => {
+  const f = planFixture(t); const saved = f.save(); f.enroll(saved);
+  const fix = f.locations.position(f.room.code, "follower")!;
+  const input = { planId: saved.plan!.planId, revision: 1, followRequestId: f.relation.requestId,
+    originRef: { stream: fix.stream, seq: fix.seq }, stage: "toJoin", etaSeconds: 100, calculatedAtMs: f.now() };
+  f.plans.guidanceStatus(f.room.code, "leader", "follower", input);
+  f.rest({ follower: 100 });
+  const v = f.get().runtime!.vehicles.find((v) => v.handle === "follower")!;
+  assert.equal(v.phase, "atJoinWaiting"); assert.equal(v.etaSeconds, null); assert.equal(v.calculatedAtMs, null);
+  assert.equal(v.reportedStage, null);
+  assert.throws(() => f.plans.guidanceStatus(f.room.code, "leader", "follower", input), error("PLAN_NOT_READY"));
+});
+test("r8 guidance ETA validates clocks, references and paired fields without changing authoritative state", (t) => {
+  const f = planFixture(t); const saved = f.save(); f.enroll(saved);
+  const fix = f.locations.position(f.room.code, "follower")!;
+  const base = { planId: saved.plan!.planId, revision: 1, followRequestId: f.relation.requestId,
+    originRef: { stream: fix.stream, seq: fix.seq }, stage: "toJoin", etaSeconds: 100, calculatedAtMs: f.now() };
+  for (const change of [
+    { etaSeconds: -1 }, { etaSeconds: 604801 }, { etaSeconds: NaN },
+    { calculatedAtMs: f.now() + 1 }, { calculatedAtMs: f.now() - 60000 },
+    { calculatedAtMs: f.now() + .5 }, { etaSeconds: undefined }, { calculatedAtMs: undefined },
+    { arrived: true }, { stage: "atJoinWaiting" },
+  ]) assert.throws(() => f.plans.guidanceStatus(f.room.code, "leader", "follower", { ...base, ...change }), error("INVALID_REQUEST"));
+  assert.throws(() => f.plans.guidanceStatus(f.room.code, "leader", "follower", { ...base,
+    originRef: { stream: fix.stream, seq: fix.seq + 100 } }), error("REFERENCE_EXPIRED"));
+  const before = f.get().runtime!;
+  const reported = f.plans.guidanceStatus(f.room.code, "leader", "follower", base).runtime!;
+  const { reportedStage, etaSeconds, calculatedAtMs, ...vehicle } = reported.vehicles[1];
+  const { reportedStage: _stage, etaSeconds: _eta, calculatedAtMs: _at, ...previous } = before.vehicles[1];
+  assert.deepEqual(vehicle, previous);
+  assert.equal(reported.phase, before.phase); assert.equal(reported.departureCohort, null);
+  assert.equal(reported.traceStartRef, null); assert.equal(reported.departedAtMs, null);
+  assert.throws(() => f.plans.guidanceStatus(f.room.code, "leader", "follower", { ...base, calculatedAtMs: f.now() - 1 }), error("INVALID_REQUEST"));
+  f.elapse(10001); f.plans.sweep();
+  const delayed = f.get().runtime!.vehicles[1];
+  assert.equal(delayed.condition, "locationDelayed"); assert.equal(delayed.etaSeconds, null); assert.equal(delayed.calculatedAtMs, null);
+});
+for (const requester of ["leader", "follower"]) test(`r8 HTTP approach ETA from ${requester} reaches only its group and survives snapshots`, async (t) => {
+  const f = planFixture(t); f.plans.close();
+  const app = createApp({ ...f, routeOptions: f.routeOptions });
+  const api = (who: string, path: string, body?: unknown, method = "PUT", device?: string) =>
+    dispatch(app, f.tokens.get(who)!, body, { path: `/v1/rooms/${f.room.code}/${path}`, method, device }).done;
+  const saved = (await api("leader", "follow-plans/self", { operationId: "eta-save", expectedPlanId: null, expectedRevision: 0,
+    destination: pin(1000), joinPoint: pin(100), policy: "wait", participantFollowRequestIds: [f.relation.requestId], waitingPlaceConfirmed: true })).json();
+  await api("follower", "follow-plans/leader/participation", { operationId: "eta-enroll", planId: saved.plan.planId,
+    planRevision: 1, followRequestId: f.relation.requestId, enabled: true });
+  const events = new Map<string, { name: string; data: any }[]>();
+  for (const handle of ["leader", "follower", "third"]) {
+    events.set(handle, []);
+    t.after(f.hub.subscribe(f.room.code, handle, tokenHash(f.tokens.get(handle)!), (name, data) => events.get(handle)!.push({ name, data })));
+  }
+  const fix = f.locations.position(f.room.code, requester)!;
+  const input = { planId: saved.plan.planId, revision: 1, followRequestId: requester === "leader" ? null : f.relation.requestId,
+    originRef: { stream: fix.stream, seq: fix.seq }, stage: "toJoin", etaSeconds: 120, calculatedAtMs: f.now() };
+  const response = await api(requester, "follow-plans/leader/guidance-status", input);
+  assert.equal(response.statusCode, 200);
+  for (const handle of ["leader", "follower"]) {
+    const progress = events.get(handle)!.filter((e) => e.name === "follow-plan-progress");
+    assert.equal(progress.length, 1);
+    const runtime = progress[0].data.runtime ?? progress[0].data;
+    assert.equal(runtime.vehicles.find((v: any) => v.handle === requester).etaSeconds, 120);
+  }
+  assert.deepEqual(events.get("third"), []);
+  const revision = response.json().runtime.runtimeRevision;
+  assert.equal((await api(requester, "follow-plans/leader/guidance-status", input)).json().runtime.runtimeRevision, revision);
+  for (const method of ["plan", "positions"]) {
+    const snapshot = (await api("follower", method === "plan" ? "follow-plans/leader" : "positions", undefined, "GET")).json();
+    const runtime = method === "plan" ? snapshot.runtime : snapshot.followPlans[0].runtime;
+    assert.equal(runtime.vehicles.find((v: any) => v.handle === requester).etaSeconds, 120);
+  }
+  assert.equal((await api("third", "follow-plans/leader/guidance-status", input)).statusCode, 403);
+  const staleDevice = await api(requester, "follow-plans/leader/guidance-status", input, "PUT", "a".repeat(32));
+  assert.equal(staleDevice.json().error.code, "NOT_ACTIVE_SENDER");
 });
 test("schema 1 to schema 2 scopes generations separately and pins inputs across the shared 30-second budget", async (t) => {
   const f = planFixture(t); const service = new FollowRouteService(f.locations, { ...f.routeOptions, plans: f.plans }); t.after(() => service.close());
