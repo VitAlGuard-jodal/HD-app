@@ -87,7 +87,7 @@ class RoomMap extends StatefulWidget {
 }
 
 class _RoomMapState extends State<RoomMap> {
-  bool _headingAligned = false;
+  bool _headingAligned = true;
 
   @override
   Widget build(BuildContext context) => Stack(

@@ -369,7 +369,26 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     _initialSelfCentered = true;
     _selfCamera.centered(_self);
     if (!widget.following) {
-      unawaited(_moveCamera(_camera!, _point(_self!), null));
+      final camera = _camera!, point = _point(_self!);
+      final revision = _cameraRevision;
+      unawaited(() async {
+        try {
+          // The SDK defaults to an 800 ms animation even without bearing.
+          await camera.updateCamera(
+            NCameraUpdate.withParams(target: point)..setAnimation(
+              animation: NCameraAnimation.none,
+              duration: Duration.zero,
+            ),
+          );
+          if (_isCurrent(camera) &&
+              revision == _cameraRevision &&
+              _selfDirection != null) {
+            _queueFollow();
+          }
+        } catch (error) {
+          _logError(error);
+        }
+      }());
       return true;
     }
     return false;
@@ -402,13 +421,6 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     _meetingMarkers.clear();
     unawaited(_syncOverlays());
     final centered = _centerInitialSelf();
-    if (_headingAligned == true &&
-        !widget.following &&
-        !_paused &&
-        !widget.pauseAutoCamera &&
-        _selfDirection != null) {
-      unawaited(_rotateCamera(_selfDirection!));
-    }
     if (!centered) _queueFollow();
   }
 
@@ -805,15 +817,25 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
             revision != _cameraRevision ||
             self != _self)
           return;
-        final bearing = _headingAligned == true ? _selfDirection : null;
+        final bearing = roomCameraBearing(
+          currentBearing: current.bearing,
+          direction: _selfDirection,
+          headingAligned: _headingAligned,
+        );
         if (!_selfCamera.needsCenter(
           self,
           Offset(screen.x, screen.y),
           _viewport,
         )) {
-          if (bearing != null && (current.bearing - bearing) % 360 != 0) {
+          final difference = ((current.bearing - bearing + 180) % 360 - 180)
+              .abs();
+          if (difference > .5) {
+            _lastFollow = _clock.elapsed;
             await camera.updateCamera(
-              NCameraUpdate.withParams(bearing: bearing),
+              NCameraUpdate.withParams(bearing: bearing)..setAnimation(
+                animation: NCameraAnimation.linear,
+                duration: const Duration(milliseconds: 800),
+              ),
             );
           }
           return;
@@ -836,6 +858,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
         direction: _selfDirection,
         currentBearing: current.bearing,
         isLeader: widget.selfHandle == widget.targetHandle,
+        headingAligned: _headingAligned,
       );
       if (next == null) return;
       _lastFollow = _clock.elapsed;
@@ -844,7 +867,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
           target: _point(next.target),
           zoom: next.zoom,
           tilt: next.tilt,
-          bearing: _headingAligned == false ? 0 : next.bearing,
+          bearing: next.bearing,
         )..setAnimation(
           animation: NCameraAnimation.linear,
           duration: const Duration(milliseconds: 800),
@@ -919,7 +942,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     double? zoom,
   ) async {
     try {
-      // 생략한 tilt와 bearing은 현재값을 유지한다.
+      // Omitted tilt and bearing preserve the current camera orientation.
       await camera.updateCamera(
         NCameraUpdate.withParams(target: point, zoom: zoom),
       );
@@ -950,7 +973,13 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
 
   Future<void> _rotateCamera(double bearing) async {
     try {
-      await _camera?.updateCamera(NCameraUpdate.withParams(bearing: bearing));
+      final update = NCameraUpdate.withParams(bearing: bearing);
+      if (!widget.following)
+        update.setAnimation(
+          animation: NCameraAnimation.linear,
+          duration: const Duration(milliseconds: 800),
+        );
+      await _camera?.updateCamera(update);
     } catch (error) {
       _logError(error);
     }

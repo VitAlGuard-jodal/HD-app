@@ -23,6 +23,38 @@ LocationFix _fix(
 );
 
 void main() {
+  test(
+    'R22c default and enabled heading-up share the follower bearing rule',
+    () {
+      for (final enabled in [null, true]) {
+        expect(
+          roomCameraBearing(
+            currentBearing: 217.5,
+            direction: 90,
+            headingAligned: enabled,
+          ),
+          90,
+        );
+        expect(
+          roomCameraBearing(currentBearing: 217.5, headingAligned: enabled),
+          217.5,
+        );
+      }
+      expect(
+        roomCameraBearing(
+          currentBearing: 217.5,
+          direction: 90,
+          headingAligned: false,
+        ),
+        0,
+      );
+      expect(
+        roomCameraBearing(currentBearing: 217.5, headingAligned: false),
+        0,
+      );
+      expect(roomCameraBearing(currentBearing: 40, direction: 360), 0);
+    },
+  );
   test('첫 표본은 고속 heading이 있어도 방향을 추측하지 않는다', () {
     final directions = RoomDirectionTracker();
     directions.update([_fix('self', 0, 0, speed: 10, heading: 90)]);

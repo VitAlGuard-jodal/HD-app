@@ -129,7 +129,308 @@ class NaverRig {
   }
 }
 
+Future<void> showVworldHeading(
+  WidgetTester tester,
+  VworldRoomMapController controller,
+  LocationFix self, {
+  bool paused = false,
+}) async {
+  await tester.pumpWidget(
+    MaterialApp(
+      home: VworldRoomMap(
+        controller: controller,
+        positions: {'self': RoomMapPosition(self, displayName: '나')},
+        trail: const [],
+        targetHandle: null,
+        selfHandle: 'self',
+        following: false,
+        brightness: Brightness.light,
+        pauseAutoCamera: paused,
+      ),
+    ),
+  );
+  await tester.pump();
+}
+
 void main() {
+  for (final north in [false, true]) {
+    testWidgets(
+      'R22d ignores SDK bearing noise within half a degree (north=$north)',
+      (tester) async {
+        final f = NaverRig();
+        await f.show(tester, testFix(0, handle: 'self', speed: 0));
+        f.map.onMapReady!(f.camera);
+        await tester.pump();
+        final x = north ? 0.0 : 20.0, y = north ? 20.0 : 0.0;
+        await f.show(
+          tester,
+          testFix(x, y: y, handle: 'self', seq: 1, speed: 20),
+        );
+        await tester.pump(const Duration(milliseconds: 1100));
+        f.camera.updates.clear();
+        var seq = 1;
+        for (final bearing
+            in north ? [359.99999, 359.5, .5] : [89.99999, 89.5, 90.5]) {
+          f.camera.position = NCameraPosition(
+            target: f.camera.position.target,
+            zoom: 17,
+            tilt: 35,
+            bearing: bearing,
+          );
+          await f.show(
+            tester,
+            testFix(x, y: y, handle: 'self', seq: ++seq, speed: 0),
+          );
+          await tester.pump(const Duration(milliseconds: 1100));
+        }
+        expect(f.camera.updates, isEmpty);
+        f.camera.position = NCameraPosition(
+          target: f.camera.position.target,
+          zoom: 17,
+          tilt: 35,
+          bearing: north ? 359.49 : 89.49,
+        );
+        await f.show(
+          tester,
+          testFix(x, y: y, handle: 'self', seq: ++seq, speed: 0),
+        );
+        await tester.pump(const Duration(milliseconds: 1100));
+        expect(f.camera.updates, hasLength(1));
+        expect(f.camera.position.bearing, closeTo(north ? 0 : 90, .01));
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
+  for (final interact in [false, true]) {
+    testWidgets(
+      'R22d first self center is immediate and following heading respects interaction=$interact',
+      (tester) async {
+        final f = NaverRig();
+        await f.show(tester, testFix(0, handle: 'self'), positions: {});
+        await f.show(tester, testFix(1000, handle: 'self', seq: 1, speed: 20));
+        await f.show(tester, testFix(1020, handle: 'self', seq: 2, speed: 20));
+        final pending = Completer<bool>();
+        addTearDown(() {
+          if (!pending.isCompleted) pending.complete(false);
+        });
+        f.camera.nextUpdate = pending;
+        f.map.onMapReady!(f.camera);
+        expect(f.camera.updates, hasLength(1));
+        final first = f.camera.updates.single.toNPayload().map;
+        expect(first['animation'], 'none');
+        expect(first['duration'], 0);
+        expect(first['bearing'], isNull);
+        expect(
+          f.camera.position.target,
+          NLatLng(testPoint(1020).lat, testPoint(1020).lng),
+        );
+        if (interact)
+          f.map.onMapTapped!(const NPoint(200, 200), f.camera.position.target);
+        pending.complete(false);
+        await tester.pump(const Duration(milliseconds: 1100));
+        if (interact) {
+          expect(
+            f.camera.updates,
+            hasLength(1),
+            reason:
+                'late initial acknowledgement cannot resume during interaction',
+          );
+        } else {
+          expect(f.camera.updates, hasLength(2));
+          expect(f.camera.updates.last.toNPayload().map['target'], isNull);
+          expect(f.camera.position.bearing, closeTo(90, .01));
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+  testWidgets('R22c VWorld uses the short arc across north', (tester) async {
+    final controller = VworldRoomMapController();
+    FlutterMap map() => tester.widget<FlutterMap>(find.byType(FlutterMap));
+    await showVworldHeading(
+      tester,
+      controller,
+      testFix(0, handle: 'self', speed: 0),
+    );
+    map().mapController!.rotate(359);
+    await showVworldHeading(
+      tester,
+      controller,
+      testFix(-.1745241, y: 9.998477, handle: 'self', seq: 1, speed: 10),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    expect((map().mapController!.camera.rotation - 359) % 360, closeTo(1, .02));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(map().mapController!.camera.rotation % 360, closeTo(1, .02));
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final editor in [false, true]) {
+    testWidgets(
+      'R22c VWorld ${editor ? 'editor' : 'gesture'} stops an active rotation and resumes after five seconds',
+      (tester) async {
+        final controller = VworldRoomMapController();
+        FlutterMap map() => tester.widget<FlutterMap>(find.byType(FlutterMap));
+        await showVworldHeading(
+          tester,
+          controller,
+          testFix(0, handle: 'self', speed: 0),
+        );
+        map().mapController!.rotate(40);
+        await showVworldHeading(
+          tester,
+          controller,
+          testFix(20, handle: 'self', seq: 1, speed: 20),
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        final held = map().mapController!.camera.rotation;
+        if (editor) {
+          await showVworldHeading(
+            tester,
+            controller,
+            testFix(20, handle: 'self', seq: 1, speed: 20),
+            paused: true,
+          );
+        } else {
+          map().options.onPositionChanged!(map().mapController!.camera, true);
+        }
+        final latest = testFix(20, y: 20, handle: 'self', seq: 2, speed: 20);
+        await showVworldHeading(tester, controller, latest, paused: editor);
+        if (editor) {
+          await tester.pump(const Duration(seconds: 6));
+          expect(map().mapController!.camera.rotation, held);
+          await showVworldHeading(tester, controller, latest);
+        }
+        await tester.pump(const Duration(milliseconds: 4999));
+        expect(map().mapController!.camera.rotation, held);
+        await tester.pump(const Duration(milliseconds: 1));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 800));
+        expect(map().mapController!.camera.rotation % 360, closeTo(0, .01));
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+  testWidgets(
+    'R22c Naver defaults to heading-up and only explicit false fixes north',
+    (tester) async {
+      final f = NaverRig();
+      await f.show(tester, testFix(0, handle: 'self', speed: 0));
+      f.map.onMapReady!(f.camera);
+      await tester.pump();
+      expect(
+        f.camera.position.bearing,
+        40,
+        reason: 'unknown direction preserves bearing',
+      );
+      await f.show(tester, testFix(20, handle: 'self', seq: 1, speed: 20));
+      await tester.pump(const Duration(milliseconds: 1100));
+      expect(f.camera.position.bearing, closeTo(90, .01));
+      f.controller.alignHeading(false);
+      await tester.pump();
+      expect(f.camera.position.bearing, 0);
+      f.camera.position = NCameraPosition(
+        target: f.camera.position.target,
+        zoom: 17,
+        tilt: 35,
+        bearing: 180,
+      );
+      f.map.onCameraChange!(NCameraUpdateReason.gesture, false);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(const Duration(milliseconds: 1100));
+      expect(
+        f.camera.position.bearing,
+        0,
+        reason: 'explicit north is restored after interaction',
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'R22c Naver heading-only recovery animates once and ignores sub-three-metre jitter',
+    (tester) async {
+      final f = NaverRig();
+      await f.show(tester, testFix(0, handle: 'self', speed: 0));
+      f.map.onMapReady!(f.camera);
+      f.controller.alignHeading(true);
+      await tester.pump();
+      await f.show(tester, testFix(20, handle: 'self', seq: 1, speed: 20));
+      await tester.pump(const Duration(milliseconds: 1100));
+      f.camera.position = NCameraPosition(
+        target: f.camera.position.target,
+        zoom: 17,
+        tilt: 35,
+        bearing: 180,
+      );
+      f.camera.updates.clear();
+      f.map.onCameraChange!(NCameraUpdateReason.gesture, false);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(const Duration(milliseconds: 1100));
+      expect(f.camera.updates, hasLength(1));
+      final update = f.camera.updates.single.toNPayload().map;
+      expect(update['target'], isNull);
+      expect(update['animation'], 'linear');
+      expect(update['duration'], 800);
+      f.camera.updates.clear();
+      for (var n = 2; n <= 4; n++) {
+        await f.show(
+          tester,
+          testFix(n.isEven ? 21 : 20, handle: 'self', seq: n, speed: 0),
+        );
+        await tester.pump(const Duration(milliseconds: 1100));
+      }
+      expect(f.camera.updates, isEmpty);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'R22c VWorld defaults to heading-up with a smooth rotation and preserves unknown bearing',
+    (tester) async {
+      final controller = VworldRoomMapController();
+      Future<void> show(LocationFix self) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: VworldRoomMap(
+              controller: controller,
+              positions: {'self': RoomMapPosition(self, displayName: '나')},
+              trail: const [],
+              targetHandle: null,
+              selfHandle: 'self',
+              following: false,
+              brightness: Brightness.light,
+            ),
+          ),
+        );
+        await tester.pump();
+      }
+
+      FlutterMap map() => tester.widget<FlutterMap>(find.byType(FlutterMap));
+      await show(testFix(0, handle: 'self', speed: 0));
+      map().mapController!.rotate(40);
+      await show(testFix(1, handle: 'self', seq: 1, speed: 0));
+      await tester.pump(const Duration(seconds: 1));
+      expect(map().mapController!.camera.rotation, 40);
+      await show(testFix(20, handle: 'self', seq: 2, speed: 20));
+      await tester.pump(const Duration(milliseconds: 400));
+      final middle = map().mapController!.camera.rotation % 360;
+      expect(middle, isNot(closeTo(40, .01)));
+      expect(middle, isNot(closeTo(270, .01)));
+      await show(testFix(20.5, handle: 'self', seq: 3, speed: 0));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(map().mapController!.camera.rotation % 360, closeTo(270, .01));
+      controller.alignHeading(false);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 800));
+      expect(map().mapController!.camera.rotation % 360, closeTo(0, .01));
+      await show(testFix(40, handle: 'self', seq: 4, speed: 20));
+      await tester.pump(const Duration(milliseconds: 800));
+      expect(map().mapController!.camera.rotation % 360, closeTo(0, .01));
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
   testWidgets(
     'R22b.1 Naver restores aligned bearing after a stationary manual rotation',
     (tester) async {
@@ -258,8 +559,10 @@ void main() {
       expect(map().mapController!.camera.rotation % 360, 180);
       await tester.pump(const Duration(milliseconds: 1));
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 800));
       expect(map().mapController!.camera.rotation % 360, closeTo(270, .01));
       await show(testFix(20, y: 4, handle: 'self', seq: 3, speed: 0));
+      await tester.pump(const Duration(milliseconds: 800));
       expect(map().mapController!.camera.rotation % 360, closeTo(0, .01));
       expect(map().mapController!.camera.center, target);
       map().mapController!.rotate(180);
@@ -274,6 +577,7 @@ void main() {
       expect(map().mapController!.camera.rotation % 360, 180);
       await tester.pump(const Duration(milliseconds: 1));
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 800));
       expect(map().mapController!.camera.rotation % 360, closeTo(270, .01));
       expect(map().mapController!.camera.center, target);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -404,7 +708,7 @@ void main() {
     },
   );
   testWidgets(
-    'R22 Naver tracks a moving leader while retaining zoom, tilt and unaligned bearing',
+    'R22 Naver tracks a moving leader with heading-up while retaining zoom and tilt',
     (tester) async {
       final f = NaverRig();
       await f.show(tester, testFix(0, handle: 'self', speed: 0));
@@ -420,7 +724,7 @@ void main() {
         expect(f.camera.position.target, NLatLng(point.lat, point.lng));
         expect(f.camera.position.zoom, 17);
         expect(f.camera.position.tilt, 35);
-        expect(f.camera.position.bearing, 40);
+        expect(f.camera.position.bearing, closeTo(90, .01));
       }
       await tester.pumpWidget(const SizedBox.shrink());
     },

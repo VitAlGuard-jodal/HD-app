@@ -75,10 +75,15 @@ class VworldRoomMap extends StatefulWidget {
   State<VworldRoomMap> createState() => _VworldRoomMapState();
 }
 
-class _VworldRoomMapState extends State<VworldRoomMap> {
+class _VworldRoomMapState extends State<VworldRoomMap>
+    with SingleTickerProviderStateMixin {
   final _camera = MapController();
   final _directions = RoomDirectionTracker();
   final _selfCamera = RoomSelfCameraPolicy();
+  late final AnimationController _headingAnimation;
+  double _rotationStart = 0, _rotationDelta = 0;
+  double? _rotationTarget;
+  bool _automaticRotation = true;
   Timer? _resumeTimer;
   bool _ready = false, _paused = false, _followQueued = false;
   int _pointers = 0;
@@ -102,6 +107,29 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
   @override
   void initState() {
     super.initState();
+    _headingAnimation =
+        AnimationController(
+          vsync: this,
+          duration: const Duration(milliseconds: 800),
+        )..addListener(() {
+          if (!_ready ||
+              _paused ||
+              widget.following ||
+              widget.pauseAutoCamera && _automaticRotation) {
+            _headingAnimation.stop();
+            return;
+          }
+          final completed = _headingAnimation.value == 1;
+          _camera.rotate(
+            completed
+                ? _rotationTarget!
+                : _rotationStart + _rotationDelta * _headingAnimation.value,
+          );
+          if (completed) {
+            _headingAnimation.stop(canceled: false);
+            _rotationTarget = null;
+          }
+        });
     (widget.controller as VworldRoomMapController)._state = this;
     _directions.update(widget.positions.values.map((position) => position.fix));
     _selfCamera.centered(_self);
@@ -116,7 +144,9 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
       (widget.controller as VworldRoomMapController)._state = this;
     }
     if (oldWidget.following && !widget.following) _selfCamera.centered(_self);
+    if (widget.following) _stopHeadingAnimation();
     if (widget.pauseAutoCamera) {
+      if (!oldWidget.pauseAutoCamera) _stopHeadingAnimation();
       _resumeTimer?.cancel();
       _resumeTimer = null;
       return;
@@ -151,11 +181,13 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
           _camera.move(_point(self), _camera.camera.zoom);
           _selfCamera.centered(self);
         }
-        if (_headingAligned == true &&
-            _selfDirection != null &&
-            (-_camera.camera.rotation - _selfDirection!) % 360 != 0) {
-          _camera.rotate(-_selfDirection!);
-        }
+        _rotateSelf(
+          roomCameraBearing(
+            currentBearing: -_camera.camera.rotation,
+            direction: _selfDirection,
+            headingAligned: _headingAligned,
+          ),
+        );
         return;
       }
       final next = naverFollowCamera(
@@ -164,18 +196,20 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
         direction: _selfDirection,
         currentBearing: -_camera.camera.rotation,
         isLeader: widget.selfHandle == widget.targetHandle,
+        headingAligned: _headingAligned,
       );
       if (next == null) return;
       _camera.move(
         _point(next.target),
         next.zoom.clamp(_minimumZoom, _maximumZoom),
       );
-      _camera.rotate(_headingAligned == false ? 0 : -next.bearing);
+      _camera.rotate(-next.bearing);
     });
     WidgetsBinding.instance.scheduleFrame();
   }
 
   void _interaction() {
+    _stopHeadingAnimation();
     _paused = true;
     widget.onInteraction?.call();
     _resumeLater();
@@ -214,12 +248,38 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
 
   void _alignHeading(bool enabled) {
     _headingAligned = enabled;
+    _stopHeadingAnimation();
     if (!_ready) return;
     _resumeTimer?.cancel();
     _paused = false;
     if (!enabled || _selfDirection != null) {
-      _camera.rotate(enabled ? -_selfDirection! : 0);
+      final bearing = enabled ? _selfDirection! : 0.0;
+      if (widget.following) {
+        _camera.rotate(-bearing);
+      } else {
+        _rotateSelf(bearing, automatic: false);
+      }
     }
+  }
+
+  void _stopHeadingAnimation() {
+    _headingAnimation.stop();
+    _rotationTarget = null;
+  }
+
+  void _rotateSelf(double bearing, {bool automatic = true}) {
+    final target = -bearing;
+    if (_headingAnimation.isAnimating && (_rotationTarget! - target) % 360 == 0)
+      return;
+    final start = _camera.camera.rotation;
+    final delta = (target - start + 180) % 360 - 180;
+    _stopHeadingAnimation();
+    if (delta == 0) return;
+    _rotationStart = start;
+    _rotationDelta = delta;
+    _rotationTarget = target;
+    _automaticRotation = automatic;
+    _headingAnimation.forward(from: 0);
   }
 
   @override
@@ -227,6 +287,7 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
     _resumeTimer?.cancel();
     final controller = widget.controller as VworldRoomMapController;
     if (controller._state == this) controller._state = null;
+    _headingAnimation.dispose();
     _camera.dispose();
     super.dispose();
   }

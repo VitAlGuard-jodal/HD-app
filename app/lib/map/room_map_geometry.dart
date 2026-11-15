@@ -177,6 +177,14 @@ class RoomFollowCameraPolicy {
   static const maximumZoom = 18.0;
 }
 
+/// Both roles default to heading-up. Only an explicit false locks north;
+/// without a measured direction, retain the camera's existing bearing.
+double roomCameraBearing({
+  required double currentBearing,
+  double? direction,
+  bool? headingAligned,
+}) => headingAligned == false ? 0 : (direction ?? currentBearing) % 360;
+
 /// Self-only camera hysteresis. This does not change route/movement evidence.
 class RoomSelfCameraPolicy {
   static const movingSpeed = 2.0;
@@ -238,6 +246,7 @@ RoomFollowCamera? naverFollowCamera({
   required double currentBearing,
   double? direction,
   bool isLeader = false,
+  bool? headingAligned,
 }) {
   if (self == null) return null;
   return RoomFollowCamera(
@@ -246,7 +255,11 @@ RoomFollowCamera? naverFollowCamera({
         ? RoomFollowCameraPolicy.navigationZoom
         : zoomForDistance(roomDistanceMeters(self, leader)),
     // 대상의 위치는 내 진행 방향이 아니다. 아직 모르면 현재 방위를 유지한다.
-    bearing: (direction ?? currentBearing) % 360,
+    bearing: roomCameraBearing(
+      currentBearing: currentBearing,
+      direction: direction,
+      headingAligned: headingAligned,
+    ),
   );
 }
 

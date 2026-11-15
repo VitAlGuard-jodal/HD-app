@@ -35,6 +35,43 @@ final _self = _fix('bob', 37.5, 127, heading: 90);
 final _leader = _fix('alice', 37.5, 127.001);
 
 void main() {
+  for (final follow in [false, true]) {
+    testWidgets(
+      'R22c direction control starts on, toggles north, then heading-up (following=$follow)',
+      (tester) async {
+        final controller = RoomMapController();
+        await _pumpMap(tester, controller, follow: follow);
+        RoomMapButton button() => tester
+            .widgetList<RoomMapButton>(find.byType(RoomMapButton))
+            .singleWhere((b) => b.label == '방향 정렬');
+        MapCamera camera() => tester
+            .widget<FlutterMap>(find.byType(FlutterMap))
+            .mapController!
+            .camera;
+        expect(button().selected, isTrue);
+        await tester.tap(find.byTooltip('방향 정렬'));
+        await tester.pump();
+        expect(button().selected, isFalse);
+        final moved = _fix(
+          'bob',
+          _self.lat,
+          _self.lng + .0001,
+          seq: 1,
+          speed: 10,
+        );
+        await _pumpMap(tester, controller, self: moved, follow: follow);
+        await tester.pump(const Duration(milliseconds: 800));
+        expect(camera().rotation % 360, closeTo(0, .001));
+        await tester.tap(find.byTooltip('방향 정렬'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 800));
+        expect(button().selected, isTrue);
+        expect(camera().rotation % 360, closeTo(270, .01));
+        await tester.pumpWidget(const SizedBox.shrink());
+        controller.dispose();
+      },
+    );
+  }
   test('방향이 있으면 뒤쪽 점을 제외하고 가장 가까운 앞쪽 점을 포함한다', () {
     final behind = _fix('alice', 37.5, 126.99999);
     final ahead = _fix('alice', 37.5, 127.0003);
@@ -282,9 +319,18 @@ void main() {
       speed: 10,
     );
     await _pumpMap(tester, controller, self: movedSelf);
+    expect(
+      camera().rotation,
+      0,
+      reason: 'the first tap now disables default heading-up',
+    );
+    await tester.tap(find.byTooltip('방향 정렬'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 800));
     expect((camera().rotation + 360) % 360, closeTo(270, .001));
     await tester.tap(find.byTooltip('방향 정렬'));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 800));
     expect(camera().rotation, 0);
     expect(find.byType(RoomMapButton), findsNWidgets(4));
     final markers = tester
@@ -409,12 +455,21 @@ void main() {
               box.localToGlobal(center);
         }
 
+        await tester.pump(const Duration(milliseconds: 800));
+        expect(directionVector(true).dx, closeTo(0, .001));
+        expect(directionVector(true).dy, lessThan(0));
+        expect(directionVector(false).dx, lessThan(0));
+        expect(directionVector(false).dy, closeTo(0, .001));
+        controller.alignHeading(false);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 800));
         expect(directionVector(true).dx, greaterThan(0));
         expect(directionVector(true).dy, closeTo(0, .001));
         expect(directionVector(false).dx, closeTo(0, .001));
         expect(directionVector(false).dy, lessThan(0));
         controller.alignHeading(true);
         await tester.pump();
+        await tester.pump(const Duration(milliseconds: 800));
         expect(directionVector(true).dx, closeTo(0, .001));
         expect(directionVector(true).dy, lessThan(0));
         expect(directionVector(false).dx, lessThan(0));
