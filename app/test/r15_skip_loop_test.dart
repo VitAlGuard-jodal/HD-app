@@ -204,7 +204,7 @@ void main() {
   }
 
   test(
-    'R15 competing later visits remain ambiguous while skipping a loop',
+    'R15 competing connector visits stay ambiguous while P0 arrival joins the trace',
     () async {
       final f = await p0Loop(
         points: [
@@ -217,7 +217,8 @@ void main() {
       );
       for (var x = 20.0; x <= 1020; x += 20) f.drive(x, speed: 20);
       expect(f.state.routeProgress, lessThan(120));
-      expect(f.joins, isEmpty);
+      expect(f.rejoinedEvents, [false]);
+      expect(f.state.phase, FollowPhase.onTrace);
       expect(f.departures, isEmpty);
       expect(f.calls, hasLength(1));
     },

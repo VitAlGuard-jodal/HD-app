@@ -7,7 +7,7 @@ import 'support/follow_route_fakes.dart';
 
 void main() {
   test(
-    'r12 connector progress stays on the later visit after a full loop',
+    'r12 the original loop drive joins at its first aligned P0 pass',
     () async {
       final f = RouteFixture();
       addTearDown(f.dispose);
@@ -25,21 +25,28 @@ void main() {
       await flush();
       f.grow(500);
       for (var x = -30.0; x <= 150; x += 20) f.drive(x, speed: 20);
-      expect(f.joins, isEmpty);
+      expect(f.rejoinedEvents, [false]);
+      expect(f.state.phase, FollowPhase.onTrace);
+      expect(f.state.routeProgress, closeTo(80, .01));
+      expect(f.state.connector, isEmpty);
       for (var y = 20.0; y <= 100; y += 20) f.drive(150, y: y, speed: 20);
       for (var x = 130.0; x >= -50; x -= 20) f.drive(x, y: 100, speed: 20);
       for (var y = 80.0; y >= 20; y -= 20) f.drive(-50, y: y, speed: 20);
       f.drive(-50, y: 4, speed: 20);
-      expect(f.state.routeProgress, greaterThan(590));
-      expect(f.joins, isEmpty);
+      expect(f.state.routeProgress, closeTo(0, .01));
+      expect(f.joins, hasLength(1));
       f.drive(-30, y: 2.4, speed: 20);
-      expect(f.state.routeProgress, greaterThan(610));
+      expect(f.state.routeProgress, closeTo(0, .01));
       f.drive(-10, y: .8, speed: 20);
-      expect(f.state.routeProgress, greaterThan(630));
+      expect(f.state.routeProgress, closeTo(0, .01));
       for (final x in [0.0, 6.0, 12.0, 18.0]) f.drive(x, speed: 6);
       expect(f.joins, hasLength(1));
-      expect(f.departures, isEmpty);
-      expect(f.calls, hasLength(1));
+      // After joining, driving the rest of the old connector leaves the
+      // leader's straight trace. Its old loop progress must not resume.
+      expect(f.departures, hasLength(1));
+      expect(f.calls, hasLength(2));
+      expect(f.calls.last.request.mode, FollowRouteKind.rejoin);
+      expect(f.state.rejoining, isTrue);
     },
   );
 
@@ -131,6 +138,7 @@ void main() {
       );
     }
     expect(f.state.anchor, anchor);
+    expect(f.calls.single.request.anchor, anchor);
     expect(f.state.phase, FollowPhase.onTrace);
     expect(f.joins, [('follow-1', 1)]);
     expect(f.calls, hasLength(1));

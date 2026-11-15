@@ -7,6 +7,7 @@ import '../net/follow_route.dart';
 import '../net/models.dart';
 import '../net/meeting_plan.dart';
 import 'follow_route_geometry.dart';
+import 'follow_p0_arrival.dart';
 import 'follow_route_diagnostics.dart';
 
 export '../net/follow_route.dart' show FollowMode, FollowPhase, RoutePoint;
@@ -307,9 +308,11 @@ class FollowRouteController extends ChangeNotifier {
   final _recoveries = <int>[];
   RouteAnchor? _rejoinFloor;
   bool _moving = false;
+  P0Arrival? _p0;
   double? _joinStart, _joinLast;
   LocationFix? _lastSelf, _directionBase;
   RouteAnchor? _tracking;
+  num? _trackingAt;
   bool _disposed = false,
       _offRoute = false,
       _extraPending = false,
@@ -385,6 +388,7 @@ class FollowRouteController extends ChangeNotifier {
   bool reset() {
     final s = _state;
     if (s == null || !canChange()) return false;
+    _p0 = null;
     _invalidate();
     _clearCalculation();
     s.phase = FollowPhase.approaching;
@@ -393,6 +397,7 @@ class FollowRouteController extends ChangeNotifier {
     s.anchorPoint = null;
     s.condition = FollowRouteCondition.waitingLocation;
     _tracking = null;
+    _trackingAt = null;
     _offRoute = false;
     s.rejoining = s.aheadOfTrace = false;
     _rejoinFloor = null;
@@ -611,12 +616,24 @@ class FollowRouteController extends ChangeNotifier {
     return null;
   }
 
+  // The wire/marker anchor stays at the requested P0. Only local trace
+  // judgement starts at the confirmed exit from its parked zone.
+  RouteAnchor? get _judgementAnchor => _p0?.exit?.anchor ?? _state?.anchor;
+
   void _judge(LocationFix fix, double moved, double? direction) {
     final s = _state!;
     final path = s.rejoining ? _recoveryPath() : _activePath();
-    final ref = s.rejoining ? _rejoinFloor : s.progress ?? s.anchor;
+    final ref = s.rejoining ? _rejoinFloor : s.progress ?? _judgementAnchor;
     final floor = ref == null ? null : path?.resolve(ref);
     final tracking = _tracking == null ? null : path?.resolve(_tracking!);
+    final p0 = !s.rejoining && _input!.planTrace == null && s.route != null
+        ? _p0
+        : null;
+    final advance = p0?.passage == null
+        ? math.max(120.0, moved + 50)
+        : routeReachableAdvance(
+            fix.at - (_trackingAt ?? _routeObservedAt ?? fix.at),
+          );
     final projection = path == null || floor == null
         ? null
         : projectRoute(
@@ -628,12 +645,15 @@ class FollowRouteController extends ChangeNotifier {
                 ? math.max(0, (tracking ?? floor) - 120)
                 : math.max(floor, (tracking ?? floor) - 3),
             maximum: math.max(
-              (tracking ?? floor) + math.max(120, moved + 50),
+              (tracking ?? floor) + advance,
               s.rejoining ? (path.resolve(s.anchor!) ?? floor) + 120 : 0,
             ),
           );
+    p0?.observe(RoutePoint.fromFix(fix), path, projection, direction);
+    final followingTrace =
+        s.phase == FollowPhase.onTrace || p0?.passage != null;
     final judgingRoute = s.route ?? _rejectedRoute;
-    final advance = s.route == null
+    final connectorAdvance = s.route == null
         ? math.max(120.0, moved + 50)
         : routeReachableAdvance(fix.at - (_routeObservedAt ?? fix.at));
     var connector = judgingRoute == null
@@ -642,7 +662,7 @@ class FollowRouteController extends ChangeNotifier {
             RoutePoint.fromFix(fix),
             judgingRoute,
             progress: s.routeProgress,
-            advance: advance,
+            advance: connectorAdvance,
             fallbackAdvance:
                 s.route == null && !_rejectedAfterDeparture && moved > 0
                 ? routeReachableAdvance(_now() - _inputAt!)
@@ -657,7 +677,7 @@ class FollowRouteController extends ChangeNotifier {
         s.route!,
         fix,
         connector,
-        maximum: s.routeProgress + advance,
+        maximum: s.routeProgress + connectorAdvance,
         moving: _moving,
         direction: direction,
       );
@@ -689,7 +709,7 @@ class FollowRouteController extends ChangeNotifier {
       return;
     }
     if (projection?.ambiguous == true ||
-        connectorProjection?.ambiguous == true) {
+        !followingTrace && connectorProjection?.ambiguous == true) {
       _resetEvidence();
       if (!s.rejoining) _offRoute = false;
       _moving = false;
@@ -708,8 +728,9 @@ class FollowRouteController extends ChangeNotifier {
         ? double.infinity
         : projectRoute(RoutePoint.fromFix(fix), path.points)?.distance ??
               double.infinity;
-    final connectorDistance =
-        judgingRoute?.atAnchor == true && s.anchorPoint != null
+    final connectorDistance = followingTrace
+        ? double.infinity
+        : judgingRoute?.atAnchor == true && s.anchorPoint != null
         ? routeDistance(RoutePoint.fromFix(fix), s.anchorPoint!)
         : connectorProjection?.distance ?? double.infinity;
     if (s.phase == FollowPhase.approaching &&
@@ -724,7 +745,7 @@ class FollowRouteController extends ChangeNotifier {
     }
     final outside =
         fullTraceDistance > 60.000001 &&
-        (s.phase == FollowPhase.onTrace ||
+        (followingTrace ||
             judgingRoute != null && connector!.distance > 60.000001);
     if (_moving) {
       if (outside) {
@@ -765,17 +786,23 @@ class FollowRouteController extends ChangeNotifier {
         _confirmDeparture();
       }
     }
+    // A visited, confirmed initial branch resumes geometry exactly as an
+    // onTrace branch does. Fresh direction is still needed for join evidence.
+    if (followingTrace &&
+        !s.rejoining &&
+        projection != null &&
+        projection.distance <= 25.000001) {
+      _tracking = path!.at(projection.along);
+      _trackingAt = fix.at;
+    }
     if (s.phase == FollowPhase.onTrace && !s.rejoining) {
       if (projection != null && projection.distance <= 25.000001) {
-        // Tracking may resume after a gap, but authoritative progress still
-        // requires a new measured direction on this branch.
-        _tracking = path!.at(projection.along);
         if (direction != null &&
             routeDirectionDifference(direction, projection.bearing) <=
                 60.000001 &&
             projection.along >= (floor ?? 0)) {
           s.progress = _tracking;
-          s.progressAt = path.fixes[projection.index].at;
+          s.progressAt = path!.fixes[projection.index].at;
           _updateTrace();
         }
       }
@@ -783,13 +810,19 @@ class FollowRouteController extends ChangeNotifier {
     }
     if (!s.rejoining && _input!.planTrace == null) {
       if (s.route == null || s.anchorPoint == null) return;
-      if (!s.anchorReached &&
-          routeDistance(RoutePoint.fromFix(fix), s.anchorPoint!) <= 25.000001) {
-        s.anchorReached =
-            s.route!.atAnchor ||
-            connectorProjection != null &&
-                connectorProjection.distance <= 25.000001 &&
-                connectorProjection.along >= routeLength(s.route!.points) - 25;
+      if (p0?.exit != null) {
+        s.anchorReached = p0!.passage != null;
+      } else {
+        if (!s.anchorReached && p0?.near(RoutePoint.fromFix(fix)) == true) {
+          s.anchorReached =
+              s.route!.atAnchor ||
+              connectorProjection != null &&
+                  connectorProjection.distance <= 25.000001 &&
+                  connectorProjection.along >=
+                      routeLength(s.route!.points) - 25;
+        }
+        _resetJoin();
+        return;
       }
     }
     // A return to the already selected branch can complete while a rejoin
@@ -826,7 +859,16 @@ class FollowRouteController extends ChangeNotifier {
     final first = !s.rejoining;
     final rejected = s.route ?? _rejectedRoute;
     final self = _lastSelf;
-    if (first) _rejoinFloor = s.progress ?? s.anchor;
+    if (first) {
+      _rejoinFloor = s.progress ?? _judgementAnchor;
+      if (s.progress == null &&
+          _p0?.passage != null &&
+          _tracking != null &&
+          _activePath()?.resolve(_tracking!) != null) {
+        _rejoinFloor = _tracking;
+      }
+    }
+    _p0 = null;
     _invalidate(clearVoice: first);
     _lastSelf = self;
     _moving = true;
@@ -892,10 +934,15 @@ class FollowRouteController extends ChangeNotifier {
   }
 
   TracePath? _activePath() {
+    final path = _rawActivePath();
+    return path == null ? null : _p0?.cachedPath(path) ?? path;
+  }
+
+  TracePath? _rawActivePath() {
     final s = _state!;
     final ref = s.phase == FollowPhase.onTrace
-        ? s.progress ?? s.anchor
-        : s.anchor;
+        ? s.progress ?? _judgementAnchor
+        : _judgementAnchor;
     if (ref == null) return null;
     for (final path in _paths) {
       if (path.resolve(ref) != null) return path;
@@ -905,7 +952,12 @@ class FollowRouteController extends ChangeNotifier {
 
   void _updateTrace() {
     final s = _state!;
-    final path = _activePath();
+    final source = _rawActivePath();
+    var path = source;
+    final p0 = _p0;
+    if (path != null && p0 != null && (s.route != null || p0.exit != null)) {
+      path = p0.prepare(path);
+    }
     if (path == null || s.rejoining && _recoveryPath() == null) {
       _renderedPath = null;
       _renderedRef = null;
@@ -931,21 +983,21 @@ class FollowRouteController extends ChangeNotifier {
     _hadAnchorInTrace = true;
     if (s.condition == FollowRouteCondition.waitingTrace &&
         s.route != null &&
-        path.cumulative.last > (path.resolve(s.anchor!) ?? 0)) {
+        path.cumulative.last > (path.resolve(_judgementAnchor!) ?? 0)) {
       s.condition = s.route!.atAnchor
           ? FollowRouteCondition.atAnchorWaitingTrace
           : FollowRouteCondition.ready;
     }
     final ref = s.phase == FollowPhase.onTrace
-        ? s.progress ?? s.anchor!
-        : s.anchor!;
+        ? s.progress ?? _judgementAnchor!
+        : _judgementAnchor!;
     if (identical(_renderedPath, path) && _renderedRef == ref) return;
     _renderedPath = path;
     _renderedRef = ref;
     s.activeTrace = [path.after(path.resolve(ref)!)];
     // Preserve separate later sections for display, but never judge a join on
     // a straight line across the missing portion.
-    final index = _paths.indexOf(path);
+    final index = _paths.indexOf(source!);
     s.activeTrace = List.unmodifiable([
       ...s.activeTrace,
       for (final later in _paths.skip(index + 1)) later.points,
@@ -975,6 +1027,9 @@ class FollowRouteController extends ChangeNotifier {
         : candidate.path.fixes
               .firstWhere((fix) => SampleRef.of(fix) == candidate.anchor.start)
               .at;
+    _p0 = rejoin || i.planTrace != null
+        ? null
+        : P0Arrival(s.anchor!, s.anchorPoint!);
     s.anchorConfirmed = false;
     s.anchorReached = false;
     s.route = null;
@@ -982,6 +1037,7 @@ class FollowRouteController extends ChangeNotifier {
     s.routeProgress = 0;
     s.phase = FollowPhase.approaching;
     _tracking = null;
+    _trackingAt = null;
     _hadAnchorInTrace = false;
     _calculation = _id('calc');
     _inputAt = _now();
@@ -1333,10 +1389,10 @@ class FollowRouteController extends ChangeNotifier {
       s.condition = FollowRouteCondition.noRoute;
       return;
     }
-    final along = path.resolve(s.anchor!)!;
+    final along = path.resolve(_judgementAnchor!)!;
     final next = math.min(along + 60, path.cumulative.last);
     final anchor = path.at(next);
-    if (next <= along || anchor == s.anchor || anchor.end == null) {
+    if (next <= along || anchor == _judgementAnchor || anchor.end == null) {
       s.condition = FollowRouteCondition.noRoute;
       _nextAttempt = null;
       return;
@@ -1397,6 +1453,7 @@ class FollowRouteController extends ChangeNotifier {
     _invalidate();
     _clearCalculation();
     _state = null;
+    _p0 = null;
     _input = null;
     _paths = const [];
     _traceSource = null;
@@ -1405,6 +1462,7 @@ class FollowRouteController extends ChangeNotifier {
     _selfConsentBlocked = false;
     _featureBlocked = false;
     _tracking = null;
+    _trackingAt = null;
     _offRoute = false;
     _rejoinFloor = null;
     notifyListeners();
