@@ -54,12 +54,14 @@ class VworldRoomMap extends StatefulWidget {
     this.guidance,
     this.meetingPins = const [],
     this.onPointSelected,
+    this.pauseAutoCamera = false,
   });
   final RoomMapController controller;
   final ApiClient? api;
   final FollowRouteView? guidance;
   final List<MeetingPin> meetingPins;
   final ValueChanged<RoutePoint>? onPointSelected;
+  final bool pauseAutoCamera;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
   final String? targetHandle, selfHandle;
@@ -76,6 +78,7 @@ class VworldRoomMap extends StatefulWidget {
 class _VworldRoomMapState extends State<VworldRoomMap> {
   final _camera = MapController();
   final _directions = RoomDirectionTracker();
+  final _selfCamera = RoomSelfCameraPolicy();
   Timer? _resumeTimer;
   bool _ready = false, _paused = false, _followQueued = false;
   int _pointers = 0;
@@ -101,6 +104,7 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
     super.initState();
     (widget.controller as VworldRoomMapController)._state = this;
     _directions.update(widget.positions.values.map((position) => position.fix));
+    _selfCamera.centered(_self);
   }
 
   @override
@@ -111,22 +115,47 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
       (oldWidget.controller as VworldRoomMapController)._state = null;
       (widget.controller as VworldRoomMapController)._state = this;
     }
+    if (oldWidget.following && !widget.following) _selfCamera.centered(_self);
+    if (widget.pauseAutoCamera) {
+      _resumeTimer?.cancel();
+      _resumeTimer = null;
+      return;
+    }
+    if (oldWidget.pauseAutoCamera) {
+      _paused = true;
+      _resumeLater();
+      return;
+    }
     _queueFollow();
   }
 
   void _queueFollow() {
     if (!_ready ||
+        widget.pauseAutoCamera ||
         _paused ||
         _followQueued ||
-        (!widget.following && _headingAligned != true))
+        _self == null)
       return;
     _followQueued = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _followQueued = false;
-      if (!mounted || _paused) return;
+      if (!mounted || _paused || widget.pauseAutoCamera) return;
       if (!widget.following) {
-        if (_headingAligned == true && _selfDirection != null)
+        final self = _self;
+        if (self == null) return;
+        if (_selfCamera.needsCenter(
+          self,
+          _camera.camera.latLngToScreenOffset(_point(self)),
+          _camera.camera.nonRotatedSize,
+        )) {
+          _camera.move(_point(self), _camera.camera.zoom);
+          _selfCamera.centered(self);
+        }
+        if (_headingAligned == true &&
+            _selfDirection != null &&
+            (-_camera.camera.rotation - _selfDirection!) % 360 != 0) {
           _camera.rotate(-_selfDirection!);
+        }
         return;
       }
       final next = naverFollowCamera(
@@ -148,14 +177,20 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
 
   void _interaction() {
     _paused = true;
-    _resumeTimer?.cancel();
     widget.onInteraction?.call();
-    if (_pointers == 0) {
-      _resumeTimer = Timer(const Duration(seconds: 5), () {
-        _paused = false;
-        if (mounted) _queueFollow();
-      });
-    }
+    _resumeLater();
+  }
+
+  void _resumeLater() {
+    _resumeTimer?.cancel();
+    _resumeTimer = null;
+    if (_pointers != 0 || widget.pauseAutoCamera) return;
+    _resumeTimer = Timer(const Duration(seconds: 5), () {
+      _resumeTimer = null;
+      if (!mounted || widget.pauseAutoCamera || _pointers != 0) return;
+      _paused = false;
+      _queueFollow();
+    });
   }
 
   void _releasePointer() {
@@ -171,7 +206,10 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
 
   void _recenter() {
     final self = _self;
-    if (self != null && _ready) _moveTo(_point(self), _camera.camera.zoom);
+    if (self != null && _ready) {
+      _selfCamera.centered(self);
+      _moveTo(_point(self), _camera.camera.zoom);
+    }
   }
 
   void _alignHeading(bool enabled) {
@@ -241,11 +279,12 @@ class _VworldRoomMapState extends State<VworldRoomMap> {
                 interactionOptions: const InteractionOptions(
                   flags: InteractiveFlag.all,
                 ),
-                onLongPress: widget.onPointSelected == null
-                    ? null
-                    : (_, point) => widget.onPointSelected!(
-                        RoutePoint(point.latitude, point.longitude),
-                      ),
+                onLongPress: (_, point) {
+                  _interaction();
+                  widget.onPointSelected?.call(
+                    RoutePoint(point.latitude, point.longitude),
+                  );
+                },
                 onMapReady: () {
                   _ready = true;
                   _queueFollow();

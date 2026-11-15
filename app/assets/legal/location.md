@@ -52,5 +52,5 @@
 ## 8. 운영자와 연락처
 - 운영 주체: 우나보 팀(현대자동차 차량용 앱 개발 공모전 출품팀)
 - 위치정보 담당: 우나보 팀 개인정보 담당
-- 연락처: rlaxorhs77@gmail.com
+- 연락처: https://github.com/VitAlGuard-jodal/HD-app/issues (저장소 Issues)
 - 이 동의문은 앱의 설정 → 「약관·동의 문서」 화면에서 언제든 다시 볼 수 있습니다.

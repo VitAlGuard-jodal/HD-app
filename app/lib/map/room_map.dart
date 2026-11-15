@@ -53,6 +53,7 @@ class RoomMap extends StatefulWidget {
     this.guidance,
     this.meetingPins = const [],
     this.onPointSelected,
+    this.pauseAutoCamera = false,
     this.onModeChanged,
     this.onResetGuidance,
     this.onMeetingPlan,
@@ -64,6 +65,7 @@ class RoomMap extends StatefulWidget {
   final FollowRouteView? guidance;
   final List<MeetingPin> meetingPins;
   final ValueChanged<RoutePoint>? onPointSelected;
+  final bool pauseAutoCamera;
   final ValueChanged<FollowMode>? onModeChanged;
   final VoidCallback? onResetGuidance, onMeetingPlan;
   final bool meetingAvailable;
@@ -97,6 +99,7 @@ class _RoomMapState extends State<RoomMap> {
           guidance: widget.guidance,
           meetingPins: widget.meetingPins,
           onPointSelected: widget.onPointSelected,
+          pauseAutoCamera: widget.pauseAutoCamera,
           controller: widget.controller as NaverRoomMapController,
           positions: widget.positions,
           trail: widget.trail,
@@ -114,6 +117,7 @@ class _RoomMapState extends State<RoomMap> {
           guidance: widget.guidance,
           meetingPins: widget.meetingPins,
           onPointSelected: widget.onPointSelected,
+          pauseAutoCamera: widget.pauseAutoCamera,
           controller: widget.controller,
           positions: widget.positions,
           trail: widget.trail,

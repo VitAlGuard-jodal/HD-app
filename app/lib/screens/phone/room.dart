@@ -576,6 +576,7 @@ class _RoomScreenState extends State<RoomScreen> {
             trail: session.trailOf(mapTarget),
             guidance: guidance,
             meetingPins: session.meetingPlan.pins,
+            pauseAutoCamera: session.meetingPlan.editing,
             onPointSelected:
                 session.meetingPlan.editing && session.canEditMeetingPlan
                 ? session.meetingPlan.pickPoint
@@ -584,7 +585,11 @@ class _RoomScreenState extends State<RoomScreen> {
             onMeetingPlan:
                 session.meetingPlan.capabilities.enabled &&
                     session.locationShare.sharing
-                ? () => setState(() => _meetingPanel = !_meetingPanel)
+                ? () {
+                    final closing = _meetingPanel;
+                    if (closing) session.meetingPlan.dismissEditor();
+                    setState(() => _meetingPanel = !closing);
+                  }
                 : null,
             meetingPanel: _meetingPanel
                 ? MeetingPlanPanel(

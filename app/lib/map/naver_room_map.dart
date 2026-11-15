@@ -209,6 +209,7 @@ class NaverRoomMap extends StatefulWidget {
     this.guidance,
     this.meetingPins = const [],
     this.onPointSelected,
+    this.pauseAutoCamera = false,
     this.mapBuilder,
   });
   final NaverRoomMapController controller;
@@ -216,6 +217,7 @@ class NaverRoomMap extends StatefulWidget {
   final FollowRouteView? guidance;
   final List<MeetingPin> meetingPins;
   final ValueChanged<RoutePoint>? onPointSelected;
+  final bool pauseAutoCamera;
   final Map<String, RoomMapPosition> positions;
   final List<LocationFix> trail;
   final String? targetHandle, selfHandle;
@@ -242,6 +244,8 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   // 7가지 입장 색 × 폰/차량의 북쪽 삼각형만 캡처한다. 방위는 키에 없다.
   final _directionIcons = <(Color, bool), NOverlayImage>{};
   final _directions = RoomDirectionTracker();
+  final _selfCamera = RoomSelfCameraPolicy();
+  Size _viewport = Size.zero;
   final _assetImages = <String, ui.Image>{};
   StreamSubscription<OnCameraChangedParams>? _cameraSubscription;
   double _cameraBearing = 0, _cameraTilt = 0;
@@ -264,7 +268,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   bool get _canFollow =>
       mounted &&
       _camera != null &&
-      widget.following &&
+      !widget.pauseAutoCamera &&
       !_paused &&
       _self != null;
 
@@ -276,6 +280,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     final initial =
         _self ?? _target ?? widget.positions.values.firstOrNull?.fix;
     _initialSelfCentered = _self != null;
+    _selfCamera.centered(_self);
     _initialCamera = NCameraPosition(
       target: initial == null
           ? const NLatLng(37.5665, 126.978)
@@ -287,7 +292,6 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
   @override
   void didUpdateWidget(NaverRoomMap oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final previousDirection = _selfDirection;
     _directions.update(widget.positions.values.map((position) => position.fix));
     if (oldWidget.controller != widget.controller) {
       if (oldWidget.controller._state == this)
@@ -316,39 +320,59 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
         oldWidget.brightness != widget.brightness) {
       unawaited(_syncOverlays());
     }
-    _centerInitialSelf();
-    if (!widget.following &&
-        _headingAligned == true &&
-        !_paused &&
-        previousDirection != _selfDirection &&
-        _selfDirection != null) {
-      unawaited(_rotateCamera(_selfDirection!));
-    }
-    if (!widget.following || _self == null) {
+    if (oldWidget.following && !widget.following) {
       _cancelFollow();
-      if (oldWidget.following && !widget.following) {
-        unawaited(_cancelTransition());
-      }
-    } else if (!oldWidget.following ||
-        rolesChanged ||
-        trailChanged ||
-        oldWidget.positions[oldWidget.selfHandle]?.fix != _self ||
-        oldWidget.positions[oldWidget.targetHandle]?.fix != _target) {
+      _selfCamera.centered(_self);
+      unawaited(_cancelTransition());
+    }
+    if (widget.pauseAutoCamera) {
+      _cancelFollow();
+      _resumeTimer?.cancel();
+      _resumeTimer = null;
+      if (!oldWidget.pauseAutoCamera) unawaited(_cancelTransition());
+      return;
+    }
+    if (oldWidget.pauseAutoCamera) {
+      _paused = true;
+      _resumeLater();
+      return;
+    }
+    final centered = _centerInitialSelf();
+    if (_self == null) {
+      _cancelFollow();
+    } else if (widget.following &&
+        (!oldWidget.following ||
+            rolesChanged ||
+            trailChanged ||
+            oldWidget.positions[oldWidget.selfHandle]?.fix != _self ||
+            oldWidget.positions[oldWidget.targetHandle]?.fix != _target)) {
+      _queueFollow();
+    } else if (!widget.following &&
+        !centered &&
+        (oldWidget.following ||
+            rolesChanged ||
+            oldWidget.positions[oldWidget.selfHandle]?.fix != _self)) {
       _queueFollow();
     }
   }
 
   bool _isCurrent(NaverMapController camera) => mounted && _camera == camera;
 
-  void _centerInitialSelf() {
+  bool _centerInitialSelf() {
     if (_initialSelfCentered ||
         _userInteracted ||
+        _paused ||
+        widget.pauseAutoCamera ||
         _self == null ||
         _camera == null)
-      return;
+      return false;
     _initialSelfCentered = true;
-    if (!widget.following)
+    _selfCamera.centered(_self);
+    if (!widget.following) {
       unawaited(_moveCamera(_camera!, _point(_self!), null));
+      return true;
+    }
+    return false;
   }
 
   void _logError(Object error) {
@@ -377,13 +401,15 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     _anchorMarker = null;
     _meetingMarkers.clear();
     unawaited(_syncOverlays());
-    _centerInitialSelf();
+    final centered = _centerInitialSelf();
     if (_headingAligned == true &&
         !widget.following &&
+        !_paused &&
+        !widget.pauseAutoCamera &&
         _selfDirection != null) {
       unawaited(_rotateCamera(_selfDirection!));
     }
-    _queueFollow();
+    if (!centered) _queueFollow();
   }
 
   RoomMarkerKey _keyFor(String handle, RoomMapPosition position) =>
@@ -567,6 +593,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
           self: entry.key == widget.selfHandle,
           car: widget.car,
         );
+        added.setOnTapListener((_) => _interaction());
         await camera.addOverlay(added);
         if (!_isCurrent(camera)) return;
         _markers[entry.key] = added;
@@ -612,6 +639,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
           cameraBearing: _cameraBearing,
           cameraTilt: _cameraTilt,
         );
+        arrow.setOnTapListener((_) => _interaction());
         await camera.addOverlay(arrow);
         if (!_isCurrent(camera)) return;
         _directionMarkers[entry.key] = arrow;
@@ -711,7 +739,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
           id: 'meeting:${pin.id}',
           position: position,
           caption: caption,
-        );
+        )..setOnTapListener((_) => _interaction());
         await camera.addOverlay(marker);
         if (!_isCurrent(camera)) return;
         _meetingMarkers[pin.id] = marker;
@@ -735,7 +763,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
           id: 'follow-anchor',
           position: position,
           caption: caption,
-        );
+        )..setOnTapListener((_) => _interaction());
         await camera.addOverlay(marker);
         if (!_isCurrent(camera)) return;
         _anchorMarker = marker;
@@ -769,6 +797,39 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
       final current = await camera.getCameraPosition();
       if (!_isCurrent(camera) || !_canFollow || revision != _cameraRevision)
         return;
+      if (!widget.following) {
+        final self = _self!;
+        final screen = await camera.latLngToScreenLocation(_point(self));
+        if (!_isCurrent(camera) ||
+            !_canFollow ||
+            revision != _cameraRevision ||
+            self != _self)
+          return;
+        final bearing = _headingAligned == true ? _selfDirection : null;
+        if (!_selfCamera.needsCenter(
+          self,
+          Offset(screen.x, screen.y),
+          _viewport,
+        )) {
+          if (bearing != null && (current.bearing - bearing) % 360 != 0) {
+            await camera.updateCamera(
+              NCameraUpdate.withParams(bearing: bearing),
+            );
+          }
+          return;
+        }
+        _lastFollow = _clock.elapsed;
+        await camera.updateCamera(
+          NCameraUpdate.withParams(target: _point(self), bearing: bearing)
+            ..setAnimation(
+              animation: NCameraAnimation.linear,
+              duration: const Duration(milliseconds: 800),
+            ),
+        );
+        if (_isCurrent(camera) && revision == _cameraRevision)
+          _selfCamera.centered(self);
+        return;
+      }
       final next = naverFollowCamera(
         self: _self,
         leader: _target,
@@ -814,19 +875,21 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
 
   void _resumeLater() {
     _resumeTimer?.cancel();
-    if (_pointers != 0) return;
+    _resumeTimer = null;
+    if (_pointers != 0 || widget.pauseAutoCamera) return;
     _resumeTimer = Timer(const Duration(seconds: 5), () {
+      _resumeTimer = null;
+      if (!mounted || widget.pauseAutoCamera || _pointers != 0) return;
       _paused = false;
-      if (_headingAligned == true &&
-          !widget.following &&
-          _selfDirection != null) {
-        unawaited(_rotateCamera(_selfDirection!));
-      }
       _queueFollow();
     });
   }
 
   void _interaction() {
+    if (!mounted) return;
+    if (!widget.following && !_paused && _following) {
+      unawaited(_cancelTransition());
+    }
     _userInteracted = true;
     _paused = true;
     _cancelFollow();
@@ -870,6 +933,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     final camera = _camera;
     if (self == null || camera == null) return;
     _interaction();
+    _selfCamera.centered(self);
     unawaited(_moveCamera(camera, _point(self), null)); // 줌·기울임·방위 유지.
   }
 
@@ -925,6 +989,7 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
     final logoInset = widget.fullscreen ? (widget.car ? 120.0 : 88.0) : 16.0;
     return LayoutBuilder(
       builder: (context, constraints) {
+        _viewport = constraints.biggest;
         // 작은 지도에서도 로고가 위쪽 상태 라벨이나 뷰포트 밖으로 밀리지 않는다.
         final logoBottom = math.min(
           logoInset,
@@ -961,11 +1026,14 @@ class _NaverRoomMapState extends State<NaverRoomMap> {
                       tiltGesturesEnable: true,
                     ),
                     onMapReady: _onMapReady,
-                    onMapLongTapped: widget.onPointSelected == null
-                        ? null
-                        : (_, point) => widget.onPointSelected!(
-                            RoutePoint(point.latitude, point.longitude),
-                          ),
+                    onMapTapped: (_, _) => _interaction(),
+                    onSymbolTapped: (_) => _interaction(),
+                    onMapLongTapped: (_, point) {
+                      _interaction();
+                      widget.onPointSelected?.call(
+                        RoutePoint(point.latitude, point.longitude),
+                      );
+                    },
                     onCameraChange: (reason, animated) {
                       if (reason == NCameraUpdateReason.gesture) _interaction();
                     },

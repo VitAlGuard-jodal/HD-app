@@ -457,7 +457,7 @@ void main() {
     );
   }
 
-  testWidgets('따라가기 꺼짐은 카메라를 유지하고 재중심은 내 위치로 이동한다', (tester) async {
+  testWidgets('대상이 없는 지도도 조작 5초 뒤 자기 위치로 돌아오며 줌을 유지한다', (tester) async {
     final controller = RoomMapController();
     await _pumpMap(tester, controller);
     MapCamera camera() => tester
@@ -473,8 +473,12 @@ void main() {
       leader: _fix('alice', 37.7, 127.2),
       brightness: Brightness.dark,
     );
-    await tester.pump(const Duration(seconds: 6));
+    await tester.pump(const Duration(milliseconds: 4999));
     expect(camera().center, manual);
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump();
+    expect(camera().center, LatLng(_self.lat, _self.lng));
+    expect(camera().zoom, 15);
     controller.recenter();
     await tester.pump();
     expect(camera().center.latitude, closeTo(_self.lat, .000001));

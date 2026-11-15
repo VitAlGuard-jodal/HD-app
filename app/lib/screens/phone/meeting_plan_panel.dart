@@ -92,7 +92,7 @@ class _MeetingPlanPanelState extends State<MeetingPlanPanel> {
                     child: Text('합류 지점 따라가기', style: UnavoType.body),
                   ),
                   button('back', '합류 계획 닫기', () {
-                    c.closeEditor();
+                    c.dismissEditor();
                     widget.onClose();
                   }),
                 ],

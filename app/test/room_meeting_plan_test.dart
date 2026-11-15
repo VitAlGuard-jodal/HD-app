@@ -31,6 +31,74 @@ const _follower = PlanParticipant(
 );
 
 void main() {
+  for (final closeFromToolbar in [false, true]) {
+    testWidgets(
+      'R22b.3 ${closeFromToolbar ? 'toolbar' : 'panel'} close notifies session preview observers',
+      (tester) async {
+        final f = await _Fixture.create(tester, participants: [_follower]);
+        final c = f.services.rooms.meetingPlan;
+        MeetingRecommendation? observed;
+        var notifications = 0;
+        void changed() {
+          notifications++;
+          observed = c.recommendation;
+        }
+
+        try {
+          await f.stop();
+          final original = f.services.api.http.jsonResponse!;
+          f.services.api.http.jsonResponse = (request) {
+            if (!request.uri.path.endsWith('/recommend'))
+              return original(request);
+            final body = jsonDecode(utf8.decode(request.body)) as JsonMap;
+            return {
+              'requestId': body['requestId'],
+              'draftGeneration': body['draftGeneration'],
+              'result': 'candidate',
+              'joinPoint': meeting.pointJson(163, source: 'recommendation'),
+              'calculatedAtMs': f.now,
+              'serverNowMs': f.now,
+              'etaQuality': 'rough',
+              'arrivals': [
+                {'handle': 'bob', 'etaToJoinSeconds': 10, 'waitSeconds': 5},
+                {'handle': 'carol', 'etaToJoinSeconds': 15, 'waitSeconds': 0},
+              ],
+              'remainingToDestinationMeters': 837,
+              'remainingToDestinationSeconds': 60,
+            };
+          };
+          await f.tap('합류 계획 보기');
+          await f.tap('내 그룹 합류 계획 편집');
+          c.pickPoint(testPoint(1000));
+          c.confirmPoint();
+          await completeConsentFuture(tester, c.recommend());
+          await tester.pump();
+          expect(c.recommendation, isNotNull);
+          expect(f.map.meetingPins.any((pin) => pin.id == 'pending'), isTrue);
+          observed = c.recommendation;
+          f.services.rooms.addListener(changed);
+          // Invoke the real UI callback without advancing the periodic timer,
+          // which could otherwise conceal the missing close notification.
+          if (closeFromToolbar) {
+            f.map.onMeetingPlan!();
+          } else {
+            _panelButton(tester, '합류 계획 닫기').onPressed!();
+          }
+          expect(c.editing, isFalse);
+          expect(c.recommendation, isNull);
+          expect(notifications, 1);
+          expect(observed, isNull);
+          await tester.pump();
+          expect(f.map.meetingPins.any((pin) => pin.id == 'pending'), isFalse);
+          expect(f.map.pauseAutoCamera, isFalse);
+          expect(tester.takeException(), isNull);
+        } finally {
+          f.services.rooms.removeListener(changed);
+          await f.dispose();
+        }
+      },
+    );
+  }
   for (final car in [false, true]) {
     testWidgets('r9 차량 $car: 입장·공유만으로는 팔로워와 계획 없는 지도가 열리지 않는다', (tester) async {
       final f = await _Fixture.create(tester, car: car, sharing: false);
@@ -65,6 +133,7 @@ void main() {
         expect(map.onResetGuidance, isNull);
         expect(map.onMeetingPlan, isNotNull);
         expect(f.services.rooms.meetingPlan.selected, isFalse);
+        expect(f.map.pauseAutoCamera, isFalse);
         expect(f.routeRequests, isEmpty);
         _expectSplit(tester, car);
         expect(find.bySemanticsLabel('합류 계획 보기'), findsOneWidget);
@@ -82,7 +151,18 @@ void main() {
         await f.tap('내 그룹 합류 계획 편집');
         expect(f.services.rooms.meetingPlan.editing, isTrue);
         expect(f.map.onPointSelected, isNotNull);
+        expect(f.map.pauseAutoCamera, isTrue);
+        f.map.onPointSelected!(testPoint(500));
+        await tester.pump();
+        expect(f.services.rooms.meetingPlan.pendingPoint, isNotNull);
+        expect(f.map.pauseAutoCamera, isTrue);
+        await f.tap('합류 계획 보기');
+        expect(f.services.rooms.meetingPlan.editing, isFalse);
+        expect(f.map.pauseAutoCamera, isFalse);
+        await f.tap('합류 계획 보기');
+        await f.tap('내 그룹 합류 계획 편집');
         await f.tap('합류 계획 닫기');
+        expect(f.map.pauseAutoCamera, isFalse);
         await f.tap('지도 전체 화면');
         expect(f.map.fullscreen, isTrue);
         // A session rebuild must not collapse a leader's full-screen map.

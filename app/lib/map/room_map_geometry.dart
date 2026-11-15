@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui' show Offset, Size;
 
 import 'package:latlong2/latlong.dart';
 
@@ -174,6 +175,41 @@ class RoomFollowCameraPolicy {
   static const navigationZoom = 18.0;
   static const minimumZoom = 14.0;
   static const maximumZoom = 18.0;
+}
+
+/// Self-only camera hysteresis. This does not change route/movement evidence.
+class RoomSelfCameraPolicy {
+  static const movingSpeed = 2.0;
+  static const movingDistance = 3.0;
+  static const displacementDistance = 10.0;
+  static const edgeFraction = .2;
+  LocationFix? _centered;
+
+  void centered(LocationFix? fix) => _centered = fix;
+
+  bool needsCenter(LocationFix self, Offset screen, Size viewport) {
+    if (!viewport.width.isFinite ||
+        !viewport.height.isFinite ||
+        viewport.width <= 0 ||
+        viewport.height <= 0)
+      return false;
+    if (screen.dx <= viewport.width * edgeFraction ||
+        screen.dx >= viewport.width * (1 - edgeFraction) ||
+        screen.dy <= viewport.height * edgeFraction ||
+        screen.dy >= viewport.height * (1 - edgeFraction))
+      return true;
+    final previous = _centered;
+    if (previous == null) {
+      _centered = self;
+      return false;
+    }
+    final distance = roomDistanceMeters(previous, self);
+    return distance >= displacementDistance ||
+        self.speed != null &&
+            self.speed!.isFinite &&
+            self.speed! >= movingSpeed &&
+            distance >= movingDistance;
+  }
 }
 
 double zoomForDistance(double meters) => switch (meters) {

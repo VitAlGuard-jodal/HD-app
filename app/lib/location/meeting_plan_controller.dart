@@ -928,6 +928,13 @@ class MeetingPlanController extends ChangeNotifier {
     }
   }
 
+  // UI close publishes the cleared preview. Internal transitions retain
+  // their existing combined notification after closeEditor().
+  void dismissEditor() {
+    closeEditor();
+    notifyListeners();
+  }
+
   void closeEditor() {
     editing = false;
     destination = joinPoint = pendingPoint = null;
