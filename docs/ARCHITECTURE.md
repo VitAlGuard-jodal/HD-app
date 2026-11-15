@@ -1,4 +1,6 @@
-# 설계 정본 (2026-10-28)
+# 설계 기록 (2026-10-28~)
+
+> 개발하면서 쌓은 설계·실측 기록입니다. 앞쪽 일부 절(§5 통화 보류, §6 결정 대기)은 그때 상태이며 이후 구현·결정됐습니다. 현재 기능 요약은 저장소 README 를 기준으로 합니다.
 
 ## 1. 식별 모델 — 아이디가 곧 사람
 
@@ -62,13 +64,13 @@ SSE 이벤트(`event:` 이름 / `data:` JSON): `hello{self}`, `member-joined{han
 
 근거: 에뮬레이터 실측에서 `MODE_IN_COMMUNICATION`·`AUDIOFOCUS_GAIN_TRANSIENT`·마이크 입력·`bus4_call_out` 출력이 모두 동작(2026-10-23 P2). AEC·덕킹은 OEM HAL 몫이라 실차 검증 항목으로 남긴다.
 
-## 5. 통화(미디어) — 보류 중
+## 5. 통화(미디어) — 보류 중 (10/28 기록, 이후 flutter_webrtc 로 구현)
 
-- 경로: libwebrtc(Android) + Opus 20 ms 모노 + NetEq + 손실 시 FEC + SFU(한국 리전) + TURN + ICE restart. 자세한 근거는 `~/dist/modumoa-group-call-voip/`.
+- 경로: libwebrtc(Android) + Opus 20 ms 모노 + NetEq + 손실 시 FEC + SFU(한국 리전) + TURN + ICE restart. 자세한 근거는 팀 내부 조사 보고서.
 - 지금은 `MediaEngine` 인터페이스(`join(room, self)`, `leave()`, `setMuted()`, `onRemoteSpeaking(handle)`) 와 `NoopMediaEngine` 만 둔다. libwebrtc 의존성 추가는 **Q-4 승인 뒤**.
 - 참여 흐름은 "출발 전 보이는 화면에서 참여 → FGS 유지 → 망 바뀌면 자동 재합류" 로 고정(GMS 없음·API 34 마이크 FGS 제한 때문).
 
-## 6. 결정 대기 (태곤 님)
+## 6. 결정 대기 (10/28 기록, 이후 결정됨)
 
 - Q-3 앱 이름·패키지명(`kr.modumoa.hdapp` 임시).
 - Q-4 libwebrtc(Android AAR)·SFU 설치 승인.
@@ -110,7 +112,7 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 **시그널 백로그와 SSE 침묵 타임아웃(F6a/F6b, 2026-11-06).** 참여자의 데이터가 끊기면 그 SSE 소켓은 서버 쪽에서 한동안 살아 있는 것으로 남아, `hub.sendTo` 가 죽은 소켓에 쓰고도 `delivered:true` 를 돌려준다(11/6 실측: 차 데이터 차단 뒤 서버가 끊김을 안 시각이 2분 뒤). 그래서 서버는 signal 을 수신자별로 60초·64건까지 보관(`RoomEventHub.queueSignal`)하고, 수신자가 events 를 다시 열면 hello 직후 보관분을 순서대로 재전송한다(`replaySignals`). 앱의 `MeshCoordinator.onSignal` 은 negotiationId 로 중복 offer/answer 를 무시하므로 재전송은 안전하다. leave 시 그 수신자 몫은 지운다(`clearSignals`). 앱은 SSE 원시 바이트 침묵 타임아웃을 35초에서 20초(서버 ping 15초 + 여유 5초, `ApiClient.sseSilenceTimeout`)로 줄여 죽은 연결을 더 빨리 다시 연다.
 
-**차량 통화 음량은 CarAudioService 의 CALL 그룹이 정한다(2026-11-06).** Pleos 에뮬레이터 실측: 앱 수신 게인 100%·`STREAM_VOICE_CALL` 5/5 최대인데도 폰→차 소리가 운전 중 듣기엔 작았다. 원인은 그 아래 차량 오디오 서비스의 볼륨 그룹 게인으로, CALL 그룹(`bus4_call_out`)이 기본 −25 dB(45단계 중 20)였다(`dumpsys car_service` 의 `Gain indexes`). 이 값은 앱이 못 쓰고 하드웨어 음량 키로만 움직이며, 통화 중 VOLUME_UP 을 보내면 CALL 그룹만 올라간다(MUSIC 그룹 불변). 25번 보내 45(0 dB)로 올리자 앱 변경 없이 "적당" 판정(태곤 님). 결정: 차에는 추가 게인을 얹지 않는다(휠 음량을 올렸을 때 깨질 수 있음). 시연 전 `app/tool/pleos_call_volume.sh` 로 올린다. 실차의 기본 CALL 음량은 OEM 값이라 확인 필요.
+**차량 통화 음량은 CarAudioService 의 CALL 그룹이 정한다(2026-11-06).** Pleos 에뮬레이터 실측: 앱 수신 게인 100%·`STREAM_VOICE_CALL` 5/5 최대인데도 폰→차 소리가 운전 중 듣기엔 작았다. 원인은 그 아래 차량 오디오 서비스의 볼륨 그룹 게인으로, CALL 그룹(`bus4_call_out`)이 기본 −25 dB(45단계 중 20)였다(`dumpsys car_service` 의 `Gain indexes`). 이 값은 앱이 못 쓰고 하드웨어 음량 키로만 움직이며, 통화 중 VOLUME_UP 을 보내면 CALL 그룹만 올라간다(MUSIC 그룹 불변). 25번 보내 45(0 dB)로 올리자 앱 변경 없이 "적당" 판정(대표). 결정: 차에는 추가 게인을 얹지 않는다(휠 음량을 올렸을 때 깨질 수 있음). 시연 전 `app/tool/pleos_call_volume.sh` 로 올린다. 실차의 기본 CALL 음량은 OEM 값이라 확인 필요.
 
 **서버(Lightsail nano) 먹통 2건과 조치(2026-11-06).** 1차 15:56~16:07 KST: 우분투 자동 업데이트(`apt-daily-upgrade`, unattended-upgrades 메모리 피크 147 MB)와 fwupd 가 RAM 412 MB·스왑 0 인 VM 에서 같이 돌아 OOM·스래싱(부하 16~18). HTTPS·SSH·TURN 전부 무응답이었고 OOM 킬러가 두 번 죽인 뒤 돌아왔다. 우나보 서비스는 재시작 0회로 살아 있었다. 2차 16:42~21:30: 1차 스래싱 중 `systemd-networkd` 가 `ens5: Could not set route: Connection timed out → ens5: Failed` 로 인터페이스 관리를 포기해 DHCP 갱신이 멈췄고, 임대가 끝난 16:42 에 주소와 기본 경로가 사라졌다. OS 는 살아서 저널을 계속 썼지만(ssm-agent "network is unreachable") 네트워크만 죽어 상태 점검이 실패했고, 재부팅으로 복구했다. 저널을 보면 fwupd 가 11/3 부터 매시간 ~145 MB 를 할당하다 OOM 으로 죽기를 수십 번 반복한 만성 압박이 깔려 있었다. 조치(결정 2 = A+B, `server/deploy/lightsail/harden.sh`): apt 타이머 2개 disable, `fwupd-refresh` mask, 1 GB 스왑 파일(fstab). 앱에서는 설계대로 SSE 끊김 배너가 떴고, 요청 타임아웃은 Dart `Future.timeout` 기본 문구 "Future not completed" 로 보였다(사용자 문구로 바꿀 항목).
 
@@ -132,7 +134,7 @@ Android SDK는 min 28 / target 34 / compile 37이다. 모든 Flutter 화면은 �
 
 **offer 시한과 돌아온 쪽의 재제안.** `meshOfferTimeout = 8초` 안에 answer 가 없으면 피어를 닫고 새 negotiationId 로 재오퍼(간격 8·16·24초, 최대 3회, 56초에 종단 실패). `MeshCoordinator.reconcile(members)` 는 살아 있는 피어도 진행 중 협상도 없는 상대에게 **새 멤버 규칙과 무관하게** offer 를 보낸다. `RoomSession` 은 SSE 재접속 뒤 `Hello`·`Reconnected` 에서 이미 미디어에 참여한 경우 `mediaEngine.reconcilePeers()` 를 부른다. 11/9 실측(상대 SSE 가 내려간 사이 보낸 offer 유실 → 양쪽 영구 대기)의 수정이다. 글레어는 기존 규칙(사전순으로 작은 handle 이 자기 offer 유지·재전송)대로.
 
-**복귀 정책(태곤 님 결정 11/9).** 프로세스가 살아 있는 채 통신만 끊겼다 돌아오면(터널) 같은 방에 자동 재입장하고 통화를 잇는다(위 reconcile). 앱을 **새로 켠 경우**(사용자가 끈 것이든 시스템이 죽인 것이든)는 메인 화면에 머물고 마이크·통화를 자동으로 켜지 않는다. `restoreSession` 은 `/v1/me` 를 읽어 `RoomSession.restorableRoom` 에 두고, 폰 방 목록·차 대시보드가 "참여 중인 방" 카드(방 이름·코드 + 입장 아이콘) 한 장을 보여 준다. 카드 탭 → 기존 입장 경로(`open` → hello → 자동 통화). `AppServices.initialize()` 의 네이티브 통화 상태 기반 자동 open 도 제거했다.
+**복귀 정책(대표 결정 11/9).** 프로세스가 살아 있는 채 통신만 끊겼다 돌아오면(터널) 같은 방에 자동 재입장하고 통화를 잇는다(위 reconcile). 앱을 **새로 켠 경우**(사용자가 끈 것이든 시스템이 죽인 것이든)는 메인 화면에 머물고 마이크·통화를 자동으로 켜지 않는다. `restoreSession` 은 `/v1/me` 를 읽어 `RoomSession.restorableRoom` 에 두고, 폰 방 목록·차 대시보드가 "참여 중인 방" 카드(방 이름·코드 + 입장 아이콘) 한 장을 보여 준다. 카드 탭 → 기존 입장 경로(`open` → hello → 자동 통화). `AppServices.initialize()` 의 네이티브 통화 상태 기반 자동 open 도 제거했다.
 
 **수신 이득 상한 100%.** libwebrtc 는 수신 볼륨을 saturated cast 로 곱하므로 ×2.0 이면 −6 dBFS 위 샘플이 전부 잘리고, 차 송신 피크는 0 dBFS 로 실측됐다. `callVolume` 0~100(저장값 200 은 읽을 때 100), 슬라이더 max 100, 엔진 `_playbackVolume ≤ 1.0`. 소리 크기는 출력 경로(스피커/수화부) 결함을 고쳐 확보한다(묶음 2).
 
@@ -286,7 +288,7 @@ NAVER 로고는 왼쪽 아래에 상시 유지하고 플로팅 바 여백을 확
 검사·빌드 예시:
 
 ```sh
-cd /Users/rlaxorhs77/Desktop/HD-app/app
+cd app
 flutter analyze --no-pub
 flutter test --no-pub test/map_provider_test.dart test/naver_room_map_test.dart test/room_map_test.dart test/f2_layout_test.dart test/room_speaking_test.dart test/session_restore_widget_test.dart test/ios_audio_channel_test.dart
 flutter test --no-pub
@@ -395,7 +397,7 @@ hello는 `{self,members,leader,positions,trails,revision,followTarget,pendingFol
 
 **빌드 때 기본 서버 주소.** `SessionStore`의 기본 주소는 생성자 인자 `defaultBaseUrl` > `--dart-define=UNAVO_SERVER_URL=<주소>`(앞뒤 공백 제거 후 비어 있지 않을 때) > 플랫폼 기본값(iOS `http://127.0.0.1:8787`, 그 외 `http://10.0.2.2:8787`) 순이다(`resolveDefaultBaseUrl`). 사용자가 설정에서 저장한 주소가 기본값보다 우선인 규칙은 그대로다. 접수 APK는 심사 환경에서 주소를 손으로 바꾸지 않도록 공개 테스트 서버를 이 값으로 넣어 빌드한다.
 
-접수 빌드 명령(arm64-v8a·x86_64 포함, 약 134 MB라 GitHub 파일 한도 100 MB를 넘어 Releases에 올린다):
+접수 빌드 명령(arm64-v8a·x86_64 포함, 약 146 MB라 GitHub 파일 한도 100 MB를 넘어 Releases에 올린다):
 
 ```sh
 cd app
@@ -404,7 +406,7 @@ flutter build apk --release --no-pub --dart-define-from-file=<지도 키 JSON> -
 
 ## 19. 차량 화면 가로 배치(C1·C1b·C3, 2026-11-13)
 
-**지시 원문 요지·적용 범위.** 태곤 님의 “홈화면이면 좌측 패널이 주 패널이 되어 화면 전체를”, “보조패널은 설정창으로”, “첫실행부터 … 로그인 카드 섹션이 세로”라는 지시에 따라 차량 모드의 화면을 전체 폭과 가로 배치로 바꾼다. 기준은 Pleos Connect 2560×1440·160dpi, 앱 가용 영역 약 1706×1206dp다. 이 절은 §13·§15·§16·§17의 **차량 보조 패널과 차량 배치** 설명을 갱신한다. 폰의 화면·키·동작, §14의 동의 규칙, 지도:통화 7:3 결정은 유지한다.
+**지시 원문 요지·적용 범위.** 대표의 “홈화면이면 좌측 패널이 주 패널이 되어 화면 전체를”, “보조패널은 설정창으로”, “첫실행부터 … 로그인 카드 섹션이 세로”라는 지시에 따라 차량 모드의 화면을 전체 폭과 가로 배치로 바꾼다. 기준은 Pleos Connect 2560×1440·160dpi, 앱 가용 영역 약 1706×1206dp다. 이 절은 §13·§15·§16·§17의 **차량 보조 패널과 차량 배치** 설명을 갱신한다. 폰의 화면·키·동작, §14의 동의 규칙, 지도:통화 7:3 결정은 유지한다.
 
 | 구분 | 차량 화면 구조 |
 |---|---|

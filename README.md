@@ -16,7 +16,7 @@
 
 ## APK 파일 위치
 
-- GitHub Release: <https://github.com/VitAlGuard-jodal/HD-app/releases/tag/v0.2.0> — `UnaVo_Unavo_release.apk` (이전 판 v0.1.0 도 Releases 에 남아 있습니다)
+- GitHub Release: <https://github.com/VitAlGuard-jodal/HD-app/releases/tag/v0.2.1> — `UnaVo_Unavo_release.apk` (이전 판 v0.2.0·v0.1.0 도 Releases 에 남아 있습니다)
 - release 키로 서명했고 arm64-v8a·x86_64 네이티브 라이브러리를 함께 담아 약 146 MB입니다. 저장소 파일 한도(100 MB)를 넘어 Releases에 올렸으며, [`apk/README.md`](apk/README.md)에 같은 링크와 SHA-256이 있습니다.
 - 공개 테스트 서버가 기본 주소로 들어 있어 설치 뒤 설정 없이 가입·로그인할 수 있습니다.
 
@@ -31,6 +31,18 @@
 5. 상대의 멤버 카드를 눌러 따라가기를 요청합니다(양쪽 모두 위치 공유 동의 필요). 에뮬레이터 위치는 Extended Controls → Location에서 지정합니다.
    - 합류 지점 따라가기: 따라오는 차가 있는 그룹장 지도에서 위쪽 지도 버튼 → ＋ → 목적지(지도 길게 누르기 또는 주소) → ☆ 추천 → 기다리기/먼저 가기 → 확정. 따라오는 차는 지도 오른쪽 경로 버튼으로 참여합니다.
 6. 주행 잠금은 에뮬레이터 차량 신호(Virtual Console)에서 기어 D·차속을 주면 걸리고, P로 바꾸면 풀립니다.
+
+### 에뮬레이터 두 대로 시험할 때(통화·따라가기)
+
+통화와 따라가기는 기기 두 대가 필요합니다. 에뮬레이터 두 대, 또는 에뮬레이터 한 대와 안드로이드 폰 한 대로 시험합니다.
+
+- 실행 옵션: `-allow-host-audio` 를 꼭 줍니다. 없으면 에뮬레이터 마이크 입력이 0으로 채워져 상대에게 소리가 가지 않습니다.
+- 같은 AVD 두 대: 둘 다 `-read-only` 로 띄웁니다. 아니면 두 번째가 "Another emulator instance is running" 으로 곧 꺼집니다(AVD 를 두 개 만들면 필요 없음).
+  - 예: `emulator -avd Pleos_Connect_v2_1_0 -port 5554 -read-only -allow-host-audio`, 두 번째는 `-port 5556`.
+- 두 대가 같은 PC 의 마이크·스피커를 쓰므로 되울림이 생길 수 있습니다. 한쪽 마이크를 끄거나 이어폰을 씁니다.
+- 차량 통화 음량: Pleos 에뮬레이터의 차량 CALL 음량 그룹 기본값이 낮습니다(−25 dB). 통화 중 음량 키를 올리거나 `sh app/tool/pleos_call_volume.sh emulator-5554` 를 실행합니다.
+- 위치 이동: Extended Controls → Location 에서 지점을 찍거나 경로(Routes)를 재생합니다. 명령으로는 `adb -s emulator-5554 emu geo fix <경도> <위도>` 입니다.
+- 차량 신호(Virtual Console): `adb -s emulator-5556 forward tcp:8089 tcp:8088` 뒤 브라우저로 `http://127.0.0.1:8089` 를 엽니다. 기어·차속·문 상태를 바꿀 수 있습니다.
 
 ### 소스에서 빌드
 
@@ -68,11 +80,11 @@ cd server && node --test "test/unit/*.test.ts" "test/http/*.test.ts"
 
 ## 테스트 환경과 필요한 설정
 
-- 서버: 공개 테스트 서버 `https://unavo-dev.kimtaegon.kr`(APK 기본값). AWS 서울 리전(Lightsail)에서 Caddy(HTTPS)와 coturn(TURN)으로 운영합니다.
+- 서버: 공개 테스트 서버(APK 에 기본 주소로 들어 있음). AWS 서울 리전(Lightsail)에서 Caddy(HTTPS)와 coturn(TURN)으로 운영합니다.
 - 권한: 마이크(통화), 위치(따라가기, 켤 때마다 동의), 알림(통화·위치 공유 유지 알림).
 - 차량/폰 판별: 앱 시작 때 `android.hardware.type.automotive` 기능 유무로 정합니다. 같은 APK를 폰에 설치하면 폰 화면으로 동작합니다.
 - 검증한 기기: Pleos Connect 에뮬레이터 두 대(아래 규격, GPS 재생)와 iPhone 12(같은 코드의 iOS 빌드). 따라가기 두 방식과 회색 재합류는 에뮬레이터 두 대로 확인했습니다.
-- 자동 테스트: 앱 969건, 서버 420건.
+- 자동 테스트: 앱 991건, 서버 420건.
 
 ## 개발에 사용한 Pleos Connect 에뮬레이터 버전과 화면 규격
 
@@ -91,12 +103,12 @@ cd server && node --test "test/unit/*.test.ts" "test/http/*.test.ts"
 |---|---|
 | `app/` | Flutter 앱(차량·폰 공용). `lib/` 화면·통화·위치, `android/` Kotlin 플랫폼 채널(기기 판별·오디오 경로·통화 유지 서비스·주행 상태·차량 위치·TTS·차량 문/기어, Pleos SDK TextToSpeech 3.3.1·FusedLocation 1.1.3·Vehicle 2.3.2), `ios/` |
 | `server/` | Node.js 서버: 계정·친구·통화 방·동의 기록, SSE 시그널링·위치·합류 계획 이벤트, TURN 자격 발급, 네이버 경로·주소 검색 중계(호출 수 제한, 응답 저장 안 함) |
-| `docs/ARCHITECTURE.md` | 설계 문서(정본) |
+| `docs/ARCHITECTURE.md` | 설계 기록(개발 중 결정·실측. 앞쪽 일부 절은 당시 상태) |
 | `apk/` | APK 안내(Release 링크·SHA-256) |
 | `licenses/` | 번들한 서체·라이브러리 라이선스 |
 | `android/` | 초기 Compose 시제품(현재 앱에서 쓰지 않음) |
 
-## 서체와 라이선스
+## 서체·아이콘·그림과 라이선스
 
 - 앱은 OFL(SIL Open Font License 1.1) 서체 두 종을 `app/assets/fonts/`에 번들합니다. 라이선스 원문은 `licenses/fonts/<서체>/OFL.txt`에 있습니다.
 
@@ -107,4 +119,7 @@ cd server && node --test "test/unit/*.test.ts" "test/http/*.test.ts"
 
 - 배경 그림의 「Una Vox」 글자는 Pirata One(OFL)으로 그린 뒤 그림으로 구웠으며 서체 파일은 번들하지 않습니다.
 - 잡음 제거 실험 플러그인(`app/packages/unavo_noise`, 기본 꺼짐)은 RNNoise를 포함하며 라이선스는 `licenses/rnnoise/`에 있습니다.
-- 그 밖의 Flutter 패키지는 `app/pubspec.yaml`을 따릅니다.
+- 아이콘 일부는 Tabler Icons(MIT)를 `app/assets/icons/`에 번들하며 라이선스 원문은 `app/assets/icons/LICENSE-tabler-icons.txt`에 있습니다.
+- 앱 마스코트·배경 그림과 시연 영상의 가족 장면은 팀이 AI 이미지·영상 생성으로 만든 뒤 다듬었습니다.
+- 그 밖의 Flutter 패키지는 `app/pubspec.yaml`을 따르며, 앱의 설정 → 「지도 출처」 → 「패키지 라이선스」 화면에서 볼 수 있습니다.
+- 패키지 이름 `kr.modumoa.hdapp`의 `modumoa`는 초기 작업명입니다.

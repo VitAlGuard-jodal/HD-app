@@ -1,7 +1,7 @@
 # Lightsail 배포 (unavo-dev)
 
-- VM: AWS Lightsail 서울, Ubuntu 24.04, 5달러 플랜(nano_3_0), 고정 IP 15.164.140.33
-- 도메인: https://unavo-dev.kimtaegon.kr (Cloudflare DNS, 프록시 끔 → Caddy 가 Let's Encrypt 자동 발급)
+- VM: AWS Lightsail 서울, Ubuntu 24.04, 5달러 플랜(nano_3_0), 고정 IP(값은 레포 밖에 둠)
+- 도메인: 공개 테스트 서버 도메인(값은 레포 밖에 둠, Cloudflare DNS, 프록시 끔 → Caddy 가 Let's Encrypt 자동 발급)
 - 구성: Caddy(443) → 127.0.0.1:8787 Node 서버(systemd `unavo`, 사용자 `unavo`), DB `/var/lib/unavo/unavo.sqlite`
 
 ```

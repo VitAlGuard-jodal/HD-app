@@ -1,5 +1,7 @@
 # 우나보 Flutter 앱
 
+> 초기(10/29 F1) 작업 메모입니다. 채널 수·테스트 안내 등 일부는 그 뒤 바뀌었습니다. 현재 구조는 저장소 README 와 `docs/ARCHITECTURE.md` 를 보세요.
+
 Flutter 3.47.4 stable 기반의 단일 Android/iOS 프로젝트다. Android 패키지와 iOS 앱 bundle ID는 `kr.modumoa.hdapp`이다. Android는 minSdk 28, targetSdk 34, compileSdk 37을 사용한다.
 
 `lib/main.dart`에서 세션을 복원하고 표지 → 로그인/가입 → 방·친구·마이크 탭으로 이동한다. `unavo/device`의 automotive 기능 플래그가 true이면 같은 화면을 `CarShell`로 감싼다. Android/iOS의 기본 음성 엔진은 `flutter_webrtc 1.6.3`을 사용하는 `WebRtcMediaEngine`이다. `NoopMediaEngine`은 테스트 주입과 미지원 플랫폼에 남겨 둔다.
