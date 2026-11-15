@@ -16,7 +16,7 @@
 
 ## APK 파일 위치
 
-- GitHub Release: <https://github.com/VitAlGuard-jodal/HD-app/releases/tag/v0.2.1> — `UnaVo_Unavo_release.apk` (이전 판 v0.2.0·v0.1.0 도 Releases 에 남아 있습니다)
+- GitHub Release: <https://github.com/VitAlGuard-jodal/HD-app/releases/tag/v0.2.2> — `UnaVo_Unavo_release.apk` (이전 판 v0.2.1·v0.2.0·v0.1.0 도 Releases 에 남아 있습니다)
 - release 키로 서명했고 arm64-v8a·x86_64 네이티브 라이브러리를 함께 담아 약 146 MB입니다. 저장소 파일 한도(100 MB)를 넘어 Releases에 올렸으며, [`apk/README.md`](apk/README.md)에 같은 링크와 SHA-256이 있습니다.
 - 공개 테스트 서버가 기본 주소로 들어 있어 설치 뒤 설정 없이 가입·로그인할 수 있습니다.
 
@@ -84,7 +84,7 @@ cd server && node --test "test/unit/*.test.ts" "test/http/*.test.ts"
 - 권한: 마이크(통화), 위치(따라가기, 켤 때마다 동의), 알림(통화·위치 공유 유지 알림).
 - 차량/폰 판별: 앱 시작 때 `android.hardware.type.automotive` 기능 유무로 정합니다. 같은 APK를 폰에 설치하면 폰 화면으로 동작합니다.
 - 검증한 기기: Pleos Connect 에뮬레이터 두 대(아래 규격, GPS 재생)와 iPhone 12(같은 코드의 iOS 빌드). 따라가기 두 방식과 회색 재합류는 에뮬레이터 두 대로 확인했습니다.
-- 자동 테스트: 앱 991건, 서버 420건.
+- 자동 테스트: 앱 1,004건, 서버 420건.
 
 ## 개발에 사용한 Pleos Connect 에뮬레이터 버전과 화면 규격
 
